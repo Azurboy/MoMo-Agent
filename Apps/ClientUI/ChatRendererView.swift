@@ -46,6 +46,7 @@ struct ChatRendererView: View {
             }
         }
         .background(MoMoPalette.canvas)
+        .phoneSoftTopEdge()
         .onChange(of: snapshot.sessionID) { renderingFailed = false }
         .onChange(of: scenePhase) {
             if scenePhase == .active, renderingFailed { rendererReady = false; renderingFailed = false }
@@ -198,6 +199,7 @@ private struct ChatWebSurface: ChatWebRepresentable {
         web.scrollView.contentInsetAdjustmentBehavior = .never
         web.scrollView.keyboardDismissMode = .interactive
         web.scrollView.alwaysBounceVertical = true
+        if #available(iOS 26, *) { web.scrollView.topEdgeEffect.style = .soft }
         let dismissKeyboard = UIPanGestureRecognizer(target: context.coordinator, action: #selector(ChatWebCoordinator.dismissKeyboardOnDrag(_:)))
         dismissKeyboard.delegate = context.coordinator
         dismissKeyboard.cancelsTouchesInView = false
