@@ -51,6 +51,10 @@ with tempfile.TemporaryDirectory(prefix='momo-cold-setup-') as temp:
     after = {str(p.relative_to(data)): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in data.rglob('*') if p.is_file()}
     assert before == after, 'Setup altered existing identity or config'
+    # Looking up the model may create a Hermes config backup. Existing files must stay intact.
+    run(str(script.with_name('model_setup.py')), 'status', '--provider', 'codex', '--data-dir', str(data))
+    assert all(hashlib.sha256((data / name).read_bytes()).hexdigest() == digest
+               for name, digest in before.items()), 'Model lookup altered existing identity or config'
     assert not (data / 'runtime/venv').exists(), 'Setup rebuilt a user environment'
 subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
 print(json.dumps({'version': info['CFBundleShortVersionString'], 'build': info['CFBundleVersion'],

@@ -626,6 +626,7 @@ final class DesktopModel {
         refreshing = true; defer { refreshing = false }
         do {
             status = try await controlRequest("status")
+            restorePairedInstallationIfNeeded()
             if !shuttingDown, busy == nil, UserDefaults.standard.bool(forKey: resumeKey),
                status?.agentOnline != true, agentProcess?.isRunning != true,
                Date().timeIntervalSince(lastAgentLaunchAttempt) >= 6 {
@@ -659,6 +660,22 @@ final class DesktopModel {
             if !shuttingDown, isPrepared, accessProcess?.isRunning != true {
                 try? startAccess()
             }
+        }
+    }
+
+    private func restorePairedInstallationIfNeeded() {
+        guard hasPairedPhone else { return }
+        let defaults = UserDefaults.standard
+        // An explicit stop always wins. Older installs may have only the data directory.
+        if defaults.object(forKey: resumeKey) == nil,
+           let config = Self.readModelConfiguration(from: dataDirectory.appendingPathComponent("hermes/config.yaml")),
+           let provider = config["provider"], !provider.isEmpty,
+           let model = config["default"], !model.isEmpty {
+            defaults.set(true, forKey: resumeKey)
+        }
+        let setupKey = "setup." + dataDirectory.path
+        if defaults.object(forKey: setupKey) == nil, status?.agentOnline == true {
+            advanceSetup(.completed)
         }
     }
 
