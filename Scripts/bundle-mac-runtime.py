@@ -30,7 +30,8 @@ def run(*args, **kwargs):
 
 def copy_sources(destination):
     paths = run('git', '-C', ROOT, 'ls-files', '-z', 'Apps/MacApp/Runtime', 'Apps/MacApp/Access',
-                'Apps/MacApp/Context', 'Vendor/HermesAgent', 'Vendor/HermesAgent.UPSTREAM.json', capture_output=True).stdout
+                'Apps/MacApp/Context', 'Vendor/HermesAgent', 'Vendor/HermesAgent.UPSTREAM.json',
+                'Vendor/SuperAgent', 'Vendor/SuperAgent.UPSTREAM.json', capture_output=True).stdout
     for raw in paths.split(b'\0'):
         if not raw:
             continue

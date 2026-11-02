@@ -1,4 +1,4 @@
-"""Check a signed Mac bundle's cold setup without network or developer tools."""
+"""Check bundled engine payloads and Hermes cold setup without network or developer tools."""
 import argparse
 import hashlib
 import json
@@ -36,6 +36,10 @@ with tempfile.TemporaryDirectory(prefix='momo-cold-setup-') as temp:
         subprocess.run(prefix + list(arguments), env=environment, cwd=temp, check=True,
                        stdout=subprocess.DEVNULL, timeout=90)
     run(str(script), 'init', '--data-dir', str(data), '--port', '19870')
+    # SuperAgent uses a separately prepared Node runner; Hermes is the offline Python path.
+    run(str(script), 'engine', '--data-dir', str(data), '--set', 'hermes')
+    run('-c', 'import sys; sys.path.insert(0, ' + repr(str(script.parent)) +
+        '); from superagent_runtime import superagent_fingerprint; assert superagent_fingerprint()["bundle_sha256"]')
     before = {str(p.relative_to(data)): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in data.rglob('*') if p.is_file()}
     run(str(script), 'prepare', '--data-dir', str(data))
@@ -49,5 +53,6 @@ with tempfile.TemporaryDirectory(prefix='momo-cold-setup-') as temp:
     assert not (data / 'runtime/venv').exists(), 'Setup rebuilt a user environment'
 subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
 print(json.dumps({'version': info['CFBundleShortVersionString'], 'build': info['CFBundleVersion'],
-                  'cold_setup_without_network': True, 'developer_tools_not_required': True,
+                  'hermes_cold_setup_without_network': True, 'hermes_developer_tools_not_required': True,
+                  'superagent_payload_verified': True,
                   'identity_preserved_on_repeat': True, 'bundle_signature_preserved': True}))
