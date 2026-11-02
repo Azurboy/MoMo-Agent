@@ -1711,12 +1711,14 @@ int MoMoAnalyzeSpeakersWithProfiles(
       if (label >= 1 && label <= rescue_track &&
           end - start >= split_trigger_samples) {
         const float two_sided_ceil = is_eres2net ? 0.64f : 0.82f;
-        const float probe_min_sim = is_eres2net ? 0.56f : 0.75f;
-        // Fast pre-check: if a segmented turn has stable loudness and 2-4
+        const float turn_rms_ratio = active_rms_step_ratio(start, end);
+        const float probe_min_sim =
+            is_eres2net ? (turn_rms_ratio >= 2.5f ? 0.61f : 0.56f) : 0.75f;
+        // Fast pre-check: if a segmented turn has bounded loudness variation and 2-4
         // non-overlapping sub-parts agree acoustically with zero enrolled
         // speaker dropoff, skip the 0.40 s sliding wing scan AND reuse the
         // pooled embedding directly.
-        if (active_rms_step_ratio(start, end) < 2.5f) {
+        if (turn_rms_ratio < 4.2f) {
           auto pre_clean = collect_exclusive_spans(label, start, end);
           int pre_clean_n = 0;
           for (const auto &[cs, ce] : pre_clean) pre_clean_n += (ce - cs);

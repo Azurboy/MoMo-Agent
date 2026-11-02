@@ -49,6 +49,11 @@ inline char *DupCString(const std::string &s) {
 }
 
 inline float HalfBitsToFloat(uint16_t h) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  __fp16 fh;
+  std::memcpy(&fh, &h, sizeof(fh));
+  return static_cast<float>(fh);
+#else
   uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
   uint32_t exp = (h >> 10) & 0x1Fu;
   uint32_t mant = h & 0x03FFu;
@@ -73,6 +78,20 @@ inline float HalfBitsToFloat(uint16_t h) {
   float f = 0.0f;
   std::memcpy(&f, &bits, sizeof(float));
   return f;
+#endif
+}
+
+inline void ConvertHalfToFloatRaw(const uint16_t *src, float *dst, size_t n) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  const __fp16 *h = reinterpret_cast<const __fp16 *>(src);
+  for (size_t i = 0; i < n; ++i) {
+    dst[i] = static_cast<float>(h[i]);
+  }
+#else
+  for (size_t i = 0; i < n; ++i) {
+    dst[i] = HalfBitsToFloat(src[i]);
+  }
+#endif
 }
 
 inline uint16_t FloatToHalfBits(float f) {
@@ -1286,6 +1305,7 @@ struct MoMoFunASRNanoRuntime {
   std::vector<std::vector<uint8_t>> delta_k_bytes;
   std::vector<std::vector<uint8_t>> delta_v_bytes;
   std::vector<float> decode_logits;
+  size_t dirty_kv_len = 0;
 
   KaldiFbankFrontend frontend;
   std::unique_ptr<Qwen3Tokenizer> tokenizer;
@@ -1658,10 +1678,13 @@ int MoMoTranscribeFunASRNano(
     kv_delta_tensors.reserve(static_cast<size_t>(runtime->num_layers) * 2);
 
     for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
-      std::memset(runtime->cache_k_bytes[l].data(), 0,
-                  runtime->cache_k_bytes[l].size());
-      std::memset(runtime->cache_v_bytes[l].data(), 0,
-                  runtime->cache_v_bytes[l].size());
+      const size_t zero_bytes =
+          std::min(runtime->cache_k_bytes[l].size(),
+                   runtime->dirty_kv_len * bytes_per_pos);
+      if (zero_bytes > 0) {
+        std::memset(runtime->cache_k_bytes[l].data(), 0, zero_bytes);
+        std::memset(runtime->cache_v_bytes[l].data(), 0, zero_bytes);
+      }
       kv_cache_tensors.push_back(Ort::Value::CreateTensor(
           runtime->cpu_mem, runtime->cache_k_bytes[l].data(),
           runtime->cache_k_bytes[l].size(), kv_cache_shape.data(),
@@ -1679,6 +1702,7 @@ int MoMoTranscribeFunASRNano(
           runtime->delta_v_bytes[l].size(), kv_delta_shape.data(),
           kv_delta_shape.size(), runtime->kv_type));
     }
+    runtime->dirty_kv_len = static_cast<size_t>(runtime->max_total_len);
 
     std::array<int64_t, 3> decode_logits_shape{
         1, 1, static_cast<int64_t>(runtime->vocab_size)};
@@ -1761,9 +1785,7 @@ int MoMoTranscribeFunASRNano(
             static_cast<size_t>(seq_out - 1) * static_cast<size_t>(vocab_out);
         if (log_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
           const uint16_t *p = outs[0].GetTensorData<uint16_t>() + last_off;
-          for (size_t v = 0; v < step_logits.size(); ++v) {
-            step_logits[v] = HalfBitsToFloat(p[v]);
-          }
+          ConvertHalfToFloatRaw(p, step_logits.data(), step_logits.size());
         } else {
           const float *p = outs[0].GetTensorData<float>() + last_off;
           std::memcpy(step_logits.data(), p,
@@ -1907,6 +1929,9 @@ int MoMoTranscribeFunASRNano(
       if (!found || best_id == eos_id || best_id == im_end_id) break;
       generated_ids.push_back(best_id);
     }
+    runtime->dirty_kv_len =
+        std::min<size_t>(static_cast<size_t>(runtime->max_total_len),
+                         static_cast<size_t>(valid_len) + 1);
 
     CheckCancel(is_cancelled, cancel_context);
 
