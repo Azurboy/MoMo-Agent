@@ -5,6 +5,7 @@ import Testing
 @Test(arguments: SpeechLanguage.allCases)
 func languageSelectionMatchesModelCapabilities(language: SpeechLanguage) throws {
     #expect(SpeechModelChoice.senseVoice.supports(language))
+    #expect(SpeechModelChoice.funASRNanoCoreML.supports(language))
     #expect(SpeechModelChoice.funASRNano.supports(language) == (language != .korean))
     #expect(SpeechModelChoice.xASR.supports(language) == [.automatic, .mandarin, .english].contains(language))
     #expect(SherpaRuntime.nanoLanguage(.automatic).isEmpty)
@@ -48,4 +49,14 @@ func languageSelectionMatchesModelCapabilities(language: SpeechLanguage) throws 
     try engine.setRecognitionLanguage(.english)
     #expect(throws: SpeechModelSelectionError.unsupportedLanguage) { try engine.setRecognitionLanguage(.japanese) }
     #expect(engine.recognitionLanguage == .english)
+
+    let funCoreMLDownload = DownloadedSpeechModel(directory: URL(fileURLWithPath: "/unused"), catalog: try .funASRNanoCoreML())
+    let funCoreMLEngine = try SpeechEngine(bundle: bundle, configuration: SpeechConfiguration(),
+        recognitionBackend: .sherpaCoreML, downloadedModel: funCoreMLDownload)
+    #expect(funCoreMLEngine.recognitionModel == .funASRNanoCoreML)
+    #expect(funCoreMLEngine.archiveBatchSize == 2)
+    for language in SpeechLanguage.allCases {
+        try funCoreMLEngine.setRecognitionLanguage(language)
+        #expect(funCoreMLEngine.recognitionLanguage == language)
+    }
 }

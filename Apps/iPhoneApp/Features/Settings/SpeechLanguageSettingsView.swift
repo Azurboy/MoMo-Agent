@@ -35,10 +35,10 @@ struct SpeechLanguageSettingsView: View {
                 Text("用于新转录，已有文字保留。")
                     .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                 if settings.models.choice == .funASRNano {
-                    Text("FunASR 不支持韩语；需要识别韩语时，请使用 SenseVoice。")
+                    Text("FunASR Nano 不支持韩语；需要识别韩语时，请使用 SenseVoice 或 FunASR (CoreML)。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                 } else if settings.models.choice == .xASR {
-                    Text("X-ASR 只识别中文和英文；需要粤语、日语或韩语时，请使用 SenseVoice。")
+                    Text("X-ASR 只识别中文和英文；需要粤语、日语或韩语时，请使用 SenseVoice 或 FunASR (CoreML)。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                 }
                 if let failure = settings.failure {

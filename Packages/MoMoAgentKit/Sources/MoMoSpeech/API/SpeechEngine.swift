@@ -107,8 +107,13 @@ public final class SpeechEngine: @unchecked Sendable {
 
     public var recognitionLanguage: SpeechLanguage { selection.withLock { $0.language } }
     public var recognitionModel: SpeechModelChoice { selection.withLock { $0.download?.model ?? .senseVoice } }
-    /// Bounds peak encoder memory. Nano's unchanged encoder accepts batch=1; X-ASR decodes one window at a time on CPU.
-    public var archiveBatchSize: Int { recognitionModel == .senseVoice ? 2 : 1 }
+    /// Bounds peak encoder memory. SenseVoice and FunASR CoreML CTC encoders run batch=2; LLM Nano and CPU X-ASR decode batch=1.
+    public var archiveBatchSize: Int {
+        switch recognitionModel {
+        case .senseVoice, .funASRNanoCoreML: 2
+        case .funASRNano, .xASR: 1
+        }
+    }
 
     public func archiveText(_ result: SpeechRecognition, window: SpeechWindow,
                             after previous: (result: SpeechRecognition, window: SpeechWindow)? = nil) -> String {
@@ -965,8 +970,10 @@ public final class SpeechEngine: @unchecked Sendable {
         // Read the model and language together at the recognition boundary.
         let selected = selection.withLock { $0 }
         let download = selected.download, language = selected.language
+        let model = download?.model ?? .senseVoice
         let targetThreads = effectiveCPUThreads
-        let cpuBoundASR = download != nil || recognitionBackend != .sherpaCoreML
+        let usesCoreML = recognitionBackend == .sherpaCoreML && (model == .senseVoice || model == .funASRNanoCoreML)
+        let cpuBoundASR = !usesCoreML
         if let runtime, runtimeDownload == download, (!cpuBoundASR || runtimeCPUThreads == targetThreads) {
             if runtimeLanguage == language { return runtime }
             if download != nil, try runtime.updateLanguage(language) {

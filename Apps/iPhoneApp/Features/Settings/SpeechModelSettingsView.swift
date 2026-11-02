@@ -13,13 +13,18 @@ struct SpeechModelSettingsView: View {
                             .disabled(busy)
                     }
                 }
+                modelCard(.funASRNanoCoreML, subtitle: "神经网络引擎加速 · 方言与多语种抗噪") {
+                    Text("离线识别中文及 7 大方言、英文、日文、韩语等 31 种语言，针对远场与高噪环境深度优化。")
+                        .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                    download(.funASRNanoCoreML, use: "使用 FunASR (CoreML)")
+                }
                 modelCard(.xASR, subtitle: "中英混说更准、体积小") {
                     Text("离线识别普通话、英文及中英混说，带标点。不支持粤语、日语和韩语。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.xASR, use: "使用 X-ASR")
                 }
                 modelCard(.funASRNano, subtitle: "实验性 · CPU 大模型推理") {
-                    Text("离线识别中文及方言、英文、日文；运行 0.6B 语言模型，转写速度显著慢于 SenseVoice 且耗电更高。")
+                    Text("离线识别中文及方言、英文、日文；运行 0.6B 语言模型，转写速度显著慢于 CoreML 版本且耗电更高。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.funASRNano, use: "使用 FunASR Nano")
                 }
@@ -90,6 +95,7 @@ extension SpeechModelChoice {
     var title: String {
         switch self {
         case .senseVoice: "SenseVoice"
+        case .funASRNanoCoreML: "FunASR (CoreML)"
         case .funASRNano: "FunASR Nano"
         case .xASR: "X-ASR"
         }

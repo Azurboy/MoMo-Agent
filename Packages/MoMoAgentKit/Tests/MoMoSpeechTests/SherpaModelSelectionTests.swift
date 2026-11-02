@@ -13,6 +13,19 @@ import MoMoSherpaBridge
     #expect(catalog.files.allSatisfy { !$0.path.contains(".mlmodel") })
 }
 
+@Test func funASRNanoCoreMLCatalogPinsUpstreamFilesWithoutRequantization() throws {
+    let catalog = try DownloadableSpeechModel.funASRNanoCoreML()
+    #expect(catalog.files.map(\.path).sorted() == ["model.int8.onnx", "tokens.txt"])
+    #expect(catalog.files.contains { $0.path == "model.int8.onnx" && $0.byteCount == 263_531_902 })
+    #expect(catalog.files.contains { $0.path == "tokens.txt" && $0.byteCount == 939_815 })
+    #expect(catalog.baseURL.absoluteString.contains("ebb95fbda2a034d9a8f3b2d2cba32c104b60bed3"))
+    #expect(try SpeechModelChoice.funASRNanoCoreML.catalog() == catalog)
+    #expect(try catalog.revision != DownloadableSpeechModel.funASRNano().revision)
+    #expect(try catalog.revision != DownloadableSpeechModel.xASR().revision)
+    let unused = URL(fileURLWithPath: "/unused")
+    #expect(DownloadedSpeechModel(directory: unused, catalog: catalog).model == .funASRNanoCoreML)
+}
+
 @Test func xASRCatalogPinsUpstreamFilesWithoutRequantization() throws {
     let catalog = try DownloadableSpeechModel.xASR()
     #expect(catalog.files.map(\.path).sorted() == ["decoder-epoch-99-avg-1.onnx", "encoder-epoch-99-avg-1.int8.onnx",
@@ -81,11 +94,22 @@ import MoMoSherpaBridge
 
     let xASRProvider = try SherpaRuntime.provider(backend: .sherpaCoreML, revision: rev, model: .xASR, cacheRoot: root)
     #expect(xASRProvider.hasPrefix("cpu:"))
+    let xASRConfig = try String(contentsOf: URL(fileURLWithPath: String(xASRProvider.dropFirst("cpu:".count))), encoding: .utf8)
+    #expect(!xASRConfig.contains("ModelFormat="))
+    #expect(xASRConfig.contains("session.intra_op.allow_spinning=0"))
 
     let senseProvider = try SherpaRuntime.provider(backend: .sherpaCoreML, revision: rev, model: .senseVoice, cacheRoot: root)
     #expect(senseProvider.hasPrefix("coreml:"))
     let senseConfig = try String(contentsOf: URL(fileURLWithPath: String(senseProvider.dropFirst("coreml:".count))), encoding: .utf8)
+    #expect(senseConfig.contains("ModelFormat=MLProgram"))
     #expect(senseConfig.contains("RequireStaticInputShapes=1"))
+
+    let funASRCoreMLProvider = try SherpaRuntime.provider(backend: .sherpaCoreML, revision: rev, model: .funASRNanoCoreML, cacheRoot: root)
+    #expect(funASRCoreMLProvider.hasPrefix("coreml:"))
+    let funASRCoreMLConfig = try String(contentsOf: URL(fileURLWithPath: String(funASRCoreMLProvider.dropFirst("coreml:".count))), encoding: .utf8)
+    #expect(funASRCoreMLConfig.contains("ModelFormat=MLProgram"))
+    #expect(funASRCoreMLConfig.contains("MLComputeUnits=CPUAndNeuralEngine"))
+    #expect(funASRCoreMLConfig.contains("RequireStaticInputShapes=1"))
 }
 
 @Test func validationReceiptSurvivesVolumeDeviceNumberChangeWhileRejectingContentEdits() throws {

@@ -118,4 +118,20 @@ import MoMoSpeech
     #expect(PhoneSpeechModelSettings.restoredDownload(at: root, defaults: defaults)?.model == .xASR)
     defaults.set(SpeechLanguage.korean.rawValue, forKey: PhoneSpeechSettings.languageKey)
     #expect(PhoneSpeechModelSettings.restoredDownload(at: root, defaults: defaults) == nil)
+
+    // FunASR (CoreML) supports all languages including Korean and restores its verified download.
+    let funCoreMLCatalog = try DownloadableSpeechModel.funASRNanoCoreML()
+    #expect(settings.models.catalogs[.funASRNanoCoreML] == funCoreMLCatalog)
+    defaults.set(SpeechModelChoice.funASRNanoCoreML.rawValue, forKey: PhoneSpeechModelSettings.selectionKey)
+    let funCoreMLDir = root.appendingPathComponent(try funCoreMLCatalog.revision, isDirectory: true)
+    try FileManager.default.createDirectory(at: funCoreMLDir, withIntermediateDirectories: true)
+    for file in funCoreMLCatalog.files {
+        let url = funCoreMLDir.appendingPathComponent(file.path)
+        #expect(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(file.byteCount))
+        try handle.close()
+    }
+    try JSONEncoder().encode(funCoreMLCatalog).write(to: funCoreMLDir.appendingPathComponent("complete.json"))
+    #expect(PhoneSpeechModelSettings.restoredDownload(at: root, defaults: defaults)?.model == .funASRNanoCoreML)
 }

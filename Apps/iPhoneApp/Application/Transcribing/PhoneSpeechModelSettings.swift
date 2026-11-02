@@ -8,7 +8,7 @@ import MoMoSpeech
 @MainActor @Observable
 final class PhoneSpeechModelSettings {
     static let selectionKey = "speech.recognitionModel"
-    static let downloadable: [SpeechModelChoice] = [.funASRNano, .xASR]
+    static let downloadable: [SpeechModelChoice] = [.funASRNanoCoreML, .xASR, .funASRNano]
     private(set) var choice: SpeechModelChoice
     private(set) var installed: Set<SpeechModelChoice> = []
     private(set) var checking = false
@@ -43,6 +43,7 @@ final class PhoneSpeechModelSettings {
            saved != .senseVoice, choice != saved {
             failure = switch saved {
             case .xASR: String(localized: "X-ASR 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
+            case .funASRNanoCoreML: String(localized: "FunASR (CoreML) 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
             default: String(localized: "FunASR 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
             }
         }
@@ -133,6 +134,7 @@ final class PhoneSpeechModelSettings {
                     installed.remove(model)
                     failure = switch model {
                     case .xASR: String(localized: "请先下载 X-ASR 模型。")
+                    case .funASRNanoCoreML: String(localized: "请先下载 FunASR (CoreML) 模型。")
                     default: String(localized: "请先下载 FunASR 模型。")
                     }
                 }
