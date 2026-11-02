@@ -208,7 +208,8 @@ def audit(app, pinned_models=PINNED_MODELS, version_config=VERSION_CONFIG, varia
                     checks[role + "_executable_checked"] = False
                 if role == "phone":
                     checks.update(gmail_oauth_checks(info))
-                    checks["background_processing_declared"] = info.get("UIBackgroundModes") == ["processing"]
+                    checks["background_processing_declared"] = info.get("UIBackgroundModes") in (
+                        ["audio", "processing"], ["processing", "audio"])
                     identifiers = info.get("BGTaskSchedulerPermittedIdentifiers")
                     checks["background_identifiers_declared"] = (
                         isinstance(identifiers, list) and len(identifiers) == 2

@@ -14,6 +14,10 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+# The bundled interpreter runs with -I and omits this signed script directory.
+if sys.flags.isolated:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from momo_agent import SOURCE, atomic_private, child_environment, read_connection
 
 PROVIDERS = {"codex": "openai-codex", "claude": "anthropic"}

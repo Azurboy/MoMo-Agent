@@ -24,6 +24,12 @@ uv run --no-project python Tests/Support/verify-mac-runtime.py '/path/to/MoMo Ag
 
 打包器拒绝 SQLite 早于 3.51.3 的解释器。当前产物面向 Apple Silicon；Intel 必须在对应架构的构建环境产生独立 runtime，不能把 arm64 解释器宣传成通用版。外部模型调用仍联网；额外用户工具和可选第三方集成不属于核心初始化的离线保证。
 
+## 默认引擎打包补充（2026-11-02）
+
+默认引擎改为 SuperAgent 后，Mac 打包器同时复制 `Vendor/SuperAgent` 与上游清单，包含已编译的 JS、提示词、技能与语言资源；否则安装包缺少默认引擎的源文件。SuperAgent 的 Node runner 仍由已有的 `prepare_superagent` 流程准备，需要本机 Node 和 pnpm。
+
+离线包检查显式选择 Hermes 来验证内置 Python 路径，并独立验证 SuperAgent 清单和编译产物。报告分别标记这两项，不能把 Hermes 离线初始化成功视为 SuperAgent 不需要 Node 或额外准备。
+
 ## 验证边界
 
 单元测试覆盖离线分支、重复准备保留配置、依赖/架构/版本不匹配和缺失解释器。真实包检查通过进程沙盒禁网、隐藏开发工具路径来执行初始化、重复准备和原生扩展导入，前后验证签名。构建、安装、实际 Agent 恢复分别记录在本次交付 evidence 中，不把禁网初始化当成离线大模型或跨设备验收。

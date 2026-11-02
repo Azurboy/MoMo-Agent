@@ -6,9 +6,13 @@ import hmac
 import json
 from pathlib import Path
 import re
+import sys
 import time
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+# Isolated Python omits the script directory; import siblings from this signed bundle.
+if sys.flags.isolated:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pairing_store import PairingStore, is_tailnet_endpoint
 from tunnel import TunnelLifecycle, EmbeddedTailscale
 from relay_access import RelayTunnel
