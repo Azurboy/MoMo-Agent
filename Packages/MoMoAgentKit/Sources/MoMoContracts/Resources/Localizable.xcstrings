@@ -1999,66 +1999,6 @@
         }
       }
     },
-    "Hermes · 后台终端任务": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · Background Process"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · バックグラウンドプロセス"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · 백그라운드 터미널 작업"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · 后台终端任务"
-          }
-        }
-      }
-    },
-    "Hermes · 子智能体任务": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · Sub-agent Task"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · サブエージェントタスク"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · 서브 에이전트 작업"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hermes · 子智能体任务"
-          }
-        }
-      }
-    },
     "Mac 保持在线即可连接，锁屏不影响，睡眠时不可用。": {
       "localizations": {
         "en": {
@@ -2743,96 +2683,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Personal Agent"
-          }
-        }
-      }
-    },
-    "SuperAgent · 主动子智能体": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · Proactive Worker"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · プロアクティブワーカー"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · 능동 서브 에이전트"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · 主动子智能体"
-          }
-        }
-      }
-    },
-    "SuperAgent · 子智能体工单": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · Worker Ticket"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · ワーカーチケット"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · 서브 에이전트 티켓"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent · 子智能体工单"
-          }
-        }
-      }
-    },
-    "SuperAgent 派发的子智能体任务与 Hermes 后台委派任务会实时显示在这里。": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sub-agent tickets dispatched by SuperAgent and background tasks from Hermes appear here in real time."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgentが配信したサブエージェントタスクとHermesのバックグラウンドタスクがリアルタイムで表示されます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent가 배정한 서브 에이전트 작업과 Hermes 백그라운드 위임 작업이 실시간으로 표시됩니다."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SuperAgent 派发的子智能体任务与 Hermes 后台委派任务会实时显示在这里。"
           }
         }
       }
@@ -9766,36 +9616,6 @@
         }
       }
     },
-    "原生主会话与后台委派引擎": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Native main-session and background delegation runtime"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ネイティブメインセッション＆バックグラウンド委任ランタイム"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "네이티브 메인 세션 및 백그라운드 위임 런타임"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "原生主会话与后台委派引擎"
-          }
-        }
-      }
-    },
     "原连接已移除": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -10741,36 +10561,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "发送邮件"
-          }
-        }
-      }
-    },
-    "发送队列": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Send Queue"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "送信キュー"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "전송 대기열"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "发送队列"
           }
         }
       }
@@ -14636,36 +14426,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "姓名"
-          }
-        }
-      }
-    },
-    "子智能体任务": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sub-agent Task"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "サブエージェントタスク"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "서브 에이전트 작업"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "子智能体任务"
           }
         }
       }
@@ -19857,36 +19617,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前处理尚未结束，或 App 暂时无法执行。请保持 App 在前台，稍后再试。"
-          }
-        }
-      }
-    },
-    "当前对话任务": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Current Chat Run"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在のチャットタスク"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 대화 작업"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前对话任务"
           }
         }
       }
@@ -33733,36 +33463,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "查看标记附近的转写 %lld"
-          }
-        }
-      }
-    },
-    "查看正在进行的子智能体与后台任务": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "View running sub-agents and background tasks"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "実行中のサブエージェントとバックグラウンドタスクを表示"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "실행 중인 서브 에이전트 및 백그라운드 작업 보기"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "查看正在进行的子智能体与后台任务"
           }
         }
       }
@@ -55741,36 +55441,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "默认保留服务商的推理设置。主动选择强度时会发送对应参数，需模型支持。输出预算包含 API 计入的推理和正文；达到上限时不写入半份结果，可提高上限后重试。"
-          }
-        }
-      }
-    },
-    "默认引擎 · DeepSeek 开源编排器，自动评估同步录音并派发子智能体执行": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Default · Open-source DeepSeek orchestrator that evaluates synced transcripts and dispatches background workers"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "デフォルト · 同期された文字起こしを評価しサブエージェントを実行するDeepSeekオーケストレーター"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "기본값 · 동기화된 녹음을 평가하고 서브 에이전트를 실행하는 DeepSeek 오케스트레이터"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "默认引擎 · DeepSeek 开源编排器，自动评估同步录音并派发子智能体执行"
           }
         }
       }

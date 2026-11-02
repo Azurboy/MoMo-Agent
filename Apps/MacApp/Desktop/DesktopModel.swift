@@ -34,12 +34,6 @@ enum DesktopAgentEngine: String, CaseIterable, Identifiable {
         case .hermes: "Hermes Agent"
         }
     }
-    var summary: String {
-        switch self {
-        case .superagent: String(localized: "默认引擎 · DeepSeek 开源编排器，自动评估同步录音并派发子智能体执行")
-        case .hermes: String(localized: "原生主会话与后台委派引擎")
-        }
-    }
 }
 
 struct DesktopProactiveSnapshot: Sendable {
