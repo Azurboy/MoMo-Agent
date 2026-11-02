@@ -101,6 +101,25 @@ import XCTest
         XCTAssertNotNil(store.tasks.first?.admittedAt)
     }
 
+    func testConcurrentLinkFailuresDoNotPostponeThePendingMessage() async throws {
+        let (wire, connection, client, folder) = try fixture()
+        var clock = Date(timeIntervalSince1970: 1000)
+        let store = try RemoteTaskStore(file: folder.appendingPathComponent("retry.json"),
+                                        connection: connection, client: client, now: { clock })
+        await store.refresh()
+        store.setDraft("queued while offline")
+        try store.enqueue()
+        store.recordConnectionFailure(URLError(.networkConnectionLost))
+        let deadline = try XCTUnwrap(store.nextConnectionAttempt)
+        clock = deadline.addingTimeInterval(-0.1)
+        store.recordConnectionFailure(URLError(.timedOut))
+        XCTAssertEqual(store.nextConnectionAttempt, deadline)
+        clock = deadline
+        await store.refresh()
+        let sends = await wire.sends
+        XCTAssertEqual(sends, 1)
+    }
+
     func testUserSendHonorsServerRetryAfterAndAuthenticationFailure() async throws {
         for status in [429, 503, 401] {
             let (wire, connection, client, folder) = try fixture()
