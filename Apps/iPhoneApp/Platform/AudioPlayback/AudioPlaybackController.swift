@@ -292,8 +292,9 @@ final class AudioPlaybackController {
         try require(attempt)
         let previousPosition = snapshot?.position ?? current.position
         do {
-            try await validate(timeline)
+            try await validateCurrentTimeline(active: false)
             try require(attempt)
+            guard let timeline = self.timeline else { throw CancellationError() }
             if position == duration {
                 snapshot?.position = duration
                 snapshot?.state = .ended
@@ -303,7 +304,7 @@ final class AudioPlaybackController {
                     try await start(index: index, position: position, attempt: attempt)
                 } else {
                     // Silent seek still checks the real file. It does not create/activate a native player.
-                    let part = try await archive.acquirePlaybackPart(timeline.segments[index].part, in: timeline.archives[timeline.segments[index].archiveIndex])
+                    let part = try await acquirePartWithSpeakerRefresh(index: index)
                     do { try await audioSession.validate(part) }
                     catch { await release(part); throw error }
                     await release(part)
@@ -378,7 +379,7 @@ final class AudioPlaybackController {
                 expectedGeneration: target.generation, source: target.source, additionalSources: additional))
         } catch ArchiveError.staleSource {
             guard let primary = target.source else { throw ArchiveError.staleSource }
-            let resolved = try await archive.resolveCurrentSpeakerSources([primary] + additional)
+            let resolved = try await archive.resolveAudioCompatibleSources([primary] + additional)
             guard let refreshedPrimary = resolved.first else { throw ArchiveError.staleSource }
             return PlaybackTimeline(try await archive.playbackTimeline(sessionID: target.sessionID,
                 expectedGeneration: target.generation, source: refreshedPrimary,
@@ -393,11 +394,46 @@ final class AudioPlaybackController {
         }
     }
 
+    private func validateCurrentTimeline(active: Bool) async throws {
+        guard let currentTimeline = timeline else { throw CancellationError() }
+        do {
+            try await validate(currentTimeline, active: active)
+        } catch ArchiveError.staleSource where !active {
+            guard let currentTarget = snapshot?.target else { throw ArchiveError.staleSource }
+            let refreshed = try await loadTimeline(currentTarget)
+            try await validate(refreshed, active: false)
+            self.timeline = refreshed
+        }
+    }
+
+    private func acquirePartWithSpeakerRefresh(index: Int) async throws -> AudioPlaybackPart {
+        guard let currentTimeline = timeline, currentTimeline.segments.indices.contains(index) else {
+            throw PlaybackError.unavailable
+        }
+        let segment = currentTimeline.segments[index]
+        do {
+            return try await archive.acquirePlaybackPart(segment.part, in: currentTimeline.archives[segment.archiveIndex])
+        } catch ArchiveError.staleSource {
+            guard let currentTarget = snapshot?.target else { throw ArchiveError.staleSource }
+            let refreshed = try await loadTimeline(currentTarget)
+            guard refreshed.segments.count == currentTimeline.segments.count,
+                  refreshed.segments[index].part == segment.part else {
+                throw ArchiveError.staleSource
+            }
+            let part = try await archive.acquirePlaybackPart(
+                refreshed.segments[index].part,
+                in: refreshed.archives[refreshed.segments[index].archiveIndex]
+            )
+            self.timeline = refreshed
+            return part
+        }
+    }
+
     private func start(index: Int, position: Double, attempt: UInt64) async throws {
         try require(attempt)
-        guard let timeline else { throw CancellationError() }
-        let segment = timeline.segments[index]
-        let part = try await archive.acquirePlaybackPart(segment.part, in: timeline.archives[segment.archiveIndex])
+        guard let initialTimeline = timeline, initialTimeline.segments.indices.contains(index) else { throw CancellationError() }
+        let segment = initialTimeline.segments[index]
+        let part = try await acquirePartWithSpeakerRefresh(index: index)
         guard attempt == generation, !Task.isCancelled else {
             await release(part)
             throw CancellationError()
@@ -412,7 +448,7 @@ final class AudioPlaybackController {
         try await audioSession.prepare(part, offset: position - segment.start, for: attempt)
         try require(attempt)
         // A source changed during native preparation must not start playing stale audio.
-        try await validate(timeline)
+        try await validateCurrentTimeline(active: false)
         try require(attempt)
         try await audioSession.startPrepared(for: attempt)
         try require(attempt)

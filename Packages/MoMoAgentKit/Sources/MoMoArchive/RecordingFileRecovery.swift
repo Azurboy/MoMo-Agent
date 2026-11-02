@@ -294,7 +294,7 @@ extension ArchiveStore {
             if let json = data["transcript.json"], json != currentJSON {
                 return try problem(.invalidEdit, hashes: hashes, actions: actions)
             }
-            if let markdown = data["transcript.md"], markdown != currentMarkdown {
+            if let markdown = data["transcript.md"], markdown != currentMarkdown && markdown != currentLegacyMarkdown {
                 return try problem(.invalidEdit, hashes: hashes, actions: actions)
             }
         }

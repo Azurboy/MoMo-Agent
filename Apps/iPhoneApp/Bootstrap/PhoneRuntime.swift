@@ -14,6 +14,7 @@ final class PhoneRuntime {
     let speechSettings: PhoneSpeechSettings
     let library: LibraryModel
     let earphone: EarphoneCaptureRuntime?
+    let speakerRematch = SpeakerRematchController()
     private(set) var failure: String?
     private(set) var statusFailure: String?
     private(set) var syncFailure: String?
@@ -107,6 +108,13 @@ final class PhoneRuntime {
                 Task { @MainActor in
                     guard let self else { return }
                     let becameIdle = snapshot.phase == .idle && self.transcriptionSnapshot?.phase != .idle
+                    let previousBatch = self.transcriptionSnapshot?.batch
+                    let batchProgressAdvanced: Bool = {
+                        guard let currentBatch = snapshot.batch else { return false }
+                        guard let previousBatch, previousBatch.id == currentBatch.id else { return currentBatch.preparedDuration > 0 }
+                        return (currentBatch.preparedDuration - previousBatch.preparedDuration) >= 1.0
+                            || (currentBatch.completedDuration - previousBatch.completedDuration) >= 1.0
+                    }()
                     let completedNewWindows = snapshot.completedWindows > (self.transcriptionSnapshot?.completedWindows ?? 0)
                     self.transcriptionSnapshot = snapshot
                     self.speechPerformance?.record(snapshot, foreground: self.isForeground)
@@ -124,7 +132,8 @@ final class PhoneRuntime {
                     }
                     let settled = !snapshot.nativeInFlight
                         && [.idle, .queued, .waitingForAudio, .waitingForContext, .waitingForRetry, .audioUnavailable, .systemSuspended, .paused, .failed].contains(snapshot.phase)
-                    let refreshProgress = self.transcriptionRefresh.shouldRefresh(completedNewWindow: completedNewWindows,
+                    let refreshProgress = self.transcriptionRefresh.shouldRefresh(
+                        completedNewWindow: completedNewWindows || batchProgressAdvanced,
                         settled: settled)
                     if self.libraryPresentationDeferred {
                         if refreshProgress {
@@ -142,7 +151,7 @@ final class PhoneRuntime {
                            (self.requestedTranscriptionBatchID == nil || self.backgroundTasks?.hasActiveContinuedGrant != true),
                            self.activeBatches.contains(where: {
                                $0.configurationFingerprint == self.speechFingerprint
-                                   && ($0.state == .ready || ($0.state == .paused && $0.endReason == .systemEndedUnknown))
+                                   && ($0.state == .ready || ($0.state == .paused && $0.endReason == .interrupted))
                            }) {
                             await self.resumeAutomaticTranscription()
                         }
@@ -165,6 +174,9 @@ final class PhoneRuntime {
         receiver.onSyncFailure = { [weak self] message in self?.syncFailure = message }
         receiver.onAudioReceived = { [weak self] chunkID in self?.audioReceived(chunkID) }
         if let earphone {
+            earphone.onWillClaimAudioSession = { [weak playback] in
+                await playback?.stop(deactivateImmediately: true)
+            }
             playback.sessionWillActivate = { [weak earphone] in await earphone?.yieldAudioSession() }
             playback.sessionDidDeactivate = { [weak playback, weak earphone] in
                 if earphone?.isActive == true {
@@ -203,6 +215,7 @@ final class PhoneRuntime {
         backgroundTasks?.onSystemTaskStarting = { [weak self] in
             guard let self else { return }
             self.activeSystemTaskRunning = true
+            self.transcriptionContinuation?.finish()
             self.speech?.setForegroundPriority(self.isForeground || PhoneBackgroundTasks.resourcesAllowProcessing)
             await self.receivedAudioTranscription?.handOffToSystemTask()
         }
@@ -261,6 +274,14 @@ final class PhoneRuntime {
         await transcription?.requestWork()
         await backgroundTasks?.scheduleAutomatic()
         if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
+        if isForeground, !preparingTranscriptionContinuation,
+           (await transcription?.snapshot())?.execution == nil,
+           activeBatches.contains(where: {
+               $0.configurationFingerprint == speechFingerprint
+                   && ($0.state == .ready || ($0.state == .paused && ($0.endReason == .systemEndedUnknown || $0.endReason == .interrupted)))
+           }) {
+            await resumeAutomaticTranscription()
+        }
     }
 
     private func audioReceived(_ chunkID: UUID) {
@@ -404,10 +425,16 @@ final class PhoneRuntime {
         isForeground = false
         pendingForegroundBatchFlush = false
         remoteAgent.leavingForeground()
-        if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
-           let snapshot = transcriptionSnapshot,
-           snapshot.nativeInFlight || [.preparing, .transcribing, .queued].contains(snapshot.phase) {
-            transcriptionContinuation?.start()
+        if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing {
+            let snapshot = transcriptionSnapshot
+            let activeWork = preparingTranscriptionContinuation
+                || requestedTranscriptionBatchID != nil
+                || snapshot?.execution != nil
+                || snapshot?.nativeInFlight == true
+                || (snapshot.map { [.preparing, .transcribing, .queued].contains($0.phase) } ?? false)
+            if activeWork {
+                transcriptionContinuation?.start()
+            }
         }
     }
 
@@ -494,9 +521,15 @@ final class PhoneRuntime {
                 activeBatches = batches
                 guard isForeground, !preparingTranscriptionContinuation,
                       backgroundTasks?.hasActiveContinuedGrant != true else { continue }
+                let hasUrgentLiveWork: Bool
+                if let speechFingerprint {
+                    hasUrgentLiveWork = (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speechFingerprint)) ?? false
+                } else {
+                    hasUrgentLiveWork = false
+                }
                 if let requestedID = requestedTranscriptionBatchID {
                     if let requestedBatch = batches.first(where: { $0.id == requestedID }) {
-                        if requestedBatch.state == .ready || requestedBatch.state == .paused {
+                        if !hasUrgentLiveWork, (requestedBatch.state == .ready || requestedBatch.state == .paused) {
                             if requestedBatch.state == .paused { _ = try await transcription.resumeBatch(id: requestedID) }
                             _ = try await transcription.startBatch(id: requestedID, origin: .foreground) { [weak self] completion in
                                 Task { @MainActor in
@@ -516,15 +549,9 @@ final class PhoneRuntime {
                         requestedTranscriptionBatchID = nil
                     }
                 }
-                let hasUrgentLiveWork: Bool
-                if let speechFingerprint {
-                    hasUrgentLiveWork = (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speechFingerprint)) ?? false
-                } else {
-                    hasUrgentLiveWork = false
-                }
                 if !hasUrgentLiveWork, let batch = batches.first(where: {
                     $0.configurationFingerprint == speechFingerprint
-                        && ($0.state == .ready || ($0.state == .paused && $0.endReason == .systemEndedUnknown))
+                        && ($0.state == .ready || ($0.state == .paused && ($0.endReason == .systemEndedUnknown || $0.endReason == .interrupted)))
                 }) {
                     if batch.state == .paused { _ = try await transcription.resumeBatch(id: batch.id) }
                     _ = try await transcription.startBatch(id: batch.id, origin: .foreground) { [weak self] completion in
@@ -555,6 +582,12 @@ final class PhoneRuntime {
         await transcription?.requestWork()
         remoteAgent.sourcesChanged()
         scheduleSpeakerRematch()
+    }
+
+    func prepareSourcesForDiscussion(_ sources: [SourceReference]) async -> [SourceReference] {
+        await library.awaitPendingSpeakerFeedback()
+        guard !sources.isEmpty else { return [] }
+        return (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
     }
 
     func scheduleSpeakerRematch() {

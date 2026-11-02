@@ -82,16 +82,9 @@ inline float HalfBitsToFloat(uint16_t h) {
 }
 
 inline void ConvertHalfToFloatRaw(const uint16_t *src, float *dst, size_t n) {
-#if defined(__ARM_NEON) || defined(__aarch64__)
-  const __fp16 *h = reinterpret_cast<const __fp16 *>(src);
-  for (size_t i = 0; i < n; ++i) {
-    dst[i] = static_cast<float>(h[i]);
-  }
-#else
   for (size_t i = 0; i < n; ++i) {
     dst[i] = HalfBitsToFloat(src[i]);
   }
-#endif
 }
 
 inline uint16_t FloatToHalfBits(float f) {

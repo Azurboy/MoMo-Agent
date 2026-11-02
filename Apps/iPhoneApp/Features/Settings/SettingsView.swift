@@ -10,6 +10,7 @@ struct SettingsView: View {
     let modelStatus: LocalSpeechModelStatus
     let speechSettings: PhoneSpeechSettings
     var earphone: EarphoneCaptureRuntime? = nil
+    var speakerRematch: SpeakerRematchController = SpeakerRematchController()
     var onSpeakersChanged: (() async -> Void)? = nil
     @State private var versionTapCount = 0
     @State private var previewingWelcome = false
@@ -83,7 +84,9 @@ struct SettingsView: View {
                             PhoneSettingsLinkRow(title: "说话人分段", value: speechSettings.speakerSegmentationModel.title)
                         }.accessibilityIdentifier("settings.speech.segmentation")
                         rowDivider
-                        NavigationLink { SpeakerProfilesView(archive: archive, onSpeakersChanged: onSpeakersChanged) } label: {
+                        NavigationLink {
+                            SpeakerProfilesView(archive: archive, rematch: speakerRematch, onSpeakersChanged: onSpeakersChanged)
+                        } label: {
                             PhoneSettingsLinkRow(title: "人物与声纹")
                         }.accessibilityIdentifier("settings.speakers")
                         rowDivider

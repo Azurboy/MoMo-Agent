@@ -1,12 +1,6 @@
 import SwiftUI
 import MoMoArchive
 
-private struct OptimisticSpeakerSelection: Equatable {
-    let source: SourceReference
-    let speaker: String?
-    let attribution: SpeakerAttribution?
-}
-
 struct SpeakerFeedbackMenu: View {
     let speaker: String?
     let attribution: SpeakerAttribution?
@@ -14,42 +8,25 @@ struct SpeakerFeedbackMenu: View {
     var additionalSources: [SourceReference] = []
     var initialPeople: [SpeakerProfile] = []
     let archive: ArchiveStore
-    var enqueueFeedback: ((_ sources: [SourceReference], _ speakerNameHint: String?, _ feedback: SpeakerFeedback, _ scope: SpeakerFeedbackScope) -> Void)? = nil
+    var enqueueFeedback: ((_ sources: [SourceReference], _ speakerNameHint: String?, _ feedback: SpeakerFeedback, _ scope: SpeakerFeedbackScope, _ optimisticSpeaker: String?, _ optimisticAttribution: SpeakerAttribution?) -> Void)? = nil
     let changed: () async -> Void
     @State private var choosing = false
-    @State private var optimistic: OptimisticSpeakerSelection?
 
-    private var activeOptimistic: OptimisticSpeakerSelection? {
-        guard let optimistic, optimistic.source == source else { return nil }
-        return optimistic
-    }
-
-    private var effectiveSpeaker: String? {
-        if let activeOptimistic { return activeOptimistic.speaker }
+    private var displayName: String {
+        guard let speaker, speaker != String(localized: "说话人未确定") else { return String(localized: "说话人") }
         return speaker
     }
 
-    private var effectiveAttribution: SpeakerAttribution? {
-        if let activeOptimistic { return activeOptimistic.attribution }
-        return attribution
-    }
-
-    private var displayName: String {
-        guard let effectiveSpeaker, effectiveSpeaker != String(localized: "说话人未确定") else { return String(localized: "说话人") }
-        return effectiveSpeaker
-    }
-
     var body: some View {
-        let currentAttribution = effectiveAttribution
         Button { choosing = true } label: {
             HStack(spacing: 4) {
                 Text(displayName).lineLimit(1)
                 Image(systemName: "chevron.down").font(.caption2.weight(.medium)).accessibilityHidden(true)
             }
             .phoneText(.caption)
-            .foregroundStyle(currentAttribution?.isUser == true ? MoMoPalette.success : (currentAttribution?.personID != nil ? MoMoPalette.ink : MoMoPalette.muted))
+            .foregroundStyle(attribution?.isUser == true ? MoMoPalette.success : (attribution?.personID != nil ? MoMoPalette.ink : MoMoPalette.muted))
             .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(currentAttribution?.isUser == true ? MoMoPalette.successBackground : MoMoPalette.ink.opacity(0.045), in: Capsule())
+            .background(attribution?.isUser == true ? MoMoPalette.successBackground : MoMoPalette.ink.opacity(0.045), in: Capsule())
             .frame(minWidth: 44, minHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -62,18 +39,9 @@ struct SpeakerFeedbackMenu: View {
                 archive: archive,
                 sources: [source] + additionalSources,
                 speaker: displayName,
-                attribution: currentAttribution,
+                attribution: attribution,
                 initialPeople: initialPeople,
-                enqueueFeedback: enqueueFeedback.map { enqueue in
-                    { sources, speakerHint, feedback, scope, optimisticSpeaker, optimisticAttribution in
-                        optimistic = OptimisticSpeakerSelection(
-                            source: source,
-                            speaker: optimisticSpeaker,
-                            attribution: optimisticAttribution
-                        )
-                        enqueue(sources, speakerHint, feedback, scope)
-                    }
-                },
+                enqueueFeedback: enqueueFeedback,
                 changed: changed
             )
             .presentationDetents([.medium, .large])
@@ -190,7 +158,22 @@ private struct SpeakerPicker: View {
             .task {
                 do {
                     let latestPeople = try await archive.speakerProfiles()
-                    people = latestPeople
+                    var mergedPeople = latestPeople
+                    for optimisticPerson in initialPeople {
+                        let exists = mergedPeople.contains {
+                            (optimisticPerson.isUser && $0.isUser)
+                                || (!$0.isUser && !optimisticPerson.isUser
+                                    && $0.name.caseInsensitiveCompare(optimisticPerson.name) == .orderedSame)
+                        }
+                        if !exists {
+                            if optimisticPerson.isUser {
+                                mergedPeople.insert(optimisticPerson, at: 0)
+                            } else {
+                                mergedPeople.append(optimisticPerson)
+                            }
+                        }
+                    }
+                    people = mergedPeople
                     loaded = true
                     let freshSources = (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
                     let preview = try await archive.speakerFeedbackPreview(freshSources)

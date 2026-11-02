@@ -523,4 +523,65 @@ struct ArchivePerformanceAndBatchTests {
             speakerParts: parts
         )
     }
+
+    @Test func audioCompatibleSourceResolutionAcceptsSpeakerUpdatesAndRejectsTextEdits() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+        let v1 = try await appendSpeakerWindow(unit192(1, 0, 0), fixture: fixture, store: store, index: 0)
+        let v1Source = v1.source(for: v1.spans[0])
+
+        try await store.correctSpeakers([v1Source], feedback: .person("小王"), scope: .cluster, deferGlobalRematch: true)
+        let v2 = try await store.readTranscript(sessionID: fixture.sessionID)
+        #expect(v2.version > v1.version)
+
+        let resolvedAfterSpeaker = try await store.resolveAudioCompatibleSources([v1Source])
+        #expect(resolvedAfterSpeaker == [v2.source(for: v2.spans[0])])
+
+        var editedSpan = v2.spans[0]
+        editedSpan = TranscriptSpan(
+            id: editedSpan.id,
+            chunkID: editedSpan.chunkID,
+            frames: editedSpan.frames,
+            text: "手工改动后的文字",
+            speaker: editedSpan.speaker,
+            sourceRanges: editedSpan.sourceRanges,
+            attribution: editedSpan.attribution,
+            startsNewSpeakerTurn: editedSpan.startsNewSpeakerTurn
+        )
+        _ = try await store.reviseTranscript(sessionID: fixture.sessionID, expectedVersion: v2.version, spans: [editedSpan])
+
+        await #expect(throws: ArchiveError.staleSource) {
+            _ = try await store.resolveAudioCompatibleSources([v1Source])
+        }
+        await #expect(throws: ArchiveError.staleSource) {
+            _ = try await store.resolveAudioCompatibleSources(resolvedAfterSpeaker)
+        }
+    }
+
+    @Test func externalTranscriptJSONTruncationBlocksSubsequentProjection() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+        _ = try await appendSpeakerWindow(unit192(1, 0, 0), fixture: fixture, store: store, index: 0)
+        let v2 = try await appendSpeakerWindow(unit192(0, 1, 0), fixture: fixture, store: store, index: 1)
+        try await store.projectPendingDocuments()
+
+        let mdURL = try await store.transcriptFileURL(sessionID: fixture.sessionID)
+        let jsonURL = mdURL.deletingLastPathComponent().appendingPathComponent("transcript.json")
+        let truncated = TranscriptDocument(
+            sessionID: v2.sessionID,
+            version: v2.version,
+            generation: v2.generation,
+            spans: [v2.spans[0]],
+            updatedAt: v2.updatedAt
+        )
+        try WireJSON.encode(truncated).write(to: jsonURL, options: .atomic)
+
+        _ = try await appendSpeakerWindow(unit192(0, 0, 1), fixture: fixture, store: store, index: 2)
+        try await store.projectPendingDocuments()
+
+        let issues = try await store.recordingFileIssues(sessionID: fixture.sessionID)
+        #expect(!issues.isEmpty)
+    }
 }

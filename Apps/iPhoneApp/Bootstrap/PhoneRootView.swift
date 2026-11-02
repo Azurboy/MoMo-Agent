@@ -39,7 +39,7 @@ struct PhoneRootView: View {
                     PhoneRemoteView(agent: runtime.remoteAgent, openSettings: { showingSettings = true },
                         watchStatus: runtime.library.watchStatus, requestWatchStatus: runtime.requestWatchStatus,
                         openLibrary: { selectedTab = .transcripts }, speech: runtime.speech,
-                        stopPlayback: { await runtime.playback.stop() },
+                        stopPlayback: { await runtime.playback.stop(deactivateImmediately: true) },
                         chatIsVisible: selectedTab == .chat && !showingSettings)
                         .recordingSourceLinks(archive: runtime.archive, playback: runtime.playback)
                 }
@@ -73,6 +73,7 @@ struct PhoneRootView: View {
                 SettingsView(archive: runtime.archive, remoteAgent: runtime.remoteAgent,
                     modelDirectory: runtime.modelDirectory, modelStatus: runtime.modelStatus,
                     speechSettings: runtime.speechSettings, earphone: runtime.earphone,
+                    speakerRematch: runtime.speakerRematch,
                     onSpeakersChanged: { await runtime.didMutateSpeakers() })
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showingSettings = false } } }
             }
@@ -92,7 +93,10 @@ struct PhoneRootView: View {
     }
 
     private func discuss(_ sources: [SourceReference]) {
-        runtime.remoteAgent.selectSources(sources)
         selectedTab = .chat
+        Task {
+            let resolved = await runtime.prepareSourcesForDiscussion(sources)
+            runtime.remoteAgent.selectSources(resolved)
+        }
     }
 }

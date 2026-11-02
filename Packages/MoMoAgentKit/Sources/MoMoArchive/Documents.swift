@@ -143,17 +143,21 @@ extension ArchiveStore {
                 && (existingMarkdown == markdown || existingMarkdown == Data(legacyTranscriptMarkdown(document).utf8))
             if !matchesLastProjection && !matchesCurrentProjection {
                 var verifiedAgainstHistory = false
+                var decodedHistoryVersion = false
                 if let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(version)]).first,
                    let old = try? decodeStoredTranscript(previous.requireData(0)),
                    let oldJSON = try? WireJSON.encode(old) {
+                    decodedHistoryVersion = true
                     let oldMarkdown = Data(transcriptMarkdown(old).utf8)
                     let legacyOldMarkdown = Data(legacyTranscriptMarkdown(old).utf8)
                     verifiedAgainstHistory = (existingJSON == oldJSON || existingJSON == json)
                         && (existingMarkdown == oldMarkdown || existingMarkdown == legacyOldMarkdown || existingMarkdown == markdown)
                 }
-                if !verifiedAgainstHistory,
-                   !matchesUneditedPriorProjection(existingJSON: existingJSON, existingMarkdown: existingMarkdown,
-                                                  projectedVersion: version, current: document) {
+                let matchesLegacyUnindexedSnapshot = projectionHash == nil
+                    && !decodedHistoryVersion
+                    && matchesUneditedPriorProjection(existingJSON: existingJSON, existingMarkdown: existingMarkdown,
+                                                      projectedVersion: version, current: document)
+                if !verifiedAgainstHistory && !matchesLegacyUnindexedSnapshot {
                     try blockProjection(sessionID: sessionID)
                     throw ArchiveError.projectionConflict
                 }

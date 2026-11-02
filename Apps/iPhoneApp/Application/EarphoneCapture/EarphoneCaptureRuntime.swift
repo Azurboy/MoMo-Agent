@@ -39,6 +39,7 @@ final class EarphoneCaptureRuntime {
     private(set) var savedSeconds: TimeInterval = 0
     private(set) var deliveryFailure: String?
     var isActive: Bool { sessionID != nil }
+    @ObservationIgnored var onWillClaimAudioSession: (@MainActor () async -> Void)?
     @ObservationIgnored var onDelivered: (@MainActor ([UUID]) async -> Void)?
 
     @ObservationIgnored private let store: RecordingStore
@@ -135,6 +136,7 @@ final class EarphoneCaptureRuntime {
     private func begin() async {
         guard prepared, sessionID == nil else { return }
         status = .starting
+        await onWillClaimAudioSession?()
         do {
             try await route.requestPermission()
             let id = UUID()

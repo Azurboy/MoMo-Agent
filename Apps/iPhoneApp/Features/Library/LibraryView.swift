@@ -76,7 +76,7 @@ struct LibraryView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if playback.activeTarget != nil {
                 AudioMiniPlayer(playback: playback, openRecording: { id in openRecording(id) },
-                    openWindow: { selectedWindow = TimelineDestination(windowID: $0) })
+                    openWindow: { recordingID = nil; selectedWindow = TimelineDestination(windowID: $0) })
                     .padding(.horizontal, 12).padding(.vertical, 8).background(MoMoPalette.canvas)
             }
         }
@@ -444,8 +444,13 @@ struct LibraryView: View {
     private func choose(_ day: TimelineDay) { select(day); choosingDate = false }
     private func openRecording(_ id: UUID) {
         Task {
-            do { try await model.ensureRecording(id); recordingID = id }
-            catch { navigationFailure = String(localized: "这次录音已不可用，请刷新转录。") }
+            do {
+                try await model.ensureRecording(id)
+                selectedWindow = nil
+                recordingID = id
+            } catch {
+                navigationFailure = String(localized: "这次录音已不可用，请刷新转录。")
+            }
         }
     }
 }

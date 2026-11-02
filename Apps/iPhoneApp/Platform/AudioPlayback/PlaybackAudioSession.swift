@@ -238,15 +238,20 @@ private nonisolated final class PlaybackHardwareSessionCoordinator: @unchecked S
     deinit {
         for token in observers { NotificationCenter.default.removeObserver(token) }
         if isActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            let session = AVAudioSession.sharedInstance()
+            if session.category == .playback {
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            }
         }
     }
 
     func activate() throws {
         try queue.sync {
             idleGeneration &+= 1
-            if isActive { return }
             let session = AVAudioSession.sharedInstance()
+            if isActive && session.category == .playback && session.mode == .spokenAudio {
+                return
+            }
             try session.setCategory(.playback, mode: .spokenAudio)
             try session.setActive(true)
             isActive = true
@@ -261,7 +266,9 @@ private nonisolated final class PlaybackHardwareSessionCoordinator: @unchecked S
             queue.asyncAfter(deadline: .now() + Self.idleGraceSeconds) { [weak self] in
                 guard let self, self.idleGeneration == expected, self.isActive else { return }
                 self.isActive = false
-                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                let session = AVAudioSession.sharedInstance()
+                guard session.category == .playback else { return }
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
             }
         }
     }
@@ -271,7 +278,9 @@ private nonisolated final class PlaybackHardwareSessionCoordinator: @unchecked S
             idleGeneration &+= 1
             guard isActive else { return }
             isActive = false
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            let session = AVAudioSession.sharedInstance()
+            guard session.category == .playback else { return }
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
 

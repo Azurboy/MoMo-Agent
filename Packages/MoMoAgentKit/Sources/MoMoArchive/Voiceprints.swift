@@ -2344,23 +2344,12 @@ extension ArchiveStore {
         }
     }
 
-    /// Prepares the voiceprint feature banks and reconciles multi-cluster sessions up front,
-    /// returning ordered session IDs so UI callers can report determinate progress and ETA per batch.
+    /// Prepares the voiceprint feature banks up front and returns ordered session IDs so UI callers
+    /// can report determinate progress and ETA immediately while cluster reconciliation runs per step.
     public func prepareFullSpeakerRematch() throws -> FullSpeakerRematchPlan {
         try speakerTransaction {
             invalidateVoiceprintCache()
-            let baseCache = try ensureBaseVoiceprintCache()
-            let multiClusterRows = try database.rows("""
-                SELECT c.session_id
-                FROM speaker_clusters c
-                JOIN sessions s ON s.id=c.session_id
-                WHERE s.deleted=0 AND c.model_revision!='manual-label'
-                GROUP BY c.session_id
-                HAVING COUNT(*) >= 2
-                """)
-            for row in multiClusterRows {
-                _ = try reconcileSpeakerClusters(sessionID: row.requireUUID(0), preparedBanks: baseCache.basePrepared)
-            }
+            _ = try ensureBaseVoiceprintCache()
             invalidateTransductiveVoiceprintCache()
             _ = try ensureEnrichedPreparedBanks()
             let sessionIDs = try database.rows("""
@@ -2379,11 +2368,28 @@ extension ArchiveStore {
         }
     }
 
-    /// Re-labels a bounded batch of sessions using the prepared voiceprint banks, returning how many sessions changed.
+    /// Reconciles clusters and re-labels a bounded batch of sessions using the prepared voiceprint banks,
+    /// returning how many sessions changed.
     public func rematchSpeakerSessionsStep(_ sessionIDs: [UUID]) throws -> Int {
         guard !sessionIDs.isEmpty else { return 0 }
         let updatedCount = try speakerTransaction {
             let baseCache = try ensureBaseVoiceprintCache()
+            let placeholders = Array(repeating: "?", count: sessionIDs.count).joined(separator: ",")
+            let multiClusterRows = try database.rows("""
+                SELECT c.session_id
+                FROM speaker_clusters c
+                JOIN sessions s ON s.id=c.session_id
+                WHERE s.deleted=0 AND c.model_revision!='manual-label'
+                  AND c.session_id IN (\(placeholders))
+                GROUP BY c.session_id
+                HAVING COUNT(*) >= 2
+                """, sessionIDs.map { .text($0.uuidString) })
+            for row in multiClusterRows {
+                let sid = try row.requireUUID(0)
+                if try reconcileSpeakerClusters(sessionID: sid, preparedBanks: baseCache.basePrepared) {
+                    invalidateTransductiveVoiceprintCache()
+                }
+            }
             var enrichedPrepared = try ensureEnrichedPreparedBanks()
             let people = baseCache.people
             var count = 0
@@ -2570,6 +2576,69 @@ extension ArchiveStore {
         }
     }
 
+    /// Resolves citations to the current transcript version ONLY when `generation`, `chunkID`, `frames`,
+    /// `sourceRanges`, and `text` are unchanged since the cited version (e.g., speaker-label-only updates
+    /// or subsequent span appends). Any edit to text or audio frame ranges still throws `ArchiveError.staleSource`.
+    public func resolveAudioCompatibleSources(_ sources: [SourceReference]) throws -> [SourceReference] {
+        guard !sources.isEmpty, sources.count <= Self.maximumSourceReferences else { throw ArchiveError.invalidQuery }
+        var resolvedByIndex = Array<SourceReference?>(repeating: nil, count: sources.count)
+        let indexed = Array(sources.enumerated())
+        for (sessionID, sessionItems) in Dictionary(grouping: indexed, by: { $0.element.sessionID }) {
+            let current = try readTranscript(sessionID: sessionID)
+            var currentSpans: [UUID: TranscriptSpan] = [:]
+            var currentIndices: [UUID: Int] = [:]
+            currentSpans.reserveCapacity(current.spans.count)
+            currentIndices.reserveCapacity(current.spans.count)
+            for (idx, span) in current.spans.enumerated() {
+                currentSpans[span.id] = span
+                currentIndices[span.id] = idx
+            }
+            for (version, versionItems) in Dictionary(grouping: sessionItems, by: { $0.element.transcriptVersion }) {
+                if version == current.version {
+                    for (outIdx, source) in versionItems {
+                        guard source.generation == current.generation,
+                              let span = currentSpans[source.spanID] else {
+                            throw ArchiveError.staleSource
+                        }
+                        resolvedByIndex[outIdx] = current.source(for: span)
+                    }
+                    continue
+                }
+                guard version > 0, version < current.version,
+                      let row = try database.rows(
+                          "SELECT document FROM transcript_versions WHERE session_id=? AND version=?",
+                          [.text(current.sessionID.uuidString), .integer(version)]
+                      ).first else {
+                    throw ArchiveError.staleSource
+                }
+                let neededIDs = Set(versionItems.map { $0.element.spanID })
+                let hints = neededIDs.compactMap { currentIndices[$0] }
+                let citedSpans = try decodeStoredTranscriptSpans(
+                    row.requireData(0),
+                    expectedGeneration: current.generation,
+                    spanIDs: neededIDs,
+                    hintIndices: hints
+                )
+                for (outIdx, source) in versionItems {
+                    guard source.generation == current.generation,
+                          let currentSpan = currentSpans[source.spanID],
+                          let citedSpan = citedSpans[source.spanID],
+                          citedSpan.chunkID == currentSpan.chunkID,
+                          citedSpan.frames == currentSpan.frames,
+                          citedSpan.sourceRanges == currentSpan.sourceRanges,
+                          citedSpan.text == currentSpan.text else {
+                        throw ArchiveError.staleSource
+                    }
+                    resolvedByIndex[outIdx] = current.source(for: currentSpan)
+                }
+            }
+        }
+        return try resolvedByIndex.map {
+            guard let value = $0 else { throw ArchiveError.staleSource }
+            return value
+        }
+    }
+
     private func rematchSessionsDeferringOthers(immediateSessions: Set<UUID>) throws {
         let baseCache = try ensureBaseVoiceprintCache()
         for sessionID in immediateSessions {
@@ -2594,18 +2663,14 @@ extension ArchiveStore {
                     knownPrevious: .some(document))
             }
         }
-        pendingSpeakerRematchSessionIDs.subtract(immediateSessions)
         let allObserved = try database.rows("""
             SELECT DISTINCT o.session_id
             FROM speaker_observations o
             JOIN sessions s ON s.id=o.session_id
-            WHERE s.deleted=0
+            WHERE s.deleted=0 AND o.confirmed_person IS NULL
             """)
         for row in allObserved {
-            let sid = try row.requireUUID(0)
-            if !immediateSessions.contains(sid) {
-                pendingSpeakerRematchSessionIDs.insert(sid)
-            }
+            pendingSpeakerRematchSessionIDs.insert(try row.requireUUID(0))
         }
     }
 

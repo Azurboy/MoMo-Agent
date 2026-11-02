@@ -378,6 +378,53 @@ final class AudioPlaybackIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(playback.snapshot?.position), 1)
     }
 
+    func testSpeakerAttributionUpdateAllowsPlaybackAndResumeWhileTextEditInvalidates() async throws {
+        let fixture = try await makeRecording()
+        let probe = PlaybackSessionProbe()
+        let playback = AudioPlaybackController(archive: fixture.archive, audioSession: probe.owner())
+        addTeardownBlock { await playback.stop() }
+
+        try await playback.play(.transcript(fixture.source))
+        await playback.pause()
+        XCTAssertEqual(playback.snapshot?.state, .paused)
+
+        // Updating speaker attribution bumps transcriptVersion without altering audio frames or text.
+        try await fixture.archive.correctSpeakers([fixture.source], feedback: .person("小李"), scope: .selection, deferGlobalRematch: true)
+
+        try await playback.resume()
+        XCTAssertEqual(playback.snapshot?.state, .playing)
+
+        // Starting playback again from the older pre-speaker-edit citation also resolves cleanly.
+        try await playback.play(.transcript(fixture.source), from: 0.5)
+        await playback.pause()
+
+        // Revising the actual transcript text must still reject resume with staleSource.
+        let latest = try await fixture.archive.readTranscript(sessionID: fixture.source.sessionID)
+        let latestSpan = try XCTUnwrap(latest.spans.first)
+        let editedSpan = TranscriptSpan(
+            id: latestSpan.id,
+            chunkID: latestSpan.chunkID,
+            frames: latestSpan.frames,
+            text: "已被修改的文本内容",
+            speaker: latestSpan.speaker,
+            sourceRanges: latestSpan.sourceRanges,
+            attribution: latestSpan.attribution,
+            startsNewSpeakerTurn: latestSpan.startsNewSpeakerTurn
+        )
+        _ = try await fixture.archive.reviseTranscript(
+            sessionID: latest.sessionID,
+            expectedVersion: latest.version,
+            spans: [editedSpan]
+        )
+
+        do {
+            try await playback.resume()
+            XCTFail("Expected staleSource after transcript text edit")
+        } catch let error as ArchiveError {
+            XCTAssertEqual(error, .staleSource)
+        }
+    }
+
     func makeRecording(frames: FrameRange? = nil) async throws -> (archive: ArchiveStore, source: SourceReference, audioURL: URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoPlayback-\(UUID())", isDirectory: true)
         let runID = UUID()

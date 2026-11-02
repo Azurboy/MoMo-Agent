@@ -43,12 +43,19 @@ final class PlaybackPCMReader {
 
     func wavData(check: () throws -> Void) throws -> Data {
         let channelCount = Int(file.processingFormat.channelCount)
-        let sampleRate = UInt32(max(1, Int(file.processingFormat.sampleRate.rounded())))
+        let rawRate = file.processingFormat.sampleRate
+        guard (1...2).contains(channelCount),
+              rawRate.isFinite,
+              (1...384_000).contains(Int(rawRate.rounded())),
+              end > start,
+              (end - start) <= 16_000_000 else {
+            throw PlaybackError.unavailable
+        }
+        let sampleRate = UInt32(Int(rawRate.rounded()))
         let totalFrames = Int(end - start)
         let totalSamples = totalFrames * channelCount
         let pcmByteCount = totalSamples * MemoryLayout<Int16>.size
-        guard channelCount > 0, totalFrames > 0, pcmByteCount > 0,
-              pcmByteCount <= Int(UInt32.max) - 44 else {
+        guard pcmByteCount > 0, pcmByteCount <= Int(UInt32.max) - 44 else {
             throw PlaybackError.unavailable
         }
 
@@ -98,9 +105,19 @@ final class PlaybackPCMReader {
                 guard frameOffset + n <= totalFrames else { throw PlaybackError.unavailable }
                 if channelCount == 1 {
                     let count = vDSP_Length(n)
-                    vDSP_vsmul(channels[0], 1, &scale, &scaledScratch, 1, count)
-                    vDSP_vclip(scaledScratch, 1, &low, &high, &clippedScratch, 1, count)
-                    vDSP_vfixr16(clippedScratch, 1, pcmBase.advanced(by: frameOffset), 1, count)
+                    var energy: Float = 0
+                    vDSP_svesq(channels[0], 1, &energy, count)
+                    if energy.isFinite {
+                        vDSP_vsmul(channels[0], 1, &scale, &scaledScratch, 1, count)
+                        vDSP_vclip(scaledScratch, 1, &low, &high, &clippedScratch, 1, count)
+                        vDSP_vfixr16(clippedScratch, 1, pcmBase.advanced(by: frameOffset), 1, count)
+                    } else {
+                        for f in 0..<n {
+                            let s = channels[0][f]
+                            let clamped = s.isFinite ? max(-1.0, min(1.0, s)) : 0
+                            pcmBase[frameOffset + f] = Int16((clamped * 32767.0).rounded()).littleEndian
+                        }
+                    }
                 } else {
                     for f in 0..<n {
                         let dstIdx = (frameOffset + f) * channelCount

@@ -380,9 +380,14 @@ public actor TranscriptionCoordinator {
                            onFinished: @escaping @Sendable (TranscriptionExecutionCompletion) -> Void) async throws -> TranscriptionExecutionHandle {
         guard !userPaused else { throw TranscriptionExecutionError.userPaused }
         if origin == .continuedProcessing {
-            for _ in 0..<20 where startingManaged || startingRetry {
+            for _ in 0..<240 where startingManaged || startingRetry {
                 try await Task.sleep(for: .milliseconds(25))
             }
+        }
+        guard !startingManaged, !startingRetry else { throw TranscriptionExecutionError.busy }
+        startingManaged = true
+        defer { startingManaged = false }
+        if origin == .continuedProcessing {
             if retryScope != nil {
                 retryScope = nil
                 retrySources = nil
@@ -407,11 +412,9 @@ public actor TranscriptionCoordinator {
                 }
             }
         }
-        guard managed == nil, !startingManaged, !startingRetry, retryScope == nil else { throw TranscriptionExecutionError.busy }
+        guard managed == nil, retryScope == nil else { throw TranscriptionExecutionError.busy }
         let pauseRevision = lastUserPauseRevision
         let suspensionRevision = lastSceneSuspensionRevision
-        startingManaged = true
-        defer { startingManaged = false }
         let execution = try await archive.beginTranscriptionBatch(id: id, origin: origin)
         #if DEBUG
         await onAdmissionReturned?()

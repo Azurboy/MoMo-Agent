@@ -2,11 +2,23 @@ import Foundation
 import Observation
 import MoMoArchive
 
+struct PendingSpeakerOverride: Equatable {
+    let editID: UUID
+    let sessionID: UUID
+    let generation: Int64
+    let baseVersion: Int64
+    let spanIDs: Set<UUID>
+    let clusterID: UUID?
+    let speaker: String?
+    let attribution: SpeakerAttribution?
+}
+
 @MainActor @Observable
 final class LibraryModel {
     private(set) var watchStatus: WatchStatusObservation?
     private(set) var recordings: [RecordingSummary] = []
     private(set) var speakerProfiles: [SpeakerProfile] = []
+    private(set) var pendingSpeakerOverrides: [PendingSpeakerOverride] = []
     private(set) var fileIssues: [UUID: RecordingFileIssue] = [:]
     private(set) var speakerFeedbackFailure: String?
     private(set) var snapshotRevision: UInt64 = 0
@@ -21,6 +33,8 @@ final class LibraryModel {
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private var speakerFeedbackChain: Task<Void, Never>?
+    @ObservationIgnored private var inFlightSpeakerFeedbackCount = 0
+    @ObservationIgnored private var optimisticProfilesByID: [UUID: (name: String, isUser: Bool)] = [:]
     private var nextRecordingsCursor: String?
     private(set) var previews: [UUID: String] = [:]
     private(set) var searchResults: [LibrarySearchResult] = []
@@ -207,46 +221,168 @@ final class LibraryModel {
         speakerFeedbackFailure = nil
     }
 
-    /// Applies optimistic profile updates immediately and serializes voiceprint/cluster writes off the UI interaction path.
+    func awaitPendingSpeakerFeedback() async {
+        while let chain = speakerFeedbackChain {
+            await chain.value
+            if inFlightSpeakerFeedbackCount == 0 { break }
+        }
+    }
+
+    func effectiveSpeaker(
+        for source: SourceReference,
+        defaultSpeaker: String?,
+        defaultAttribution: SpeakerAttribution?
+    ) -> (speaker: String?, attribution: SpeakerAttribution?) {
+        for override in pendingSpeakerOverrides.reversed() {
+            guard override.sessionID == source.sessionID,
+                  override.generation == source.generation,
+                  source.transcriptVersion <= override.baseVersion else { continue }
+            if override.spanIDs.contains(source.spanID) {
+                return (override.speaker, override.attribution)
+            }
+            if let clusterID = override.clusterID, defaultAttribution?.clusterID == clusterID {
+                let clusterAttribution = override.attribution.map {
+                    SpeakerAttribution(
+                        clusterID: clusterID,
+                        personID: $0.personID,
+                        isUser: $0.isUser,
+                        confirmed: $0.confirmed,
+                        canLearn: defaultAttribution?.canLearn ?? $0.canLearn
+                    )
+                }
+                return (override.speaker, clusterAttribution)
+            }
+        }
+        return (defaultSpeaker, defaultAttribution)
+    }
+
+    private func mergeInFlightOptimisticProfiles(into loaded: [SpeakerProfile]) -> [SpeakerProfile] {
+        guard inFlightSpeakerFeedbackCount > 0, !optimisticProfilesByID.isEmpty else { return loaded }
+        var merged = loaded
+        for (id, entry) in optimisticProfilesByID {
+            let exists = merged.contains {
+                (entry.isUser && $0.isUser)
+                    || (!$0.isUser && !entry.isUser && $0.name.caseInsensitiveCompare(entry.name) == .orderedSame)
+            }
+            if !exists {
+                if entry.isUser {
+                    merged.insert(SpeakerProfile(id: id, name: entry.name, isUser: true), at: 0)
+                } else {
+                    merged.append(SpeakerProfile(id: id, name: entry.name, isUser: false))
+                }
+            }
+        }
+        return merged
+    }
+
+    /// Applies optimistic profile & cluster/span updates immediately and serializes voiceprint/cluster writes off the UI path.
     func enqueueSpeakerFeedback(
         sources: [SourceReference],
         speakerNameHint: String?,
         feedback: SpeakerFeedback,
         scope: SpeakerFeedbackScope,
+        optimisticSpeaker: String? = nil,
+        optimisticAttribution: SpeakerAttribution? = nil,
+        clusterID: UUID? = nil,
         onCommitted: (@MainActor () async -> Void)? = nil
     ) {
+        let editID = UUID()
+        inFlightSpeakerFeedbackCount += 1
+        var createdTempID: UUID?
         switch feedback {
         case .owner:
             if !speakerProfiles.contains(where: \.isUser) {
-                speakerProfiles.insert(SpeakerProfile(id: UUID(), name: String(localized: "我"), isUser: true), at: 0)
+                let id = optimisticAttribution?.personID ?? UUID()
+                let ownerName = String(localized: "我")
+                optimisticProfilesByID[id] = (name: ownerName, isUser: true)
+                createdTempID = id
+                speakerProfiles.insert(SpeakerProfile(id: id, name: ownerName, isUser: true), at: 0)
             }
         case .person(let raw):
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty,
                !speakerProfiles.contains(where: { !$0.isUser && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
-                speakerProfiles.append(SpeakerProfile(id: UUID(), name: trimmed, isUser: false))
+                let id = optimisticAttribution?.personID ?? UUID()
+                optimisticProfilesByID[id] = (name: trimmed, isUser: false)
+                createdTempID = id
+                speakerProfiles.append(SpeakerProfile(id: id, name: trimmed, isUser: false))
             }
         default:
             break
+        }
+        let knownTarget: (name: String, isUser: Bool)? = {
+            switch feedback {
+            case .knownPerson(let candidateID), .notPerson(let candidateID):
+                if let cached = optimisticProfilesByID[candidateID] { return cached }
+                if let existing = speakerProfiles.first(where: { $0.id == candidateID }) {
+                    return (existing.name, existing.isUser)
+                }
+                return nil
+            default:
+                return nil
+            }
+        }()
+        if let first = sources.first {
+            let maxBaseVersion = sources.filter { $0.sessionID == first.sessionID }.map(\.transcriptVersion).max() ?? first.transcriptVersion
+            let spanSet = Set(sources.filter { $0.sessionID == first.sessionID }.map(\.spanID))
+            pendingSpeakerOverrides.append(
+                PendingSpeakerOverride(
+                    editID: editID,
+                    sessionID: first.sessionID,
+                    generation: first.generation,
+                    baseVersion: maxBaseVersion,
+                    spanIDs: spanSet,
+                    clusterID: scope == .cluster ? clusterID : nil,
+                    speaker: optimisticSpeaker,
+                    attribution: optimisticAttribution
+                )
+            )
         }
         let previous = speakerFeedbackChain
         let archive = self.archive
         speakerFeedbackChain = Task { @MainActor [weak self] in
             await previous?.value
             guard let self else { return }
+            defer {
+                self.inFlightSpeakerFeedbackCount = max(0, self.inFlightSpeakerFeedbackCount - 1)
+                if let createdTempID, self.inFlightSpeakerFeedbackCount == 0 {
+                    self.optimisticProfilesByID.removeValue(forKey: createdTempID)
+                } else if self.inFlightSpeakerFeedbackCount == 0 {
+                    self.optimisticProfilesByID.removeAll()
+                }
+            }
             do {
                 let freshSources = (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
                 var effectiveFeedback = feedback
-                if case .notPerson(let candidateID) = feedback {
+                switch feedback {
+                case .knownPerson(let candidateID):
+                    let profiles = (try? await archive.speakerProfiles()) ?? self.speakerProfiles
+                    if !profiles.contains(where: { $0.id == candidateID }), let target = knownTarget {
+                        if target.isUser {
+                            effectiveFeedback = .owner
+                        } else if let matched = profiles.first(where: {
+                            !$0.isUser && $0.name.caseInsensitiveCompare(target.name) == .orderedSame
+                        }) {
+                            effectiveFeedback = .knownPerson(matched.id)
+                        } else {
+                            effectiveFeedback = .person(target.name)
+                        }
+                    }
+                case .notPerson(let candidateID):
                     let profiles = (try? await archive.speakerProfiles()) ?? self.speakerProfiles
                     if !profiles.contains(where: { $0.id == candidateID }) {
-                        if speakerNameHint == String(localized: "我"), let owner = profiles.first(where: \.isUser) {
+                        if knownTarget?.isUser == true || speakerNameHint == String(localized: "我"),
+                           let owner = profiles.first(where: \.isUser) {
                             effectiveFeedback = .notPerson(owner.id)
-                        } else if let hint = speakerNameHint,
-                                  let matched = profiles.first(where: { !$0.isUser && $0.name == hint }) {
+                        } else if let hint = knownTarget?.name ?? speakerNameHint,
+                                  let matched = profiles.first(where: {
+                                      !$0.isUser && $0.name.caseInsensitiveCompare(hint) == .orderedSame
+                                  }) {
                             effectiveFeedback = .notPerson(matched.id)
                         }
                     }
+                default:
+                    break
                 }
                 try await archive.correctSpeakers(
                     freshSources,
@@ -255,7 +391,7 @@ final class LibraryModel {
                     deferGlobalRematch: true
                 )
                 if let latestProfiles = try? await archive.speakerProfiles() {
-                    self.speakerProfiles = latestProfiles
+                    self.speakerProfiles = self.mergeInFlightOptimisticProfiles(into: latestProfiles)
                 }
                 let affectedSessions = Set(freshSources.map(\.sessionID))
                 var affectedDays: Set<TimelineDay> = [TimelineDay(Date())]
@@ -276,10 +412,13 @@ final class LibraryModel {
                 self.searchRevision &+= 1
                 self.snapshotRevision &+= 1
                 self.timeline.discardPendingReads(days: affectedDays)
-                await self.timeline.refresh()
                 self.speakerFeedbackFailure = nil
+                // Reload active detail views immediately so SourceReferences advance before timeline list refresh.
                 await onCommitted?()
+                self.pendingSpeakerOverrides.removeAll { $0.editID == editID }
+                await self.timeline.refresh()
             } catch {
+                self.pendingSpeakerOverrides.removeAll { $0.editID == editID }
                 self.speakerFeedbackFailure = error.localizedDescription
                 await self.refresh()
             }
@@ -365,7 +504,7 @@ final class LibraryModel {
                     }
                 }
                 self.recordings = recordings
-                self.speakerProfiles = loadedProfiles
+                self.speakerProfiles = self.mergeInFlightOptimisticProfiles(into: loadedProfiles)
                 self.previews = previews
                 searchedRecordings = searched
                 nextRecordingsCursor = cursor

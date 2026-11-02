@@ -356,7 +356,12 @@ struct RecordingDetailView: View {
     }
 
     private func transcript(_ span: TranscriptReadingTurn, in document: TranscriptDocument) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let effective = library.effectiveSpeaker(
+            for: span.source,
+            defaultSpeaker: span.speaker,
+            defaultAttribution: span.attribution
+        )
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 if let location = locations[span.id] {
                     Text(location.recordedAt.formatted(.dateTime.locale(AppLanguage.current.locale).hour().minute().second()))
@@ -365,18 +370,21 @@ struct RecordingDetailView: View {
                         .accessibilityIdentifier("transcript.time.\(span.id)")
                 }
                 SpeakerFeedbackMenu(
-                    speaker: span.speaker,
-                    attribution: span.attribution,
+                    speaker: effective.speaker,
+                    attribution: effective.attribution,
                     source: span.source,
                     additionalSources: Array(span.sources.dropFirst()),
                     initialPeople: library.speakerProfiles,
                     archive: library.archive,
-                    enqueueFeedback: { sources, speakerHint, feedback, scope in
+                    enqueueFeedback: { sources, speakerHint, feedback, scope, optimisticSpeaker, optimisticAttribution in
                         library.enqueueSpeakerFeedback(
                             sources: sources,
                             speakerNameHint: speakerHint,
                             feedback: feedback,
-                            scope: scope
+                            scope: scope,
+                            optimisticSpeaker: optimisticSpeaker,
+                            optimisticAttribution: optimisticAttribution,
+                            clusterID: effective.attribution?.clusterID
                         ) {
                             if let onSpeakersChanged { await onSpeakersChanged() }
                             await load()

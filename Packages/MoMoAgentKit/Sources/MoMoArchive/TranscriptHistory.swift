@@ -75,7 +75,7 @@ extension ArchiveStore {
             }
         }
 
-        for idx in hintIndices {
+        for idx in hintIndices where idx >= 0 {
             let blockPos = idx / 16
             if blockPos < stored.blocks.count {
                 try decodeBlock(at: blockPos)

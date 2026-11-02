@@ -173,7 +173,7 @@ public final class SpeechEngine: @unchecked Sendable {
     }
 
     private var effectiveCPUThreads: Int {
-        min(4, max(configuration.threads, ProcessInfo.processInfo.activeProcessorCount - 2))
+        min(4, max(configuration.threads, ProcessInfo.processInfo.processorCount - 2))
     }
 
     public static var speakerEmbeddingRevision: String { SpeakerRuntime.revision }
@@ -595,6 +595,7 @@ public final class SpeechEngine: @unchecked Sendable {
                     SpeakerTurn.plan($0, core: input.coreRange ?? input.samples.indices, sampleBounds: input.samples.indices)
                 } ?? []
 
+                var candidateSplit: SpeechRecognition?
                 if turns.count > 1, let detectedSpeakers {
                     do {
                         var decodedPieces: [(turn: SpeakerTurn, text: String, hasWords: Bool, raw: SpeechRecognition)] = []
@@ -617,6 +618,9 @@ public final class SpeechEngine: @unchecked Sendable {
                                 decodedPieces.append((turn, hasWords ? decoded.text : "", hasWords, decoded))
                             }
                             totalRecognizedFrames += clips.reduce(0) { $0 + Int64($1.samples.count) }
+                        }
+                        let droppedCleanTurn = decodedPieces.contains {
+                            !$0.hasWords && $0.turn.evidence.cleanSeconds >= 1.2 && $0.turn.frames.count >= 19_200
                         }
                         if let firstNonEmpty = decodedPieces.firstIndex(where: \.hasWords) {
                             var merged: [SpeakerTurnTranscript] = []
@@ -646,13 +650,19 @@ public final class SpeechEngine: @unchecked Sendable {
                             }
                             if !merged.isEmpty {
                                 let firstRaw = decodedPieces[firstNonEmpty].raw
-                                var split = SpeechRecognition(windowID: input.windowID, text: merged.map(\.text).joined(),
-                                    tokens: [], timestamps: [], rawJSON: firstRaw.rawJSON,
+                                let mergedText = merged.map(\.text).joined()
+                                let encodedText = (try? JSONEncoder().encode(mergedText)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+                                let combinedRawJSON = "{\"lang\":\"\",\"emotion\":\"\",\"event\":\"\",\"text\":\(encodedText),\"timestamps\":[],\"tokens\":[]}"
+                                var split = SpeechRecognition(windowID: input.windowID, text: mergedText,
+                                    tokens: [], timestamps: [], rawJSON: combinedRawJSON,
                                     configurationFingerprint: firstRaw.configurationFingerprint)
                                 split.recognitionFingerprint = firstRaw.recognitionFingerprint
                                 split.speakers = detectedSpeakers
                                 split.speakerTurns = merged
-                                return split
+                                if !droppedCleanTurn {
+                                    return split
+                                }
+                                candidateSplit = split
                             }
                         }
                     } catch {
@@ -661,13 +671,20 @@ public final class SpeechEngine: @unchecked Sendable {
                     }
                 }
 
-                // Single-speaker window or fallback when all split pieces returned empty.
+                // Single-speaker window or fallback when split pieces returned empty / dropped a clean speech turn.
                 let fullDecoded = try native(attempt: attempt, recorder: recorder)
                     .recognizeBatch([fullClip], fingerprint: configurationFingerprint, attempt: attempt,
                         onEvent: onEvent, recorder: recorder)
                 totalRecognizedFrames += Int64(fullClip.samples.count)
                 guard let result = fullDecoded.first, result.windowID == fullClip.windowID else {
                     throw SpeechError.nativeResult
+                }
+                if let candidateSplit {
+                    let fullWords = result.text.filter { $0.isLetter || $0.isNumber }.count
+                    let splitWords = candidateSplit.text.filter { $0.isLetter || $0.isNumber }.count
+                    if fullWords <= splitWords {
+                        return candidateSplit
+                    }
                 }
                 var aligned = SpeechRecognition(windowID: result.windowID, text: result.text, tokens: [],
                     timestamps: [], rawJSON: result.rawJSON, configurationFingerprint: result.configurationFingerprint)
