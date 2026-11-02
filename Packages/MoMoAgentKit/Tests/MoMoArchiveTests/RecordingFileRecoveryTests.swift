@@ -242,6 +242,101 @@ struct RecordingFileRecoveryTests {
         #expect(try await reopened.reconcileDocumentFiles().first?.issue == nil)
     }
 
+    @Test func legacyMarkersAndMatchingProjectionHashSelfHealBlockedSessions() async throws {
+        let legacy = try Fixture(), corruptedHistory = try Fixture()
+        defer { legacy.remove(); corruptedHistory.remove() }
+        let store = try legacy.store()
+
+        // 1. Pre-rebrand WatchMyLife markdown comment + WMLH1 history envelope self-heal.
+        let v1 = try await legacy.transcribe(store)
+        try await store.projectPendingDocuments()
+        let secondChunk = try legacy.envelope(startFrame: 1600, sequence: 1)
+        _ = try await store.commitReceivedChunk(legacy.deliver(secondChunk, to: store))
+        let secondTicket = try #require(await store.claimAnalysisJob(configurationHash: "model-v1"))
+        let v2 = try await store.commitTranscript(ticket: secondTicket, spans: legacy.spans(secondTicket))
+        try await store.projectPendingDocuments()
+        let legacyDir = try await store.transcriptDirectory(sessionID: legacy.sessionID)
+        try await store.simulateLegacyWatchMyLifeProjectionAndHistory(sessionID: legacy.sessionID, directory: legacyDir)
+
+        let healedLegacy = try await store.reconcileDocumentFiles()
+        let legacyResult = try #require(healedLegacy.first(where: { $0.sessionID == legacy.sessionID }))
+        #expect(legacyResult.issue == nil)
+        #expect(legacyResult.didUnblock)
+        #expect(try await store.transcriptFileURL(sessionID: legacy.sessionID, markdown: true).lastPathComponent == "transcript.md")
+        #expect(try await store.transcriptSnapshot(sessionID: legacy.sessionID, version: v1.version).document.spans == v1.spans)
+        #expect(try await store.readTranscript(sessionID: legacy.sessionID).spans == v2.spans)
+
+        // 2. Corrupted historical projection_version row self-heals when disk files match projection_hash.
+        let c1 = try await corruptedHistory.transcribe(store)
+        try await store.projectPendingDocuments(sessionID: corruptedHistory.sessionID)
+        let extraChunk = try corruptedHistory.envelope(startFrame: 1600, sequence: 1)
+        _ = try await store.commitReceivedChunk(corruptedHistory.deliver(extraChunk, to: store))
+        let extraTicket = try #require(await store.claimAnalysisJob(configurationHash: "model-v1"))
+        let c2 = try await store.commitTranscript(ticket: extraTicket, spans: corruptedHistory.spans(extraTicket))
+        try await store.simulateCorruptedHistoricalProjectionRow(sessionID: corruptedHistory.sessionID, projectedVersion: c1.version)
+
+        let healedCorrupted = try await store.reconcileDocumentFiles()
+        let corruptedResult = try #require(healedCorrupted.first(where: { $0.sessionID == corruptedHistory.sessionID }))
+        #expect(corruptedResult.issue == nil)
+        #expect(corruptedResult.didUnblock)
+        try await store.projectPendingDocuments(sessionID: corruptedHistory.sessionID, includeUnchanged: false)
+        #expect(try await store.recordingFileIssues(sessionID: corruptedHistory.sessionID).isEmpty)
+        #expect(try await store.readTranscript(sessionID: corruptedHistory.sessionID).version == c2.version)
+        let projectedJSONURL = try await store.transcriptFileURL(sessionID: corruptedHistory.sessionID, markdown: false)
+        let projectedJSON = try WireJSON.decode(
+            TranscriptDocument.self,
+            from: Data(contentsOf: projectedJSONURL)
+        )
+        #expect(projectedJSON.version == c2.version)
+    }
+
+    @Test func targetedReconciliationAndNullHashFallbackAndCancellationPreserveHealthySessions() async throws {
+        let blockedNullHash = try Fixture(), unrelated = try Fixture()
+        defer { blockedNullHash.remove(); unrelated.remove() }
+        let store = try blockedNullHash.store()
+
+        // 1. Null projection_hash + broken historical block reference self-heals via self-consistent disk snapshot.
+        let v1 = try await blockedNullHash.transcribe(store)
+        _ = try await unrelated.transcribe(store)
+        try await store.projectPendingDocuments()
+
+        let unrelatedURL = try await store.transcriptFileURL(sessionID: unrelated.sessionID)
+        try Data("外部临时编辑".utf8).write(to: unrelatedURL)
+
+        let secondChunk = try blockedNullHash.envelope(startFrame: 1600, sequence: 1)
+        _ = try await store.commitReceivedChunk(blockedNullHash.deliver(secondChunk, to: store))
+        let secondTicket = try #require(try await store.claimAnalysisJob(configurationHash: "model-v1"))
+        let v2 = try await store.commitTranscript(ticket: secondTicket, spans: blockedNullHash.spans(secondTicket))
+        try await store.simulateUnreadableHistoryWithNullProjectionHash(
+            sessionID: blockedNullHash.sessionID,
+            projectedVersion: v1.version
+        )
+
+        // Targeted reconciliation heals `blockedNullHash` without touching `unrelated`.
+        let targeted = try await store.reconcileDocumentFiles(onlyBlockedOrChanged: true)
+        #expect(targeted.map(\.sessionID) == [blockedNullHash.sessionID])
+        #expect(targeted.first?.issue == nil)
+        #expect(targeted.first?.didUnblock == true)
+        try await store.projectPendingDocuments(includeUnchanged: false)
+        #expect(try await store.readTranscript(sessionID: blockedNullHash.sessionID).version == v2.version)
+        #expect(try await store.isSessionProjectionBlocked(unrelated.sessionID) == false)
+
+        // 2. Cancelled tasks must rethrow CancellationError and never poison projection_blocked = 1.
+        let cancelledProject = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await store.projectPendingDocuments()
+        }
+        await #expect(throws: CancellationError.self) { try await cancelledProject.value }
+        #expect(try await store.isSessionProjectionBlocked(blockedNullHash.sessionID) == false)
+
+        let cancelledReconcile = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            _ = try await store.reconcileDocumentFiles()
+        }
+        await #expect(throws: CancellationError.self) { try await cancelledReconcile.value }
+        #expect(try await store.isSessionProjectionBlocked(blockedNullHash.sessionID) == false)
+    }
+
     private func move(_ directory: URL, inside root: URL, name: String) throws -> URL {
         let destination = root.appendingPathComponent("Documents/recordings/\(name)", isDirectory: true)
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -288,5 +383,54 @@ extension ArchiveStore {
             try database.execute("ALTER TABLE sessions DROP COLUMN manifest_projected")
             try database.execute("PRAGMA user_version=5")
         }
+    }
+
+    func simulateLegacyWatchMyLifeProjectionAndHistory(sessionID: UUID, directory: URL) throws {
+        let mdURL = directory.appendingPathComponent("transcript.md")
+        let jsonURL = directory.appendingPathComponent("transcript.json")
+        let legacyMD = try String(contentsOf: mdURL, encoding: .utf8)
+            .replacingOccurrences(of: "<!-- momoagent session=", with: "<!-- watchmylife session=")
+        let mdBytes = Data(legacyMD.utf8)
+        try mdBytes.write(to: mdURL)
+        let jsonBytes = try Data(contentsOf: jsonURL)
+        let hash = ContentHash.sha256(jsonBytes + mdBytes)
+        database.compactingTranscriptHistory = true
+        defer { database.compactingTranscriptHistory = false }
+        for row in try database.rows("SELECT version,document FROM transcript_versions WHERE session_id=? AND storage_format=1", [.text(sessionID.uuidString)]) {
+            let doc = try row.requireData(1)
+            if doc.starts(with: Data("MoMoH1\n".utf8)) {
+                let rewritten = Data("WMLH1\n".utf8) + doc.dropFirst(7)
+                try database.execute("UPDATE transcript_versions SET document=? WHERE session_id=? AND version=?",
+                    [.blob(rewritten), .text(sessionID.uuidString), .integer(try row.requireInt(0))])
+            }
+        }
+        try database.execute("UPDATE sessions SET projection_hash=?,projection_blocked=1 WHERE id=?",
+            [.text(hash), .text(sessionID.uuidString)])
+        verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+    }
+
+    func simulateCorruptedHistoricalProjectionRow(sessionID: UUID, projectedVersion: Int64) throws {
+        database.compactingTranscriptHistory = true
+        defer { database.compactingTranscriptHistory = false }
+        let bogus = TranscriptDocument(sessionID: sessionID, version: projectedVersion, generation: 0, spans: [], updatedAt: Date(timeIntervalSince1970: 0))
+        try database.execute("UPDATE transcript_versions SET document=?,storage_format=0 WHERE session_id=? AND version=?",
+            [.blob(try WireJSON.encode(bogus)), .text(sessionID.uuidString), .integer(projectedVersion)])
+        try database.execute("UPDATE sessions SET projection_blocked=1 WHERE id=?", [.text(sessionID.uuidString)])
+        verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+    }
+
+    func simulateUnreadableHistoryWithNullProjectionHash(sessionID: UUID, projectedVersion: Int64) throws {
+        database.compactingTranscriptHistory = true
+        defer { database.compactingTranscriptHistory = false }
+        let corruptEnvelope = Data("MoMoH1\n{\"broken\":true}".utf8)
+        try database.execute("UPDATE transcript_versions SET document=?,storage_format=1 WHERE session_id=? AND version=?",
+            [.blob(corruptEnvelope), .text(sessionID.uuidString), .integer(projectedVersion)])
+        try database.execute("UPDATE sessions SET projection_hash=NULL,projection_blocked=1 WHERE id=?",
+            [.text(sessionID.uuidString)])
+        verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+    }
+
+    func isSessionProjectionBlocked(_ sessionID: UUID) throws -> Bool {
+        try database.rows("SELECT projection_blocked FROM sessions WHERE id=?", [.text(sessionID.uuidString)]).first?.integer(0) == 1
     }
 }

@@ -354,6 +354,36 @@ extension ArchiveStore {
                     }
                 }
             }
+
+            // Final sweep: if an epoch in this batch has no remaining pending/running windows
+            // and no remaining unanalyzed preparation ranges, any residual frozen gap (e.g. VAD
+            // sub-window boundary frames) has no claimable work left and must not wedge batch completion.
+            let postBatch = try transcriptionBatch(id: batchID)
+            for coverage in postBatch.coverage {
+                let residual = try CoverageRanges.subtract(coverage.frozen, coverage.completed + coverage.removed)
+                guard !residual.isEmpty else { continue }
+                let hasPendingWindow = try !database.rows("""
+                    SELECT 1 FROM transcription_batch_windows m
+                    JOIN analysis_windows w ON w.id=m.window_id
+                    WHERE m.batch_id=? AND m.epoch_id=? AND w.state IN ('pending','running')
+                    LIMIT 1
+                    """, [.text(batchID.uuidString), .text(coverage.epochID.uuidString)]).isEmpty
+                guard !hasPendingWindow else { continue }
+                let hasRunningAnalysis = try database.rows(
+                    "SELECT attempt_id FROM analysis_epochs WHERE epoch_id=? AND configuration_hash=?",
+                    [.text(coverage.epochID.uuidString), .text(configurationFingerprint)]
+                ).first?.string(0) != nil
+                guard !hasRunningAnalysis else { continue }
+                let remainingUnprepared = try CoverageRanges.subtract(
+                    batchPreparationRanges(id: batchID, epochID: coverage.epochID),
+                    analyzedRanges(epochID: coverage.epochID, fingerprint: configurationFingerprint)
+                )
+                guard remainingUnprepared.isEmpty else { continue }
+                for slice in residual {
+                    try deferBatchSlice(batchID: batchID, sessionID: coverage.sessionID, epochID: coverage.epochID, frames: slice)
+                    deferredCount += 1
+                }
+            }
             return deferredCount
         }
     }

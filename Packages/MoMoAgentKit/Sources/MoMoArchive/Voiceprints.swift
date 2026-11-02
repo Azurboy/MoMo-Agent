@@ -7,6 +7,19 @@ public struct SpeakerAttribution: Codable, Equatable, Sendable {
     public let isUser: Bool
     public let confirmed: Bool
     public let canLearn: Bool
+
+    public init(clusterID: UUID, personID: UUID?, isUser: Bool, confirmed: Bool, canLearn: Bool) {
+        self.clusterID = clusterID
+        self.personID = personID
+        self.isUser = isUser
+        self.confirmed = confirmed
+        self.canLearn = canLearn
+    }
+}
+
+public struct FullSpeakerRematchPlan: Sendable {
+    public let sessionIDs: [UUID]
+    public let totalObservationCount: Int
 }
 
 public struct SpeakerProfile: Identifiable, Equatable, Sendable {
@@ -15,6 +28,14 @@ public struct SpeakerProfile: Identifiable, Equatable, Sendable {
     public let isUser: Bool
     public let sampleCount: Int
     public let correctionCount: Int
+
+    public init(id: UUID, name: String, isUser: Bool, sampleCount: Int = 0, correctionCount: Int = 0) {
+        self.id = id
+        self.name = name
+        self.isUser = isUser
+        self.sampleCount = sampleCount
+        self.correctionCount = correctionCount
+    }
 }
 
 public struct VoiceprintSeedCandidate: Sendable {
@@ -2319,14 +2340,84 @@ extension ArchiveStore {
                 WHERE s.deleted=0
                 """).map { try $0.requireUUID(0) })
             try refreshSpeakerMatches(editedSessions: allSessions)
-            let count = try database.rows("""
+            return try matchedSpeakerObservationCount()
+        }
+    }
+
+    /// Prepares the voiceprint feature banks and reconciles multi-cluster sessions up front,
+    /// returning ordered session IDs so UI callers can report determinate progress and ETA per batch.
+    public func prepareFullSpeakerRematch() throws -> FullSpeakerRematchPlan {
+        try speakerTransaction {
+            invalidateVoiceprintCache()
+            let baseCache = try ensureBaseVoiceprintCache()
+            let multiClusterRows = try database.rows("""
+                SELECT c.session_id
+                FROM speaker_clusters c
+                JOIN sessions s ON s.id=c.session_id
+                WHERE s.deleted=0 AND c.model_revision!='manual-label'
+                GROUP BY c.session_id
+                HAVING COUNT(*) >= 2
+                """)
+            for row in multiClusterRows {
+                _ = try reconcileSpeakerClusters(sessionID: row.requireUUID(0), preparedBanks: baseCache.basePrepared)
+            }
+            invalidateTransductiveVoiceprintCache()
+            _ = try ensureEnrichedPreparedBanks()
+            let sessionIDs = try database.rows("""
+                SELECT s.id
+                FROM sessions s
+                WHERE s.deleted=0 AND EXISTS (SELECT 1 FROM speaker_observations o WHERE o.session_id=s.id)
+                ORDER BY s.rowid DESC
+                """).map { try $0.requireUUID(0) }
+            let observationCount = Int(try database.rows("""
                 SELECT COUNT(*)
                 FROM speaker_observations o
                 JOIN sessions s ON s.id=o.session_id
-                WHERE s.deleted=0 AND (o.confirmed_person IS NOT NULL OR o.matched_person IS NOT NULL)
-                """).first?.integer(0) ?? 0
-            return Int(count)
+                WHERE s.deleted=0
+                """).first?.integer(0) ?? 0)
+            return FullSpeakerRematchPlan(sessionIDs: sessionIDs, totalObservationCount: observationCount)
         }
+    }
+
+    /// Re-labels a bounded batch of sessions using the prepared voiceprint banks, returning how many sessions changed.
+    public func rematchSpeakerSessionsStep(_ sessionIDs: [UUID]) throws -> Int {
+        guard !sessionIDs.isEmpty else { return 0 }
+        let updatedCount = try speakerTransaction {
+            let baseCache = try ensureBaseVoiceprintCache()
+            var enrichedPrepared = try ensureEnrichedPreparedBanks()
+            let people = baseCache.people
+            var count = 0
+            for id in sessionIDs {
+                guard try !sessionIsDeleted(id),
+                      let document = try currentTranscriptOrNil(sessionID: id) else { continue }
+                let spans = try labeledSpeakerSpans(document.spans, sessionID: id, people: people, preparedBanks: &enrichedPrepared)
+                if spans != document.spans {
+                    try storeDocument(
+                        TranscriptDocument(
+                            sessionID: id,
+                            version: document.version + 1,
+                            generation: document.generation,
+                            spans: spans,
+                            updatedAt: Date()),
+                        invalidatesExistingSources: true,
+                        knownPrevious: .some(document))
+                    count += 1
+                }
+            }
+            return count
+        }
+        pendingSpeakerRematchSessionIDs.subtract(sessionIDs)
+        return updatedCount
+    }
+
+    public func matchedSpeakerObservationCount() throws -> Int {
+        let count = try database.rows("""
+            SELECT COUNT(*)
+            FROM speaker_observations o
+            JOIN sessions s ON s.id=o.session_id
+            WHERE s.deleted=0 AND (o.confirmed_person IS NOT NULL OR o.matched_person IS NOT NULL)
+            """).first?.integer(0) ?? 0
+        return Int(count)
     }
 
     /// Harvests high-confidence multi-turn cluster centroids across recordings as domain-bridged
@@ -2461,19 +2552,36 @@ extension ArchiveStore {
         pendingSpeakerRematchSessionIDs.removeAll()
     }
 
+    public func resolveCurrentSpeakerSources(_ sources: [SourceReference]) throws -> [SourceReference] {
+        guard !sources.isEmpty, sources.count <= Self.maximumSourceReferences else { throw ArchiveError.invalidQuery }
+        var currentBySession: [UUID: (doc: TranscriptDocument, spans: [UUID: TranscriptSpan])] = [:]
+        for sessionID in Set(sources.map(\.sessionID)) {
+            let doc = try readTranscript(sessionID: sessionID)
+            let map = Dictionary(uniqueKeysWithValues: doc.spans.map { ($0.id, $0) })
+            currentBySession[sessionID] = (doc, map)
+        }
+        return try sources.map { source in
+            guard let entry = currentBySession[source.sessionID],
+                  entry.doc.generation == source.generation,
+                  let span = entry.spans[source.spanID] else {
+                throw ArchiveError.staleSource
+            }
+            return entry.doc.source(for: span)
+        }
+    }
+
     private func rematchSessionsDeferringOthers(immediateSessions: Set<UUID>) throws {
         let baseCache = try ensureBaseVoiceprintCache()
         for sessionID in immediateSessions {
-            if try reconcileSpeakerClusters(sessionID: sessionID, preparedBanks: baseCache.basePrepared) {
-                invalidateTransductiveVoiceprintCache()
-            }
+            _ = try reconcileSpeakerClusters(sessionID: sessionID, preparedBanks: baseCache.basePrepared)
         }
-        var enrichedPrepared = try ensureEnrichedPreparedBanks()
+        invalidateTransductiveVoiceprintCache()
+        var immediatePrepared = baseCache.basePrepared
         let people = baseCache.people
         for id in immediateSessions {
             guard try !sessionIsDeleted(id),
                   let document = try currentTranscriptOrNil(sessionID: id) else { continue }
-            let spans = try labeledSpeakerSpans(document.spans, sessionID: id, people: people, preparedBanks: &enrichedPrepared)
+            let spans = try labeledSpeakerSpans(document.spans, sessionID: id, people: people, preparedBanks: &immediatePrepared)
             if spans != document.spans {
                 try storeDocument(
                     TranscriptDocument(

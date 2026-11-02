@@ -687,7 +687,7 @@ extension ArchiveStore {
     func overlaps(_ lhs: FrameRange, _ rhs: FrameRange) -> Bool { lhs.start < rhs.end && rhs.start < lhs.end }
 }
 
-private func analysisInputIdentity(_ inputs: [ArchivedAudioInput], start: Int64, boundary: AudioProcessingBoundary) throws -> String {
+func analysisInputIdentity(_ inputs: [ArchivedAudioInput], start: Int64, boundary: AudioProcessingBoundary) throws -> String {
     guard let last = inputs.last else { throw ArchiveError.invalidTranscript }
     return ContentHash.sha256(try WireJSON.encode(AnalysisIdentity(hashes: inputs.map { $0.envelope.manifestSHA256 },
         closed: boundary.endFrame != nil, start: start,

@@ -178,10 +178,39 @@ extension ArchiveStore {
         // A large read shares documents; validate each version once, rather than decoding it once per span.
         for (sessionID, references) in Dictionary(grouping: sources, by: \.sessionID) {
             let current = try readTranscript(sessionID: sessionID)
-            let currentSpans = Dictionary(uniqueKeysWithValues: current.spans.map { ($0.id, $0) })
+            var currentSpans: [UUID: TranscriptSpan] = [:]
+            var currentIndices: [UUID: Int] = [:]
+            currentSpans.reserveCapacity(current.spans.count)
+            currentIndices.reserveCapacity(current.spans.count)
+            for (idx, span) in current.spans.enumerated() {
+                currentSpans[span.id] = span
+                currentIndices[span.id] = idx
+            }
             for (version, citations) in Dictionary(grouping: references, by: \.transcriptVersion) {
-                let cited = try snapshotDocument(current: current, version: version)
-                let citedSpans = Dictionary(uniqueKeysWithValues: cited.spans.map { ($0.id, $0) })
+                if version == current.version {
+                    for source in citations {
+                        guard source.generation == current.generation,
+                              currentSpans[source.spanID] != nil else {
+                            throw ArchiveError.staleSource
+                        }
+                    }
+                    continue
+                }
+                guard version > 0, version < current.version,
+                      let row = try database.rows(
+                          "SELECT document FROM transcript_versions WHERE session_id=? AND version=?",
+                          [.text(current.sessionID.uuidString), .integer(version)]
+                      ).first else {
+                    throw ArchiveError.staleSource
+                }
+                let neededIDs = Set(citations.map(\.spanID))
+                let hints = neededIDs.compactMap { currentIndices[$0] }
+                let citedSpans = try decodeStoredTranscriptSpans(
+                    row.requireData(0),
+                    expectedGeneration: current.generation,
+                    spanIDs: neededIDs,
+                    hintIndices: hints
+                )
                 for source in citations {
                     guard source.generation == current.generation,
                           let span = currentSpans[source.spanID], citedSpans[source.spanID] == span else {
@@ -379,10 +408,20 @@ extension ArchiveStore {
         verifiedRecordingFilesCache.removeValue(forKey: document.sessionID)
         var compactedPrefix: (fullSpanCount: Int, blockIDs: [Int64])?
         if let previous {
-            compactedPrefix = try compactTranscriptVersion(
+            let previousCompacted = try compactTranscriptVersion(
                 previous,
                 trustedPrefix: appendingSpans != nil ? trustedPreviousBlockPrefix : nil
             )
+            if appendingSpans != nil {
+                // Out-of-order chunks can insert spans before the tail via orderedSpans; only
+                // full 16-span blocks within the unchanged leading prefix may carry forward.
+                let commonPrefixCount = zip(previous.spans, document.spans).prefix(while: { $0 == $1 }).count
+                let reusableBlocks = min(previousCompacted.blockIDs.count, commonPrefixCount / 16)
+                compactedPrefix = (
+                    fullSpanCount: reusableBlocks * 16,
+                    blockIDs: Array(previousCompacted.blockIDs.prefix(reusableBlocks))
+                )
+            }
         }
         let encoded = try preencodedDocument ?? WireJSON.encode(document)
         try database.execute("INSERT INTO transcript_versions(session_id,version,document) VALUES(?,?,?)", [.text(document.sessionID.uuidString), .integer(document.version), .blob(encoded)])

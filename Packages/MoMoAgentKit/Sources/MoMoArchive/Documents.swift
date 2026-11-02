@@ -37,6 +37,8 @@ extension ArchiveStore {
                 if try row.requireInt(1) > row.requireInt(2) { try projectTranscript(sessionID: id) }
                 try database.execute("DELETE FROM metadata WHERE key=?", [.text("recording_projection_pending/" + id.uuidString)])
                 cacheVerifiedRecordingFiles(sessionID: id)
+            } catch let error as CancellationError {
+                throw error
             } catch {
                 try blockProjection(sessionID: id)
                 if firstFailure == nil { firstFailure = error }
@@ -45,10 +47,13 @@ extension ArchiveStore {
         }
         if sessionID == nil {
             for row in try database.rows("SELECT document FROM plans WHERE state='pending'") {
+                try Task.checkCancellation()
                 do { try projectPlan(try WireJSON.decode(PlanDocument.self, from: row.requireData(0))) }
+                catch let error as CancellationError { throw error }
                 catch { if firstFailure == nil { firstFailure = error } }
             }
             do { try cleanDeletedPlanFiles() }
+            catch let error as CancellationError { throw error }
             catch { if firstFailure == nil { firstFailure = error } }
         }
         if let firstFailure { throw firstFailure }
@@ -62,7 +67,13 @@ extension ArchiveStore {
         let url = directory.appendingPathComponent(markdown ? "transcript.md" : "transcript.json")
         try validateRecordingPath(url)
         let expected = try markdown ? Data(transcriptMarkdown(document).utf8) : WireJSON.encode(document)
-        guard files.fileExists(atPath: url.path), try Data(contentsOf: url) == expected else {
+        guard files.fileExists(atPath: url.path) else {
+            try blockProjection(sessionID: sessionID)
+            throw ArchiveError.projectionConflict
+        }
+        let actual = try Data(contentsOf: url)
+        let matches = actual == expected || (markdown && actual == Data(legacyTranscriptMarkdown(document).utf8))
+        guard matches else {
             try blockProjection(sessionID: sessionID)
             throw ArchiveError.projectionConflict
         }
@@ -109,9 +120,10 @@ extension ArchiveStore {
 
     func projectTranscript(sessionID: UUID) throws {
         let document = try readTranscript(sessionID: sessionID)
-        guard let row = try database.rows("SELECT projection_version,projection_blocked FROM sessions WHERE id=?", [.text(sessionID.uuidString)]).first,
+        guard let row = try database.rows("SELECT projection_version,projection_blocked,projection_hash FROM sessions WHERE id=?", [.text(sessionID.uuidString)]).first,
               row.integer(1) == 0 else { throw ArchiveError.projectionConflict }
         let version = try row.requireInt(0)
+        let projectionHash = row.string(2)
         let directory = try transcriptDirectory(sessionID: sessionID)
         let jsonURL = directory.appendingPathComponent("transcript.json")
         let markdownURL = directory.appendingPathComponent("transcript.md")
@@ -120,13 +132,31 @@ extension ArchiveStore {
         let json = try WireJSON.encode(document)
         let markdown = Data(transcriptMarkdown(document).utf8)
         if version > 0 {
-            guard let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(version)]).first else { throw ArchiveError.database(11) }
-            let old = try decodeStoredTranscript(previous.requireData(0))
-            let oldJSON = try WireJSON.encode(old), oldMarkdown = Data(transcriptMarkdown(old).utf8)
-            for (url, before, after) in [(jsonURL, oldJSON, json), (markdownURL, oldMarkdown, markdown)] {
-                guard files.fileExists(atPath: url.path) else { try blockProjection(sessionID: sessionID); throw ArchiveError.projectionConflict }
-                let existing = try Data(contentsOf: url)
-                guard existing == before || existing == after else { try blockProjection(sessionID: sessionID); throw ArchiveError.projectionConflict }
+            guard files.fileExists(atPath: jsonURL.path), files.fileExists(atPath: markdownURL.path) else {
+                try blockProjection(sessionID: sessionID)
+                throw ArchiveError.projectionConflict
+            }
+            let existingJSON = try Data(contentsOf: jsonURL)
+            let existingMarkdown = try Data(contentsOf: markdownURL)
+            let matchesLastProjection = projectionHash != nil && ContentHash.sha256(existingJSON + existingMarkdown) == projectionHash
+            let matchesCurrentProjection = existingJSON == json
+                && (existingMarkdown == markdown || existingMarkdown == Data(legacyTranscriptMarkdown(document).utf8))
+            if !matchesLastProjection && !matchesCurrentProjection {
+                var verifiedAgainstHistory = false
+                if let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(version)]).first,
+                   let old = try? decodeStoredTranscript(previous.requireData(0)),
+                   let oldJSON = try? WireJSON.encode(old) {
+                    let oldMarkdown = Data(transcriptMarkdown(old).utf8)
+                    let legacyOldMarkdown = Data(legacyTranscriptMarkdown(old).utf8)
+                    verifiedAgainstHistory = (existingJSON == oldJSON || existingJSON == json)
+                        && (existingMarkdown == oldMarkdown || existingMarkdown == legacyOldMarkdown || existingMarkdown == markdown)
+                }
+                if !verifiedAgainstHistory,
+                   !matchesUneditedPriorProjection(existingJSON: existingJSON, existingMarkdown: existingMarkdown,
+                                                  projectedVersion: version, current: document) {
+                    try blockProjection(sessionID: sessionID)
+                    throw ArchiveError.projectionConflict
+                }
             }
         }
         try validateRecordingPath(directory)
@@ -153,7 +183,43 @@ extension ArchiveStore {
     }
 
     func transcriptMarkdown(_ document: TranscriptDocument) -> String {
-        var lines = ["# 转录", "", "<!-- momoagent session=\(document.sessionID.uuidString) version=\(document.version) generation=\(document.generation) -->", ""]
+        formattedTranscriptMarkdown(document, productTag: "momoagent")
+    }
+
+    func legacyTranscriptMarkdown(_ document: TranscriptDocument) -> String {
+        formattedTranscriptMarkdown(document, productTag: "watchmylife")
+    }
+
+    /// Fallback when `projection_hash` is absent (pre-migration rows) and historical `transcript_versions`
+    /// cannot be decoded: verifies that disk JSON + Markdown are a self-consistent, unedited prior snapshot
+    /// whose spans all match the current authoritative transcript.
+    func matchesUneditedPriorProjection(existingJSON: Data, existingMarkdown: Data,
+                                        projectedVersion: Int64, current: TranscriptDocument) -> Bool {
+        guard existingJSON.count <= 8 * 1024 * 1024,
+              let prior = try? WireJSON.decode(TranscriptDocument.self, from: existingJSON),
+              prior.sessionID == current.sessionID,
+              prior.version == projectedVersion,
+              prior.generation == current.generation,
+              (try? WireJSON.encode(prior)) == existingJSON else {
+            return false
+        }
+        let expectedMarkdown = Data(transcriptMarkdown(prior).utf8)
+        let expectedLegacyMarkdown = Data(legacyTranscriptMarkdown(prior).utf8)
+        guard existingMarkdown == expectedMarkdown || existingMarkdown == expectedLegacyMarkdown else {
+            return false
+        }
+        let currentByID = Dictionary(uniqueKeysWithValues: current.spans.map { ($0.id, $0) })
+        return prior.spans.allSatisfy { span in
+            guard let authoritative = currentByID[span.id] else { return false }
+            return authoritative.chunkID == span.chunkID
+                && authoritative.frames == span.frames
+                && authoritative.sourceRanges == span.sourceRanges
+                && authoritative.text == span.text
+        }
+    }
+
+    private func formattedTranscriptMarkdown(_ document: TranscriptDocument, productTag: String) -> String {
+        var lines = ["# 转录", "", "<!-- \(productTag) session=\(document.sessionID.uuidString) version=\(document.version) generation=\(document.generation) -->", ""]
         for span in document.spans {
             lines += ["<!-- span=\(span.id.uuidString) chunk=\(span.chunkID.uuidString) start=\(span.frames.start) count=\(span.frames.count) -->", span.text, ""]
         }

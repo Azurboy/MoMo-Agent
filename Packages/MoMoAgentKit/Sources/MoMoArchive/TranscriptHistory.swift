@@ -8,13 +8,19 @@ private struct StoredTranscriptHistory: Codable {
 
 extension ArchiveStore {
     private static let historyPrefix = Data("MoMoH1\n".utf8)
+    private static let legacyHistoryPrefix = Data("WMLH1\n".utf8)
 
     /// Current versions stay JSON for timeline SQL. Historical versions share immutable blocks.
     func decodeStoredTranscript(_ data: Data) throws -> TranscriptDocument {
-        guard data.starts(with: Self.historyPrefix) else {
+        let prefixLength: Int
+        if data.starts(with: Self.historyPrefix) {
+            prefixLength = Self.historyPrefix.count
+        } else if data.starts(with: Self.legacyHistoryPrefix) {
+            prefixLength = Self.legacyHistoryPrefix.count
+        } else {
             return try WireJSON.decode(TranscriptDocument.self, from: data)
         }
-        let stored = try WireJSON.decode(StoredTranscriptHistory.self, from: Data(data.dropFirst(Self.historyPrefix.count)))
+        let stored = try WireJSON.decode(StoredTranscriptHistory.self, from: Data(data.dropFirst(prefixLength)))
         guard stored.header.spans.isEmpty else { throw ArchiveError.invalidTranscript }
         var spans: [TranscriptSpan] = []
         for id in stored.blocks {
@@ -26,6 +32,62 @@ extension ArchiveStore {
         let header = stored.header
         return TranscriptDocument(sessionID: header.sessionID, version: header.version, generation: header.generation,
                                   spans: spans, updatedAt: header.updatedAt)
+    }
+
+    /// Targeted historical span lookup that avoids decompressing unrelated 16-span blocks when validating citations.
+    func decodeStoredTranscriptSpans(
+        _ data: Data,
+        expectedGeneration: Int64,
+        spanIDs: Set<UUID>,
+        hintIndices: [Int]
+    ) throws -> [UUID: TranscriptSpan] {
+        let prefixLength: Int
+        if data.starts(with: Self.historyPrefix) {
+            prefixLength = Self.historyPrefix.count
+        } else if data.starts(with: Self.legacyHistoryPrefix) {
+            prefixLength = Self.legacyHistoryPrefix.count
+        } else {
+            let doc = try WireJSON.decode(TranscriptDocument.self, from: data)
+            guard doc.generation == expectedGeneration else { throw ArchiveError.staleSource }
+            var found: [UUID: TranscriptSpan] = [:]
+            for span in doc.spans where spanIDs.contains(span.id) {
+                found[span.id] = span
+            }
+            return found
+        }
+        let stored = try WireJSON.decode(StoredTranscriptHistory.self, from: Data(data.dropFirst(prefixLength)))
+        guard stored.header.spans.isEmpty else { throw ArchiveError.invalidTranscript }
+        guard stored.header.generation == expectedGeneration else { throw ArchiveError.staleSource }
+        guard !spanIDs.isEmpty, !stored.blocks.isEmpty else { return [:] }
+
+        var found: [UUID: TranscriptSpan] = [:]
+        var decodedBlockPositions: Set<Int> = []
+        func decodeBlock(at pos: Int) throws {
+            guard pos >= 0, pos < stored.blocks.count, decodedBlockPositions.insert(pos).inserted else { return }
+            let blockID = stored.blocks[pos]
+            guard let row = try database.rows(
+                "SELECT document FROM transcript_blocks WHERE id=? AND session_id=?",
+                [.integer(blockID), .text(stored.header.sessionID.uuidString)]
+            ).first else { throw ArchiveError.invalidTranscript }
+            let bytes = try (row.requireData(0) as NSData).decompressed(using: .lzfse) as Data
+            for span in try WireJSON.decode([TranscriptSpan].self, from: bytes) where spanIDs.contains(span.id) {
+                found[span.id] = span
+            }
+        }
+
+        for idx in hintIndices {
+            let blockPos = idx / 16
+            if blockPos < stored.blocks.count {
+                try decodeBlock(at: blockPos)
+            }
+        }
+        if found.count < spanIDs.count {
+            for pos in stored.blocks.indices where !decodedBlockPositions.contains(pos) {
+                try decodeBlock(at: pos)
+                if found.count == spanIDs.count { break }
+            }
+        }
+        return found
     }
 
     @discardableResult
@@ -40,11 +102,21 @@ extension ArchiveStore {
            prefix.fullSpanCount % 16 == 0,
            prefix.fullSpanCount <= document.spans.count,
            prefix.blockIDs.count == prefix.fullSpanCount / 16 {
-            let existingCount = try database.rows(
-                "SELECT COUNT(*) FROM transcript_blocks WHERE session_id=?",
-                [.text(document.sessionID.uuidString)]
-            ).first?.integer(0) ?? 0
-            if existingCount >= Int64(prefix.blockIDs.count) {
+            var allMatched = true
+            for (blockIndex, blockID) in prefix.blockIDs.enumerated() {
+                let sliceStart = blockIndex * 16
+                let sliceBytes = try WireJSON.encode(Array(document.spans[sliceStart..<(sliceStart + 16)]))
+                let expectedHash = ContentHash.sha256(sliceBytes)
+                let storedHash = try database.rows(
+                    "SELECT hash FROM transcript_blocks WHERE id=? AND session_id=?",
+                    [.integer(blockID), .text(document.sessionID.uuidString)]
+                ).first?.string(0)
+                if storedHash != expectedHash {
+                    allMatched = false
+                    break
+                }
+            }
+            if allMatched {
                 ids = prefix.blockIDs
                 scanStart = prefix.fullSpanCount
             }

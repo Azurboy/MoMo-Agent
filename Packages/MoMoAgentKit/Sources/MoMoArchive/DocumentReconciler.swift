@@ -4,24 +4,36 @@ import MoMoContracts
 public struct DocumentReconciliation: Sendable {
     public let sessionID: UUID
     public let didRevise: Bool
+    public let didUnblock: Bool
     public let issue: RecordingFileIssue?
     public let result: Result<Int64, Error>
 }
 
 extension ArchiveStore {
     /// Reconcile each session independently so one conflicting edit does not hide other changes.
-    public func reconcileDocumentFiles() async throws -> [DocumentReconciliation] {
-        let ids = try database.rows("SELECT id FROM sessions WHERE deleted=0 AND document_directory IS NOT NULL").map { try $0.requireUUID(0) }
+    public func reconcileDocumentFiles(onlyBlockedOrChanged: Bool = false) async throws -> [DocumentReconciliation] {
+        let ids: [UUID]
+        if onlyBlockedOrChanged {
+            ids = try database.rows("""
+                SELECT id FROM sessions
+                WHERE deleted=0 AND document_directory IS NOT NULL
+                  AND (projection_blocked!=0 OR transcript_version>projection_version OR manifest_projected=0
+                       OR EXISTS (SELECT 1 FROM metadata m WHERE m.key='recording_projection_pending/'||sessions.id))
+                """).map { try $0.requireUUID(0) }
+        } else {
+            ids = try database.rows("SELECT id FROM sessions WHERE deleted=0 AND document_directory IS NOT NULL").map { try $0.requireUUID(0) }
+        }
         var results: [DocumentReconciliation] = []
         for id in ids {
             try Task.checkCancellation()
-            guard let row = try database.rows("SELECT id,transcript_version FROM sessions WHERE id=? AND deleted=0 AND document_directory IS NOT NULL", [.text(id.uuidString)]).first else { continue }
+            guard let row = try database.rows("SELECT id,transcript_version,projection_blocked FROM sessions WHERE id=? AND deleted=0 AND document_directory IS NOT NULL", [.text(id.uuidString)]).first else { continue }
             let previousVersion = try row.requireInt(1)
+            let wasBlocked = row.integer(2) == 1
             do {
                 let inspection = try inspectRecordingFiles(sessionID: id)
                 if let issue = inspection.issue {
                     try blockProjection(sessionID: id)
-                    results.append(DocumentReconciliation(sessionID: id, didRevise: false, issue: issue, result: .failure(ArchiveError.projectionConflict)))
+                    results.append(DocumentReconciliation(sessionID: id, didRevise: false, didUnblock: false, issue: issue, result: .failure(ArchiveError.projectionConflict)))
                     await Task.yield()
                     continue
                 }
@@ -34,7 +46,9 @@ extension ArchiveStore {
                     try database.execute("UPDATE sessions SET projection_blocked=0 WHERE id=? AND projection_blocked!=0", [.text(id.uuidString)])
                 }
                 let version = try sessionTranscriptVersion(id)
-                results.append(DocumentReconciliation(sessionID: id, didRevise: version > previousVersion, issue: nil, result: .success(version)))
+                results.append(DocumentReconciliation(sessionID: id, didRevise: version > previousVersion, didUnblock: wasBlocked, issue: nil, result: .success(version)))
+            } catch let error as CancellationError {
+                throw error
             } catch {
                 try blockProjection(sessionID: id)
                 // A revision may already be committed when writing its file projection fails.
@@ -42,7 +56,7 @@ extension ArchiveStore {
                     throw ArchiveError.missingTranscript(id)
                 }
                 let issue = try unreadableRecordingIssue(sessionID: id, error: error)
-                results.append(DocumentReconciliation(sessionID: id, didRevise: try current.requireInt(0) > previousVersion, issue: issue, result: .failure(error)))
+                results.append(DocumentReconciliation(sessionID: id, didRevise: try current.requireInt(0) > previousVersion, didUnblock: false, issue: issue, result: .failure(error)))
             }
             // Each recording is atomic; queued UI reads can run before the next one.
             await Task.yield()
@@ -82,7 +96,8 @@ extension ArchiveStore {
 
     func parseMarkdownEdit(_ text: String, original: TranscriptDocument) throws -> [TranscriptSpan] {
         let marker = "<!-- momoagent session=\(original.sessionID.uuidString) version=\(original.version) generation=\(original.generation) -->"
-        guard text.contains(marker) else { throw ArchiveError.projectionConflict }
+        let legacyMarker = "<!-- watchmylife session=\(original.sessionID.uuidString) version=\(original.version) generation=\(original.generation) -->"
+        guard text.contains(marker) || text.contains(legacyMarker) else { throw ArchiveError.projectionConflict }
         let pattern = #"(?m)^<!-- span=([0-9A-Fa-f-]{36}) chunk=([0-9A-Fa-f-]{36}) start=([0-9]+) count=([0-9]+) -->$"#
         let regex = try NSRegularExpression(pattern: pattern)
         let ns = text as NSString

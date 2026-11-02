@@ -54,6 +54,53 @@ struct ArchivePerformanceAndBatchTests {
             #expect(rematched.spans[0].speaker == "小陈")
             #expect(rematched.spans[0].attribution?.confirmed == false)
         }
+
+        // Streaming full-rematch plan + per-batch step reports accurate counts and preserves matches.
+        let plan = try await store.prepareFullSpeakerRematch()
+        #expect(plan.sessionIDs.count == 4)
+        #expect(plan.totalObservationCount == 4)
+        for id in plan.sessionIDs {
+            _ = try await store.rematchSpeakerSessionsStep([id])
+        }
+        #expect(try await store.matchedSpeakerObservationCount() == 4)
+    }
+
+    @Test func sameGenerationSourceResolutionAndBlockHistoryValidation() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+
+        var firstSpanSource: SourceReference?
+        var twentiethSpanSource: SourceReference?
+        // Append 21 spans so transcript history exercises multiple 16-span LZFSE blocks.
+        for i in 0..<21 {
+            let doc = try await appendSpeakerWindow(unit192(1, Float(i) * 0.02, 0), fixture: fixture, store: store, index: i)
+            if i == 0 { firstSpanSource = doc.source(for: doc.spans[0]) }
+            if i == 19 { twentiethSpanSource = doc.source(for: doc.spans[19]) }
+        }
+        let staleFirst = try #require(firstSpanSource)
+        let staleTwentieth = try #require(twentiethSpanSource)
+
+        // Unchanged historical spans across multi-block LZFSE history validate cleanly via single-block lookup.
+        try await store.validateSources([staleFirst, staleTwentieth])
+
+        // Once speaker attribution changes on those spans, direct validation rejects the old version as staleSource,
+        // while resolveCurrentSpeakerSources upgrades same-generation citations to the latest version.
+        try await store.correctSpeakers([staleFirst, staleTwentieth], feedback: .owner, scope: .selection, deferGlobalRematch: true)
+        let afterOwner = try await store.readTranscript(sessionID: fixture.sessionID)
+        await #expect(throws: ArchiveError.staleSource) {
+            try await store.validateSources([staleFirst])
+        }
+        await #expect(throws: ArchiveError.staleSource) {
+            try await store.validateSources([staleTwentieth])
+        }
+
+        let refreshed = try await store.resolveCurrentSpeakerSources([staleFirst, staleTwentieth])
+        #expect(refreshed.allSatisfy { $0.transcriptVersion == afterOwner.version })
+        try await store.correctSpeakers([refreshed[1]], feedback: .person("小明"), scope: .selection, deferGlobalRematch: true)
+        let updated = try await store.readTranscript(sessionID: fixture.sessionID)
+        #expect(updated.spans[0].speaker == "我")
+        #expect(updated.spans[19].speaker == "小明")
     }
 
     @Test func seedCandidateCompletionDefersCrossSessionRematchToBatches() async throws {
@@ -159,6 +206,79 @@ struct ArchivePerformanceAndBatchTests {
         #expect(completed.state == .completed)
         #expect(abs(completed.completedDuration + completed.removedDuration - completed.totalDuration) < 0.000001)
         #expect(completed.removedDuration > 0)
+    }
+
+    @Test func residualAnalyzedBoundaryGapsAndLivePriorityWorkNeverWedgeBatches() async throws {
+        let batchMember = try Fixture()
+        let liveSession = try Fixture()
+        defer { batchMember.remove(); liveSession.remove() }
+        let store = try batchMember.store()
+
+        let rawEnv = try await receiveChunk(batchMember, store: store, sequence: 0)
+        let batch = try #require(await store.freezeTranscriptionBatch(
+            configurationFingerprint: fingerprint,
+            includingUnpreparedAudio: true
+        ))
+        let fixtureToday = Date(timeIntervalSince1970: 1_790_000_100)
+        // While all existing work is reserved by `batch`, there is no unreserved priority-0 work.
+        #expect(try await store.hasUnreservedPriorityWork(configurationFingerprint: fingerprint, now: fixtureToday) == false)
+
+        // When a brand-new live Watch chunk arrives outside the frozen batch, priority-0 work is immediately detected.
+        _ = try await receiveChunk(liveSession, store: store, sequence: 0)
+        #expect(try await store.hasUnreservedPriorityWork(configurationFingerprint: fingerprint, now: fixtureToday) == true)
+
+        // Analyze `batchMember` with sub-window boundary gaps ([350..<400] and [1200..<1250] analyzed, neither window nor no_speech).
+        let execution = try await store.beginTranscriptionBatch(id: batch.id, origin: .continuedProcessing)
+        let analysisTicket = try #require(await store.claimTranscriptionBatchAnalysis(
+            execution: execution,
+            configurationFingerprint: fingerprint
+        ))
+        let manifest = rawEnv.manifest
+        let core = try FrameRange(start: 400, count: 800)
+        let window = ArchiveAnalysisWindow(
+            id: ContentHash.sha256(Data((rawEnv.manifestSHA256 + fingerprint + "-gap").utf8)),
+            sessionID: manifest.sessionID,
+            epochID: manifest.epochID,
+            analysisAnchor: 0,
+            coreFrames: core,
+            contextFrames: manifest.frames,
+            modelCoreFrames: core,
+            modelContextFrames: manifest.frames,
+            sources: [ArchiveWindowSource(
+                chunkID: manifest.chunkID,
+                manifestSHA256: rawEnv.manifestSHA256,
+                audioSHA256: manifest.audioSHA256,
+                sourceFrames: manifest.frames
+            )],
+            configurationFingerprint: fingerprint
+        )
+        try await store.commitAnalysisBatch(
+            ticket: analysisTicket,
+            windows: [window],
+            analyzedCoverage: [manifest.frames],
+            noSpeechCoverage: [FrameRange(start: 0, count: 350), FrameRange(start: 1_250, count: 350)],
+            checkpoint: ArchiveCheckpoint(
+                sessionID: manifest.sessionID,
+                epochID: manifest.epochID,
+                sourceFrame: manifest.frames.end,
+                configurationFingerprint: fingerprint
+            ),
+            waitingForMoreAudio: false
+        )
+        let claimed = try #require(await store.claimTranscriptionWindow(
+            configurationFingerprint: fingerprint,
+            batchExecution: execution,
+            isolateLocalFailures: true
+        ))
+        _ = try await store.commitWindowTranscript(ticket: claimed, text: "批次内识别完成。", rawResult: Data("{}".utf8))
+
+        let deferredCount = try await store.deferUnclaimableBatchItems(
+            execution: execution,
+            configurationFingerprint: fingerprint
+        )
+        #expect(deferredCount >= 1)
+        let finished = try await store.finishTranscriptionBatch(execution: execution, reason: .completed)
+        #expect(finished.state == .completed)
     }
 
     @Test func processingWaitStatePrioritizesRunnableAndContextWorkAcrossSessions() async throws {

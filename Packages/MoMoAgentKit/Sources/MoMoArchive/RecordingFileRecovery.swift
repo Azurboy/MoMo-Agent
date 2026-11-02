@@ -62,6 +62,7 @@ extension ArchiveStore {
             try Task.checkCancellation()
             guard try !sessionIsDeleted(id) else { continue }
             do { if let issue = try inspectRecordingFiles(sessionID: id, allowRelocation: false).issue { result.append(issue) } }
+            catch let error as CancellationError { throw error }
             catch { result.append(try unreadableRecordingIssue(sessionID: id, error: error)) }
             await Task.yield()
         }
@@ -181,7 +182,7 @@ extension ArchiveStore {
             verifiedRecordingFilesDataVersion = externalVersion
         }
         guard let row = try database.rows(
-            "SELECT document_directory,transcript_version,generation,projection_version,manifest_projected,(SELECT COUNT(*) FROM chunks WHERE session_id=sessions.id) FROM sessions WHERE id=? AND deleted=0",
+            "SELECT document_directory,transcript_version,generation,projection_version,manifest_projected,projection_hash,(SELECT COUNT(*) FROM chunks WHERE session_id=sessions.id) FROM sessions WHERE id=? AND deleted=0",
             [.text(sessionID.uuidString)]
         ).first,
         let relative = row.string(0) else {
@@ -190,7 +191,8 @@ extension ArchiveStore {
         }
         let version = try row.requireInt(1), generation = try row.requireInt(2), projected = try row.requireInt(3)
         let manifestProjected = row.integer(4) == 1
-        let chunkCount = row.integer(5) ?? 0
+        let projectionHash = row.string(5)
+        let chunkCount = row.integer(6) ?? 0
         let directory = rootURL.appendingPathComponent(relative, isDirectory: true)
         func problem(_ kind: RecordingFileIssueKind, candidates: [String] = [], missing: [String] = [], hashes: [String: String] = [:], actions: [RecordingFileRecoveryAction] = []) throws -> RecordingFileInspection {
             verifiedRecordingFilesCache.removeValue(forKey: sessionID)
@@ -251,6 +253,7 @@ extension ArchiveStore {
         let document = try currentTranscriptOrNil(sessionID: sessionID)
         let currentJSON = try document.map { try WireJSON.encode($0) }
         let currentMarkdown = document.map { Data(transcriptMarkdown($0).utf8) }
+        let currentLegacyMarkdown = document.map { Data(legacyTranscriptMarkdown($0).utf8) }
         var actions: [RecordingFileRecoveryAction] = [.restoreDatabase]
         var edits: [RecordingFileRecoveryAction: [TranscriptSpan]] = [:]
         if let document {
@@ -259,8 +262,10 @@ extension ArchiveStore {
                 if let bytes {
                     do {
                         // Unchanged app projections already carry the authoritative span identities.
-                        let expected = action == .useJSON ? currentJSON : currentMarkdown
-                        edits[action] = bytes == expected ? document.spans : try editedSpans(bytes, action: action, original: document)
+                        let unchanged = action == .useJSON
+                            ? (bytes == currentJSON)
+                            : (bytes == currentMarkdown || bytes == currentLegacyMarkdown)
+                        edits[action] = unchanged ? document.spans : try editedSpans(bytes, action: action, original: document)
                         actions.append(action)
                     } catch is DecodingError { /* Invalid edits remain visible and require a different choice. */ }
                     catch ArchiveError.invalidTranscript { }
@@ -293,22 +298,49 @@ extension ArchiveStore {
                 return try problem(.invalidEdit, hashes: hashes, actions: actions)
             }
         }
-        guard projected > 0, document != nil,
-              let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(projected)]).first else {
+        if projected > 0,
+           let projectionHash,
+           let existingJSON = data["transcript.json"],
+           let existingMarkdown = data["transcript.md"],
+           ContentHash.sha256(existingJSON + existingMarkdown) == projectionHash {
             cacheVerifiedRecordingFiles(sessionID: sessionID)
             return RecordingFileInspection(issue: nil, automaticEdit: nil)
         }
-        let projectedJSON: Data?, projectedMarkdown: Data?
+        guard projected > 0, let document else {
+            cacheVerifiedRecordingFiles(sessionID: sessionID)
+            return RecordingFileInspection(issue: nil, automaticEdit: nil)
+        }
+        let projectedJSON: Data?, projectedMarkdown: Data?, projectedLegacyMarkdown: Data?
         if projected == version {
             projectedJSON = currentJSON
             projectedMarkdown = currentMarkdown
+            projectedLegacyMarkdown = currentLegacyMarkdown
+        } else if let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(projected)]).first,
+                  let projectedDocument = try? decodeStoredTranscript(previous.requireData(0)) {
+            projectedJSON = try WireJSON.encode(projectedDocument)
+            projectedMarkdown = Data(transcriptMarkdown(projectedDocument).utf8)
+            projectedLegacyMarkdown = Data(legacyTranscriptMarkdown(projectedDocument).utf8)
+        } else if let existingJSON = data["transcript.json"],
+                  let existingMarkdown = data["transcript.md"],
+                  matchesUneditedPriorProjection(existingJSON: existingJSON, existingMarkdown: existingMarkdown,
+                                                 projectedVersion: projected, current: document) {
+            cacheVerifiedRecordingFiles(sessionID: sessionID)
+            return RecordingFileInspection(issue: nil, automaticEdit: nil)
         } else {
+            guard let previous = try database.rows("SELECT document FROM transcript_versions WHERE session_id=? AND version=?", [.text(sessionID.uuidString), .integer(projected)]).first else {
+                cacheVerifiedRecordingFiles(sessionID: sessionID)
+                return RecordingFileInspection(issue: nil, automaticEdit: nil)
+            }
             let projectedDocument = try decodeStoredTranscript(previous.requireData(0))
             projectedJSON = try WireJSON.encode(projectedDocument)
             projectedMarkdown = Data(transcriptMarkdown(projectedDocument).utf8)
+            projectedLegacyMarkdown = Data(legacyTranscriptMarkdown(projectedDocument).utf8)
         }
         let jsonChanged = data["transcript.json"] != projectedJSON && data["transcript.json"] != currentJSON
-        let markdownChanged = data["transcript.md"] != projectedMarkdown && data["transcript.md"] != currentMarkdown
+        let markdownChanged = data["transcript.md"] != projectedMarkdown
+            && data["transcript.md"] != projectedLegacyMarkdown
+            && data["transcript.md"] != currentMarkdown
+            && data["transcript.md"] != currentLegacyMarkdown
         if jsonChanged && markdownChanged { return try problem(.conflictingEdits, hashes: hashes, actions: actions) }
         if jsonChanged || markdownChanged {
             verifiedRecordingFilesCache.removeValue(forKey: sessionID)

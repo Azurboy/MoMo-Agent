@@ -79,6 +79,56 @@ struct TranscriptionThroughputTests {
         #expect(try await reopened.persistedPreview(sessionID: fixture.sessionID) == nil)
     }
 
+    @Test func outOfOrderGapCommitAcrossCompactedBlockBoundaryPreservesHistoryAndProjection() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let store = try fixture.store()
+        try await prepareWindows(22, fixture: fixture, store: store)
+        var tickets: [TranscriptionWindowTicket] = []
+        for _ in 0..<22 {
+            tickets.append(try #require(await store.claimTranscriptionWindow(configurationFingerprint: fingerprint)))
+        }
+        var committedByVersion: [Int64: TranscriptDocument] = [:]
+        for index in Array(0..<15) + Array(16..<20) {
+            let doc = try await store.commitWindowTranscript(
+                ticket: tickets[index],
+                text: "片段-\(index)",
+                rawResult: Data("{}".utf8)
+            )
+            committedByVersion[doc.version] = doc
+        }
+        let gapInserted = try await store.commitWindowTranscript(
+            ticket: tickets[15],
+            text: "补齐乱序缺口-15",
+            rawResult: Data("{}".utf8)
+        )
+        committedByVersion[gapInserted.version] = gapInserted
+        #expect(gapInserted.version == 20)
+        #expect(gapInserted.spans[15].text == "补齐乱序缺口-15")
+        try await store.projectPendingDocuments(sessionID: fixture.sessionID, includeUnchanged: false)
+
+        for index in 20..<22 {
+            let doc = try await store.commitWindowTranscript(
+                ticket: tickets[index],
+                text: "片段-\(index)",
+                rawResult: Data("{}".utf8)
+            )
+            committedByVersion[doc.version] = doc
+        }
+        try await store.projectPendingDocuments(sessionID: fixture.sessionID, includeUnchanged: false)
+        #expect(try await !store.projectionIsBlocked(fixture.sessionID))
+        #expect(try await store.recordingFileIssues(sessionID: fixture.sessionID).isEmpty)
+
+        for version in Int64(1)...22 {
+            let expected = try #require(committedByVersion[version])
+            let actual = try await store.transcriptSnapshot(sessionID: fixture.sessionID, version: version).document
+            #expect(actual.spans == expected.spans)
+            #expect(Set(actual.spans.map(\.id)).count == actual.spans.count)
+        }
+        let reconciled = try await store.reconcileDocumentFiles()
+        #expect(reconciled.first?.issue == nil)
+        #expect(try await !store.projectionIsBlocked(fixture.sessionID))
+    }
+
     @Test func schemaTenMigrationBackfillsPreviewWithoutChangingSources() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = try fixture.store()

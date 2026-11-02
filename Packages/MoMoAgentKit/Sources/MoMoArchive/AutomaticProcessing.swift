@@ -26,6 +26,77 @@ extension ArchiveStore {
         return nil
     }
 
+    /// Returns true when today's / recent live audio (`priority == 0`) has runnable work outside any active batch,
+    /// allowing the foreground runtime to prioritize live recordings ahead of older frozen historical batches.
+    public func hasUnreservedPriorityWork(configurationFingerprint: String, now: Date = Date(),
+                                          calendar: Calendar = .current) throws -> Bool {
+        guard ContentHash.isValid(configurationFingerprint), now.timeIntervalSince1970.isFinite else { return false }
+        let policy = ProcessingDatePolicy(now: now, calendar: calendar)
+        for row in try database.rows("""
+            SELECT e.id,e.session_id,s.generation,c.manifest,a.attempt_id,a.last_input_hash,a.checkpoint
+            FROM epochs e JOIN sessions s ON s.id=e.session_id
+            JOIN chunks c ON c.rowid=COALESCE(e.min_chunk_rowid, (SELECT rowid FROM chunks WHERE epoch_id=e.id ORDER BY start_frame LIMIT 1))
+            LEFT JOIN analysis_epochs a ON a.epoch_id=e.id AND a.configuration_hash=?
+            WHERE s.deleted=0 AND s.projection_blocked=0 AND (a.epoch_id IS NULL OR a.has_pending=1
+              OR EXISTS(SELECT 1 FROM analysis_windows w WHERE w.epoch_id=e.id AND w.configuration_hash=? AND w.state='pending'))
+            ORDER BY e.rowid
+            """, [.text(configurationFingerprint), .text(configurationFingerprint)]) {
+            let epochID = try row.requireUUID(0)
+            let generation = try row.requireInt(2)
+            let manifest = try WireJSON.decode(ChunkManifest.self, from: row.requireData(3))
+            for windowRow in try database.rows("""
+                SELECT w.descriptor FROM analysis_windows w
+                WHERE w.epoch_id=? AND w.configuration_hash=? AND w.generation=?
+                  AND w.state='pending'
+                  AND NOT EXISTS(SELECT 1 FROM processing_failures f WHERE f.epoch_id=w.epoch_id
+                    AND f.configuration_hash=w.configuration_hash AND f.generation=w.generation
+                    AND f.stage='transcription' AND f.work_id=w.id
+                    AND (f.error_code='audio_unavailable' OR f.retry_after>?))
+                  AND NOT EXISTS(SELECT 1 FROM transcription_batch_windows m JOIN transcription_batches b ON b.id=m.batch_id
+                    WHERE m.epoch_id=w.epoch_id AND b.state!='completed'
+                    AND m.start_frame<w.core_end AND m.end_frame>w.core_start)
+                ORDER BY w.rowid
+                """, [.text(epochID.uuidString), .text(configurationFingerprint), .integer(generation), .double(now.timeIntervalSince1970)]) {
+                let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: windowRow.requireData(0))
+                guard policy.priority(window.coreFrames, manifest: manifest) == 0 else { continue }
+                if try !batchReserves(window) && windowHasRetainedContextInputs(window) {
+                    return true
+                }
+            }
+            guard row.string(4) == nil, try !batchReservesAnalysis(epochID: epochID) else { continue }
+            let pendingRanges = try pendingAnalysisRanges(epochID: epochID, fingerprint: configurationFingerprint, retainedOnly: true)
+            let receivedEnd = try receivedAnalysisRanges(epochID: epochID, retainedOnly: false).last?.end
+            let closedFrame = try analysisClosedFrame(epochID: epochID)
+            for range in pendingRanges {
+                for (frames, priority) in try policy.split(range, manifest: manifest) where priority == 0 {
+                    let inputs = try contiguousInputs(epochID: epochID, from: frames.start, through: frames.end)
+                    guard let last = inputs.last else { continue }
+                    let examined = try database.rows(
+                        "SELECT input_hash FROM analysis_range_inputs WHERE epoch_id=? AND configuration_hash=? AND generation=? AND start_frame=?",
+                        [.text(epochID.uuidString), .text(configurationFingerprint), .integer(generation), .integer(frames.start)]
+                    ).first?.string(0)
+                    let boundary: AudioProcessingBoundary
+                    if frames.end <= last.envelope.manifest.frames.end, frames.end < (receivedEnd ?? frames.end) {
+                        boundary = .processingRange(frames.end)
+                    } else if let closedFrame, closedFrame == last.envelope.manifest.frames.end {
+                        boundary = .captureEnd(closedFrame)
+                    } else if last.envelope.manifest.sealedAt < now.addingTimeInterval(-1_800),
+                              last.envelope.manifest.frames.end >= frames.end {
+                        boundary = .receivedSnapshot(min(frames.end, last.envelope.manifest.frames.end))
+                    } else {
+                        boundary = .open
+                    }
+                    let identity = try analysisInputIdentity(inputs, start: frames.start, boundary: boundary)
+                    if examined == identity || row.string(5) == identity { continue }
+                    if try processingIsDeferred(epochID: epochID, generation: generation, fingerprint: configurationFingerprint,
+                                                stage: .analysis, workID: identity, now: now) { continue }
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private func claimAutomatic(configurationFingerprint: String, inputLease: TranscriptionInputLease?,
                                 allowHistorical: Bool, now: Date, calendar: Calendar,
                                 activeWindow: ArchiveAnalysisWindow?, activeAnalysis: EpochAnalysisTicket?) throws -> AutomaticProcessingWork? {
