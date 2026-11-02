@@ -1,21 +1,16 @@
-# Native soft top scroll edge
+# iPhone scroll edges
 
-Use the system's soft transition between scrolling content and top controls on iPhone. Typography, navigation, and layout stay unchanged.
+On iOS 26 and later the phone uses the system soft effect at the top of scrolling pages. Native navigation bars use the shared page style. Chat, pairing, onboarding and the task panel use a safe-area bar to register their custom controls with the scrolling surface. See [Apple’s scroll edge documentation](https://developer.apple.com/documentation/swiftui/scrolledgeeffectstyle) and [custom bar guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass).
 
-- Shared `phonePageSurface()` sets `.scrollEdgeEffectStyle(.soft, for: .top)` for native phone pages and their descendant scroll views.
-- `ChatRendererView` applies the same style to its native fallback and explicitly sets `WKWebView.scrollView.topEdgeEffect.style = .soft` for its UIKit scrolling surface.
-- iOS 26+ uses the public API; older iOS and Mac retain their existing rendering. No overlay, gradient mask, private filter, continuous animation, or extra dependency is introduced.
-- The OS controls the blur radius, extent, interaction with overlapping controls, and accessibility adaptation. Selecting `.soft` does not force a custom blur band where no control overlaps the scroll view.
+In chat, the WebKit viewport extends under the MoMo header. The renderer measures the overlap and positions the first message, notification targets and reading anchors relative to the visible region. Older iOS versions use the stacked header layout. The timeline keeps its date controls outside the horizontal pager to preserve each day’s reading position. While reading below the top of a day or a list of search results, a 16-point fade softens the edge below the controls. It disappears at the start of the list or when Reduce Transparency is enabled.
 
-References: [Apple ScrollEdgeEffectStyle](https://developer.apple.com/documentation/swiftui/scrolledgeeffectstyle), [Apple UIScrollView.topEdgeEffect](https://developer.apple.com/documentation/uikit/uiscrollview/topedgeeffect), and [Linear's custom material approach](https://linear.app/now/linear-liquid-glass). The Linear article describes its own custom rendering; this change uses Apple's public system effect.
+| Screen | Capture |
+| --- | --- |
+| Chat while reading earlier messages | [iPhone](screenshots/chat-scroll.png) |
+| Timeline with the date controls pinned | [iPhone](screenshots/timeline-scroll.png) |
+| Memory detail while scrolling | [Light](screenshots/light-scroll.png) · [Dark](screenshots/dark-scroll.png) |
+| Settings with the previous appearance | [iPhone](screenshots/phone-settings.png) · [Mac](screenshots/mac-settings.png) |
 
-Validation uses synthetic memories on an iPhone 17 simulator running iOS 27, at the default text size. The long-memory fixture exceeds the viewport, and the UI test checks that its text frame actually moves upward before capturing the top edge. Screenshots show the app's native navigation bar over scrolling text.
+The chat capture used 42 synthetic messages in the app’s history on an iPhone 17 simulator running iOS 27. Interaction checks covered scrolling to the first message below the wordmark, reading with the header fixed, returning to the latest message and opening settings. Renderer tests exercised reading-position restoration and following new replies. A timeline regression test paged away and back, tapped the tab bar and verified that both the latest entry and the manually selected reading position remained accessible. The Mac capture used an isolated data directory in a Debug build.
 
-- `MoMoAgentRemote` build-for-testing: passed.
-- Shared page modifier type-check for macOS 14: passed. This is a compatibility check, not a full Mac build.
-- Light appearance: `MemoryReadingTests` passed (1 test, 0 failures), including full-text preservation, navigation, menu/cancel behavior, scrolling, and contrast/hit-region/trait audit.
-- Dark appearance: the same reading and accessibility test passed (1 test, 0 failures).
-
-[Light scrolled content](screenshots/light-scroll.png) · [Dark scrolled content](screenshots/dark-scroll.png). Both show a blurred transition beneath the navigation controls with sharp text below. These are simulator captures, not real-device installation evidence. The WebKit style is configured and compiled; its visible edge under the custom chat header has not been separately verified.
-
-Cleanup: stopped the task's synthetic fixture service, deleted its temporary simulator, build/package caches, raw test results, and borrowed resource symlinks. Original models and runtime resources remain in the main checkout. Disk available after cleanup: 7.0 GiB; this is a point-in-time reading, not an attribution of all free-space change to this task.
+The separate chat-delivery fixture returned 404 for shared conversation discovery before the app could submit a message. That scenario did not verify delivery or desktop handoff.

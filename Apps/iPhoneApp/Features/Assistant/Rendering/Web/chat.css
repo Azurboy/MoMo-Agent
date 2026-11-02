@@ -39,7 +39,7 @@ html {
   scrollbar-width: none;
   overflow-anchor: none;
 }
-body { margin: 0; padding: 20px 24px 0; font-family: var(--ui); }
+body { margin: 0; padding: calc(20px + var(--header-inset, 0px)) 24px 0; font-family: var(--ui); }
 ::selection { background: var(--line); color: var(--ink); }
 button, summary { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
 button, summary { cursor: pointer; }

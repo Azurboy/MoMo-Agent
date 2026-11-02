@@ -85,34 +85,6 @@ struct WelcomeExperienceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                PhoneBrandIcon(size: 28)
-                VStack(alignment: .leading, spacing: 1) {
-                    PhoneBrandWordmark()
-                    Text("Personal Agent").phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
-                }
-                Spacer(minLength: 8)
-                if step != .ready {
-                    if closePreview == nil {
-                        Text("未来演示").phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-                            .accessibilityIdentifier("welcome.illustrative")
-                    }
-                    Button("跳过") { step = .ready }
-                        .phoneText(.metadata).frame(minWidth: 44, minHeight: 44)
-                        .accessibilityIdentifier("welcome.skip")
-                }
-                if let closePreview {
-                    Button(action: closePreview) {
-                        Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("关闭引导预览")
-                    .accessibilityIdentifier("welcome.preview.close")
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 20)
-
             GeometryReader { geometry in
                 ScrollView {
                     VStack(spacing: 20) {
@@ -153,6 +125,7 @@ struct WelcomeExperienceView: View {
                 }
                 .clipped()
             }
+            .phoneScrollHeader { welcomeHeader }
 
             footer.padding(.horizontal, 24).padding(.bottom, 16)
         }
@@ -179,6 +152,36 @@ struct WelcomeExperienceView: View {
         Color.clear.frame(width: size, height: size)
             .anchorPreference(key: WelcomeAvatarBoundsKey.self, value: .bounds) { $0 }
             .accessibilityHidden(true)
+    }
+
+    private var welcomeHeader: some View {
+        HStack(spacing: 12) {
+            PhoneBrandIcon(size: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                PhoneBrandWordmark()
+                Text("Personal Agent").phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+            }
+            Spacer(minLength: 8)
+            if step != .ready {
+                if closePreview == nil {
+                    Text("未来演示").phoneText(.caption).foregroundStyle(MoMoPalette.muted)
+                        .accessibilityIdentifier("welcome.illustrative")
+                }
+                Button("跳过") { step = .ready }
+                    .phoneText(.metadata).frame(minWidth: 44, minHeight: 44)
+                    .accessibilityIdentifier("welcome.skip")
+            }
+            if let closePreview {
+                Button(action: closePreview) {
+                    Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .accessibilityLabel("关闭引导预览")
+                .accessibilityIdentifier("welcome.preview.close")
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 20)
     }
 
     private var listeningScene: some View {

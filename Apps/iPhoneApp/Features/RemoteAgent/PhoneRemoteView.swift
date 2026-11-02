@@ -159,21 +159,13 @@ private struct RemoteConversationView: View {
             notificationTarget: agent.notifications.focusedTarget)
         let isEmpty = store.isEmpty || snapshot.messages.isEmpty
         VStack(spacing: 0) {
-            VStack(spacing: 6) {
-                RemoteAvatar(size: isEmpty ? 144 : 84, active: store.hasActiveTask,
-                    watchStatus: watchStatus, requestWatchStatus: requestWatchStatus, openLibrary: openLibrary)
-                PhoneBrandWordmark(.momo, size: isEmpty ? 22 : 14)
-                    .accessibilityIdentifier("personalAgent.name")
-            }
-            .frame(maxWidth: .infinity)
-            .frame(maxHeight: isEmpty ? .infinity : nil)
-            .padding(.bottom, isEmpty ? 0 : 8)
-            if !isEmpty {
-                ChatRendererView(snapshot: snapshot,
-                    scrollToBottomRequest: composeRevision,
-                    onReadingPosition: agent.rememberReadingPosition,
-                    onAttachment: { id in previewAttachment = store.attachment(id: id) },
-                    onRetryMessage: { id in Task { await store.checkAgain(id: id) } })
+            if isEmpty {
+                identityHeader(isEmpty: true)
+            } else {
+                PhoneHeaderViewport { inset in
+                    transcript(snapshot, headerInset: inset)
+                }
+                .phoneScrollHeader { identityHeader(isEmpty: false) }
             }
             RemoteTaskControlsView(store: store, viewport: viewport, onControlVisibility: agent.notifications.controlVisible,
                                    openDesktop: openDesktop)
@@ -201,6 +193,25 @@ private struct RemoteConversationView: View {
         }
     }
 
+    private func transcript(_ snapshot: ChatRenderSnapshot, headerInset: CGFloat) -> some View {
+        ChatRendererView(snapshot: snapshot,
+            scrollToBottomRequest: composeRevision, headerInset: headerInset,
+            onReadingPosition: agent.rememberReadingPosition,
+            onAttachment: { id in previewAttachment = store.attachment(id: id) },
+            onRetryMessage: { id in Task { await store.checkAgain(id: id) } })
+    }
+
+    private func identityHeader(isEmpty: Bool) -> some View {
+        VStack(spacing: 6) {
+            RemoteAvatar(size: isEmpty ? 144 : 84, active: store.hasActiveTask,
+                watchStatus: watchStatus, requestWatchStatus: requestWatchStatus, openLibrary: openLibrary)
+            PhoneBrandWordmark(.momo, size: isEmpty ? 22 : 14)
+                .accessibilityIdentifier("personalAgent.name")
+        }
+        .frame(maxWidth: .infinity)
+        .frame(maxHeight: isEmpty ? .infinity : nil)
+        .padding(.bottom, isEmpty ? 0 : 8)
+    }
 }
 
 private struct RemoteAvatar: View {

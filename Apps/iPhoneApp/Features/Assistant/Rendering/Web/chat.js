@@ -298,7 +298,7 @@
       [...(views.get(turn.id)?.pieces.values() || [])].some(piece => piece.type === 'process' && !piece.completed));
     const anchor = finishing && !pin.pinned && !restoring && !userScrolling && !wheelScrolling ?
       [...root.querySelectorAll('.md-chunk,.user-bubble,.system-action-card')].find(node => {
-        const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight;
+        const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.bottom > headerInset() && rect.top < innerHeight;
       }) : null;
     const anchorTop = anchor?.getBoundingClientRect().top;
     let collapsed = false;
@@ -465,6 +465,7 @@
       scheduleReadingPosition();
     });
   }
+  function headerInset() { return latest?.appearance?.headerInset || 0; }
   function maximumScrollTop() {
     return Math.max(0,document.documentElement.scrollHeight - window.innerHeight);
   }
@@ -473,7 +474,7 @@
     const anchor = restoring.anchorID && [...root.children].find(node => node.dataset.message === restoring.anchorID);
     const maximum = maximumScrollTop();
     const top = restoring.following ? maximum :
-      anchor ? scrollY + anchor.getBoundingClientRect().top - restoring.anchorOffset : restoring.top;
+      anchor ? scrollY + anchor.getBoundingClientRect().top - headerInset() - restoring.anchorOffset : restoring.top;
     // WebKit's native scroll update can apply the requested value after the DOM
     // has already clamped it. Never request a position outside this layout.
     window.scrollTo({ top:Math.max(0,Math.min(maximum,top)), behavior:'auto' });
@@ -487,7 +488,7 @@
     if (!row) return; // Replay/history may not have reached the requested message yet.
     const anchor = [...row.querySelectorAll('[data-source-message]')].find(node => node.dataset.sourceMessage === target.messageID) || row;
     stopRestoring(); pin.pinned = false;
-    window.scrollTo({ top: Math.max(0, Math.min(maximumScrollTop(), scrollY + anchor.getBoundingClientRect().top - 16)), behavior: 'auto' });
+    window.scrollTo({ top: Math.max(0, Math.min(maximumScrollTop(), scrollY + anchor.getBoundingClientRect().top - headerInset() - 16)), behavior: 'auto' });
     pin.top = scrollY; focusedRequest = target.requestID;
     scheduleReadingPosition();
   }
@@ -498,13 +499,13 @@
     // Preserve the last settled position during native overscroll. Do not turn
     // an out-of-bounds visible offset into a seemingly valid persisted anchor.
     if (top < 0 || top > maximumScrollTop()) { scheduleReadingPosition(); return; }
-    const anchor = [...root.children].find(node => node.getBoundingClientRect().bottom > 0);
+    const anchor = [...root.children].find(node => node.getBoundingClientRect().bottom > headerInset());
     const visibleMessageIDs = [...root.children].filter(node => {
       const rect = node.getBoundingClientRect();
-      return rect.height > 0 && rect.bottom > 0 && rect.bottom <= innerHeight;
+      return rect.height > 0 && rect.bottom > headerInset() && rect.bottom <= innerHeight;
     }).flatMap(node => JSON.parse(node.dataset.sourceIds || '[]')).slice(-500);
     const value = { sessionID:session, following:pin.pinned, top, visibleMessageIDs,
-      anchorID:anchor?.dataset.message || null, anchorOffset:anchor?.getBoundingClientRect().top || 0 };
+      anchorID:anchor?.dataset.message || null, anchorOffset:anchor ? anchor.getBoundingClientRect().top - headerInset() : 0 };
     const encoded = JSON.stringify(value);
     if (encoded !== lastReading) { lastReading = encoded; post('readingPosition',value); }
   }
@@ -540,6 +541,7 @@
     document.documentElement.dataset.dark = String(snapshot.appearance.dark);
     document.documentElement.dataset.reduceMotion = String(reduced);
     document.documentElement.dataset.largeType = String(snapshot.appearance.scale > 1.4);
+    document.documentElement.style.setProperty('--header-inset', headerInset() + 'px');
     document.documentElement.style.setProperty('--scale',Math.max(.8,Math.min(3.2,snapshot.appearance.scale)));
     renderTurns(first); first = false;
     focusNotification(snapshot.focus);

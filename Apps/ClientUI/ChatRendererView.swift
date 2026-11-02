@@ -7,6 +7,7 @@ import MoMoContracts
 struct ChatRendererView: View {
     let snapshot: ChatRenderSnapshot
     var scrollToBottomRequest = 0
+    var headerInset: CGFloat = 0
     var onRegenerate: (String) -> Void = { _ in }
     var onReadingPosition: (ChatReadingPosition) -> Void = { _ in }
     var onSystemAction: (UUID) -> Void = { _ in }
@@ -26,6 +27,7 @@ struct ChatRendererView: View {
             if renderingFailed {
                 Text("消息暂以文字显示")
                     .phoneText(.metadata).foregroundStyle(.secondary)
+                    .padding(.top, headerInset)
                     .accessibilityIdentifier("assistant.renderingFailure")
                 Button("重新加载消息") { rendererReady = false; renderingFailed = false }
                     .accessibilityIdentifier("assistant.reloadRendering")
@@ -33,7 +35,7 @@ struct ChatRendererView: View {
             } else {
                 ZStack(alignment: .top) {
                     ChatWebSurface(snapshot: snapshot, scrollToBottomRequest: scrollToBottomRequest, dark: colorScheme == .dark,
-                        reduceMotion: reduceMotion, scale: fontSize / 16, active: scenePhase == .active,
+                        reduceMotion: reduceMotion, scale: fontSize / 16, headerInset: headerInset, active: scenePhase == .active,
                         failed: { renderingFailed = true }, rendered: { rendererReady = true },
                         recovering: { rendererReady = false },
                         open: { openURL($0) }, regenerate: onRegenerate,
@@ -128,6 +130,7 @@ struct ChatRendererView: View {
             }
             .scrollBounceBehavior(.always, axes: .vertical)
             #if os(iOS)
+            .safeAreaPadding(.top, renderingFailed ? 0 : headerInset)
             .scrollDismissesKeyboard(.interactively)
             #endif
             .accessibilityIdentifier("assistant.nativeTranscript")
@@ -158,6 +161,7 @@ private struct ChatWebSurface: ChatWebRepresentable {
     let dark: Bool
     let reduceMotion: Bool
     let scale: Double
+    let headerInset: CGFloat
     let active: Bool
     let failed: () -> Void
     let rendered: () -> Void
@@ -196,10 +200,14 @@ private struct ChatWebSurface: ChatWebRepresentable {
         let web = WKWebView(frame: .zero, configuration: configuration)
         #if os(iOS)
         web.isOpaque = false
-        web.scrollView.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 26, *) {
+            web.scrollView.contentInsetAdjustmentBehavior = .always
+            web.scrollView.topEdgeEffect.style = .soft
+        } else {
+            web.scrollView.contentInsetAdjustmentBehavior = .never
+        }
         web.scrollView.keyboardDismissMode = .interactive
         web.scrollView.alwaysBounceVertical = true
-        if #available(iOS 26, *) { web.scrollView.topEdgeEffect.style = .soft }
         let dismissKeyboard = UIPanGestureRecognizer(target: context.coordinator, action: #selector(ChatWebCoordinator.dismissKeyboardOnDrag(_:)))
         dismissKeyboard.delegate = context.coordinator
         dismissKeyboard.cancelsTouchesInView = false
@@ -231,7 +239,7 @@ private struct ChatWebSurface: ChatWebRepresentable {
         context.coordinator.attachment = attachment
         context.coordinator.retryMessage = retryMessage
         context.coordinator.setActive(active)
-        context.coordinator.update(.init(snapshot: snapshot, appearance: .init(dark: dark, reduceMotion: reduceMotion, scale: scale)), scrollRequest: scrollToBottomRequest)
+        context.coordinator.update(.init(snapshot: snapshot, appearance: .init(dark: dark, reduceMotion: reduceMotion, scale: scale, headerInset: headerInset)), scrollRequest: scrollToBottomRequest)
     }
 
     private func configureBackground(_ web: WKWebView) {
@@ -277,6 +285,7 @@ struct ChatRenderPayload: Encodable, Equatable {
         let dark: Bool
         let reduceMotion: Bool
         let scale: Double
+        var headerInset: CGFloat = 0
     }
     let snapshot: ChatRenderSnapshot
     let appearance: Appearance

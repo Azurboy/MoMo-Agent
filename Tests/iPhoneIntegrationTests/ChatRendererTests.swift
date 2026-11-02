@@ -1002,6 +1002,21 @@ final class ChatRendererTests: XCTestCase {
         await renderer.attach(to:self,name:"streaming-completed-with-stable-blocks")
     }
 
+    func testReadingAnchorRestoresBelowCustomHeader() async throws {
+        let renderer = try RendererHarness()
+        defer { renderer.close() }
+        try await renderer.ready()
+        let session = UUID()
+        let position = ChatReadingPosition(sessionID: session, following: false, top: 0,
+                                           anchorID: "assistant:reply", anchorOffset: 0)
+        let body = String(repeating: "一段用于滚动的长回复。\n\n", count: 80)
+        renderer.render([user("第一条消息"), assistant([.init(id: "body", content: .text(body))])],
+                        sessionID: session, readingPosition: position, headerInset: 120)
+        try await renderer.wait("Math.abs(document.querySelector('.turn.assistant').getBoundingClientRect().top - 120) < 2")
+        _ = try await renderer.web.evaluateJavaScript("window.scrollTo(0, 0); true")
+        try await renderer.wait("scrollY === 0 && document.querySelector('.turn.user').getBoundingClientRect().top >= 120")
+    }
+
     func testScrollUpDoesNotGetPulledDownAndJumpRestoresFollowing() async throws {
         let renderer = try RendererHarness()
         defer { renderer.close() }
@@ -1340,9 +1355,9 @@ private final class RendererHarness {
         test.add(bridge)
     }
     func render(_ messages: [AgentChatMessage], busy: Bool = false, dark: Bool = false, reduceMotion: Bool = true, stopped: Bool = false,
-                sessionID id: UUID? = nil, readingPosition: ChatReadingPosition? = nil, contextState: AgentContextState = .idle, canRegenerate: Bool = true) {
+                sessionID id: UUID? = nil, readingPosition: ChatReadingPosition? = nil, contextState: AgentContextState = .idle, canRegenerate: Bool = true, headerInset: CGFloat = 0) {
         coordinator.update(.init(snapshot:.init(sessionID:id ?? sessionID,messages:messages,busy:busy,stopped:stopped,readingPosition:readingPosition,contextState:contextState,canRegenerate:canRegenerate),
-            appearance:.init(dark:dark,reduceMotion:reduceMotion,scale:1)))
+            appearance:.init(dark:dark,reduceMotion:reduceMotion,scale:1,headerInset:headerInset)))
     }
     private func receiveReadingPosition(_ position: ChatReadingPosition) {
         readingSequence += 1

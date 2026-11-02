@@ -71,6 +71,7 @@ struct ChatAttachmentPreview: View {
                 }
             }
             .background(MoMoPalette.canvas)
+            .phoneSoftTopEdge()
             .navigationTitle(attachment.name).navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
