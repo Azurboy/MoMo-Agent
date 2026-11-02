@@ -157,12 +157,24 @@ final class PhoneRemoteAgent {
             }
         }
         do {
-            // Rebuild the local tunnel, retaining node identity, pairing and the outbox.
             if connection.network == "tailscale" {
-                await tailnet.close()
-                _ = try await tailnet.connectedSession()
-            } else { network?.resume() }
-            _ = try await client.capabilities()
+                tailnet.prepareForForeground()
+                let originalGeneration = tailnet.generation
+                do {
+                    _ = try await client.capabilities()
+                } catch {
+                    // Escalate once only when the existing route failed and the local
+                    // health check has not already replaced the node for this attempt.
+                    guard AgentTransportFailure.isSocketOrLinkFailure(error),
+                          originalGeneration == tailnet.generation else { throw error }
+                    try Task.checkCancellation()
+                    await tailnet.close()
+                    _ = try await client.capabilities()
+                }
+            } else {
+                network?.resume()
+                _ = try await client.capabilities()
+            }
             await store.retryConnection()
         } catch is CancellationError { }
         catch {
@@ -199,13 +211,15 @@ final class PhoneRemoteAgent {
         let monitor = NWPathMonitor()
         pathMonitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
-            let interfaces = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            let interfaces = path.availableInterfaces.filter { path.usesInterfaceType($0.type) }
+                .map { "\($0.type):\($0.name)" }.sorted().joined(separator: ",")
             let signature = "\(path.status):\(interfaces)"
             Task { @MainActor [weak self] in
                 guard let self, self.active else { return }
                 let previous = self.lastPathSignature
                 self.lastPathSignature = signature
-                guard previous != nil, previous != signature, self.store?.canContactServer != false else { return }
+                guard path.status == .satisfied, previous != nil, previous != signature,
+                      self.store?.canContactServer != false else { return }
                 if self.connection?.network == "tailscale" { self.tailnet.prepareForForeground() }
                 else { self.network?.resume() }
                 await self.store?.retryConnection()

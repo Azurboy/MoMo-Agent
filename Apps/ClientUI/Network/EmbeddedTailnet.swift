@@ -215,7 +215,8 @@ final class EmbeddedTailnet {
         let monitor = NWPathMonitor()
         pathMonitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
-            let interfaces = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            let interfaces = path.availableInterfaces.filter { path.usesInterfaceType($0.type) }
+                .map { "\($0.type):\($0.name)" }.sorted().joined(separator: ",")
             let signature = "\(path.status):\(interfaces)"
             Task { @MainActor [weak self] in
                 guard let self, self.generation == attempt else { return }
