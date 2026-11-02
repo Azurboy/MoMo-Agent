@@ -9,7 +9,7 @@ struct RemoteMemoryView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 24) {
                 syncStatus
                 if sync.hasLegacyChanges {
                     Text("旧版待同步修改已保留，请核对当前记忆后重新修改。")
@@ -87,7 +87,7 @@ private struct MemoryPreviewRow: View {
     let memory: ContextMemory
     var body: some View {
         let preview = MemoryPreview(text: memory.text)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             if preview.date != nil || preview.sourceNote != nil || memory.kind == "user" || memory.status == "stale" || memory.basis == "inferred" {
                 HStack(spacing: 8) {
                     if let date = preview.date { Text(date) }
@@ -107,7 +107,7 @@ private struct MemoryPreviewRow: View {
                 Image(systemName: "chevron.right").font(.caption2.weight(.medium)).accessibilityHidden(true)
             }.phoneText(.caption).foregroundStyle(MoMoPalette.muted)
         }
-        .padding(.vertical, 16).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 18).frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle()).accessibilityElement(children: .combine)
     }
 }

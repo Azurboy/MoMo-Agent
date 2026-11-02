@@ -16,7 +16,8 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 28) {
+                Text("设置").phoneText(.title).accessibilityAddTraits(.isHeader)
                 PhoneSettingsSection(title: "MoMo") {
                     PhoneSettingsSurface {
                         NavigationLink { PhoneMacConnectionView(agent: remoteAgent, showsDoneButton: false) } label: {
@@ -26,7 +27,7 @@ struct SettingsView: View {
                         if let sync = remoteAgent.context {
                             rowDivider
                             NavigationLink { RemoteMemoryView(sync: sync) } label: {
-                                PhoneSettingsLinkRow(title: "记忆", symbol: "book.closed")
+                                PhoneSettingsLinkRow(title: "记忆", symbol: "sparkles")
                             }.accessibilityIdentifier("settings.memories")
                         }
                         if remoteAgent.connection != nil {
@@ -62,32 +63,32 @@ struct SettingsView: View {
                     PhoneSettingsSurface {
                         if let earphone {
                             NavigationLink { CaptureDeviceSettingsView(runtime: earphone) } label: {
-                                PhoneSettingsLinkRow(title: "录音设备", symbol: "waveform", value: earphone.settings.device.title)
+                                PhoneSettingsLinkRow(title: "录音设备", value: earphone.settings.device.title)
                             }.accessibilityIdentifier("settings.captureDevice")
                             rowDivider
                         }
                         NavigationLink { SpeechModelSettingsView(settings: speechSettings.models) } label: {
-                            PhoneSettingsLinkRow(title: "转录模型", symbol: "text.bubble", value: speechSettings.models.choice.title)
+                            PhoneSettingsLinkRow(title: "转录模型", value: speechSettings.models.choice.title)
                         }.accessibilityIdentifier("settings.speech.model")
                         rowDivider
                         NavigationLink { SpeechLanguageSettingsView(settings: speechSettings) } label: {
-                            PhoneSettingsLinkRow(title: "识别语言", symbol: "globe", value: speechSettings.language.title)
+                            PhoneSettingsLinkRow(title: "识别语言", value: speechSettings.language.title)
                         }.accessibilityIdentifier("settings.speech.language")
                         rowDivider
                         NavigationLink { SpeechDetectionSettingsView(settings: speechSettings) } label: {
-                            PhoneSettingsLinkRow(title: "语音检测", symbol: "waveform.path", value: speechSettings.vadThreshold.formatted(.number.precision(.fractionLength(2))))
+                            PhoneSettingsLinkRow(title: "语音检测", value: speechSettings.vadThreshold.formatted(.number.precision(.fractionLength(2))))
                         }.accessibilityIdentifier("settings.speech.detection")
                         rowDivider
                         NavigationLink { SpeakerSegmentationSettingsView(settings: speechSettings) } label: {
-                            PhoneSettingsLinkRow(title: "说话人分段", symbol: "person.2", value: speechSettings.speakerSegmentationModel.title)
+                            PhoneSettingsLinkRow(title: "说话人分段", value: speechSettings.speakerSegmentationModel.title)
                         }.accessibilityIdentifier("settings.speech.segmentation")
                         rowDivider
                         NavigationLink { SpeakerProfilesView(archive: archive, onSpeakersChanged: onSpeakersChanged) } label: {
-                            PhoneSettingsLinkRow(title: "人物与声纹", symbol: "person.crop.circle")
+                            PhoneSettingsLinkRow(title: "人物与声纹")
                         }.accessibilityIdentifier("settings.speakers")
                         rowDivider
                         NavigationLink { StorageUsageView(archive: archive, modelDirectory: modelDirectory, modelStatus: modelStatus) } label: {
-                            PhoneSettingsLinkRow(title: "储存空间", symbol: "internaldrive")
+                            PhoneSettingsLinkRow(title: "储存空间")
                         }.accessibilityIdentifier("settings.storage")
                     }
                 }
@@ -101,16 +102,16 @@ struct SettingsView: View {
                 }.accessibilityIdentifier("settings.version")
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 24)
+            .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 24)
         }
-        .phonePageSurface().navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
+        .phonePageSurface().navigationTitle("")
         .onDisappear { versionTapCount = 0 }
         .fullScreenCover(isPresented: $previewingWelcome) {
             WelcomeExperienceView(finishTitle: "返回设置", finish: { previewingWelcome = false }, closePreview: { previewingWelcome = false })
         }
     }
 
-    private var rowDivider: some View { Divider().overlay(MoMoPalette.line).padding(.leading, 48).padding(.trailing, 16) }
+    private var rowDivider: some View { Divider().padding(.leading, 18) }
 }
 
 extension AudioRetentionPolicy {

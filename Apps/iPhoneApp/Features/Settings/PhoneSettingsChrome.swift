@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// Quiet grouped rows using the existing phone palette and native navigation.
+/// Shared geometry from the existing settings rows, without changing the phone palette.
 struct PhoneSettingsSurface<Content: View>: View {
     @ViewBuilder var content: Content
-    @Environment(\.colorSchemeContrast) private var contrast
     var body: some View {
         VStack(spacing: 0) { content }
-            .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(contrast == .increased ? MoMoPalette.muted : MoMoPalette.line, lineWidth: 1)
-                    .allowsHitTesting(false).accessibilityHidden(true)
-            }
+            .background(MoMoPalette.surface, in: RoundedRectangle(cornerRadius: 20))
     }
 }
 
@@ -23,22 +17,17 @@ struct PhoneSettingsLinkRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if let symbol { Image(systemName: symbol).font(.system(size: 16, weight: .regular)).frame(width: 20).accessibilityHidden(true) }
+            if let symbol { Image(systemName: symbol).frame(width: 22).accessibilityHidden(true) }
             Text(LocalizedStringKey(title)).phoneText(.body)
-                .fixedSize(horizontal: false, vertical: true).layoutPriority(1)
-            Spacer(minLength: 8)
-            if let value {
-                Text(LocalizedStringKey(value)).phoneText(.metadata)
-                    .foregroundStyle(MoMoPalette.muted).multilineTextAlignment(.trailing)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Spacer(minLength: 12)
+            if let value { Text(LocalizedStringKey(value)).phoneText(.metadata).foregroundStyle(MoMoPalette.muted).multilineTextAlignment(.trailing) }
             if disclosure {
-                Image(systemName: "chevron.right").font(.system(size: 10, weight: .medium))
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .medium))
                     .foregroundStyle(MoMoPalette.muted).accessibilityHidden(true)
             }
         }
         .foregroundStyle(MoMoPalette.ink)
-        .padding(.horizontal, 16).padding(.vertical, 10).frame(minHeight: 52).contentShape(Rectangle())
+        .padding(.horizontal, 18).frame(minHeight: 58).contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
 }
@@ -60,9 +49,8 @@ struct PhoneSettingsSection<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(LocalizedStringKey(title)).phoneText(.metadata).fontWeight(.medium)
-                .foregroundStyle(MoMoPalette.muted).padding(.horizontal, 4).accessibilityAddTraits(.isHeader)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(LocalizedStringKey(title)).phoneText(.metadata).foregroundStyle(MoMoPalette.muted).accessibilityAddTraits(.isHeader)
             content
         }
     }

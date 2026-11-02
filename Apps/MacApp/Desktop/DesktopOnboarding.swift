@@ -26,7 +26,7 @@ struct ModelConnectionFields: View {
             switch currentPage {
             case .choices:
                 if continueSetup { pageTitle("连接你的模型") }
-                VStack(spacing: continueSetup ? 12 : 0) {
+                VStack(spacing: continueSetup ? 12 : 4) {
                     ForEach(DesktopModelProvider.allCases) { provider in
                         if continueSetup {
                             Button { choose(provider) } label: { providerLabel(provider) }
@@ -38,7 +38,7 @@ struct ModelConnectionFields: View {
                                     providerLabel(provider)
                                     Spacer()
                                     Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary).accessibilityHidden(true)
-                                }.frame(minHeight: 44).contentShape(Rectangle())
+                                }.frame(minHeight: 52).contentShape(Rectangle())
                             }.buttonStyle(.plain).accessibilityIdentifier("model.provider." + provider.rawValue)
                             if provider != DesktopModelProvider.allCases.last { Divider() }
                         }
