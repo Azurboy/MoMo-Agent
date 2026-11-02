@@ -44,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix='momo-cold-setup-') as temp:
               for p in data.rglob('*') if p.is_file()}
     run(str(script), 'prepare', '--data-dir', str(data))
     run(str(script), 'prepare', '--data-dir', str(data))
+    run(str(root / 'Apps/MacApp/Access/access_server.py'), '--help')
     run('-c', 'import ssl,sqlite3,aiohttp,aiortc,cryptography,openai,anthropic,mcp; assert sqlite3.sqlite_version_info >= (3,51,3)')
     run('-c', 'import sys; sys.path.insert(0, ' + repr(str(root / 'Vendor/HermesAgent')) +
         '); import gateway.run_shutdown, gateway.session_llm_oneshot')
