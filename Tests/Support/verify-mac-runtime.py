@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='momo-cold-setup-') as temp:
                        stdout=subprocess.DEVNULL, timeout=90)
     run(str(script), 'init', '--data-dir', str(data), '--port', '19870')
     # SuperAgent uses a separately prepared Node runner; Hermes is the offline Python path.
-    run(str(script), 'engine', '--data-dir', str(data), '--set', 'hermes')
+    run(str(script), 'engine', '--data-dir', str(data), '--engine', 'hermes')
     run('-c', 'import sys; sys.path.insert(0, ' + repr(str(script.parent)) +
         '); from superagent_runtime import superagent_fingerprint; assert superagent_fingerprint()["bundle_sha256"]')
     before = {str(p.relative_to(data)): hashlib.sha256(p.read_bytes()).hexdigest()
