@@ -20,23 +20,38 @@ final class PlaybackAudioSession: @unchecked Sendable {
     private var logicalDuration: Double = 0
     private var stoppedObservedAt: ContinuousClock.Instant?
     private let completion = PlaybackCompletion()
+    private let hardwareSession: PlaybackHardwareSessionCoordinator?
     private let activateSession: @Sendable () throws -> Void
     private let deactivateSession: @Sendable () throws -> Void
     private let preparePlayer: @Sendable (AVAudioPlayer) throws -> Bool
     private let startPlayer: @Sendable (AVAudioPlayer) -> Bool
 
-    init(activate: @escaping @Sendable () throws -> Void = {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .spokenAudio)
-        try session.setActive(true)
-    }, deactivate: @escaping @Sendable () throws -> Void = {
-        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    }, prepare: @escaping @Sendable (AVAudioPlayer) throws -> Bool = { $0.prepareToPlay() },
+    init(activate: (@Sendable () throws -> Void)? = nil,
+         deactivate: (@Sendable () throws -> Void)? = nil,
+         prepare: @escaping @Sendable (AVAudioPlayer) throws -> Bool = { $0.prepareToPlay() },
          start: @escaping @Sendable (AVAudioPlayer) -> Bool = { $0.play() }) {
-        activateSession = activate
-        deactivateSession = deactivate
+        if activate == nil && deactivate == nil {
+            let coordinator = PlaybackHardwareSessionCoordinator()
+            hardwareSession = coordinator
+            activateSession = { try coordinator.activate() }
+            deactivateSession = { coordinator.scheduleIdleDeactivation() }
+        } else {
+            hardwareSession = nil
+            activateSession = activate ?? {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .spokenAudio)
+                try session.setActive(true)
+            }
+            deactivateSession = deactivate ?? {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
         preparePlayer = prepare
         startPlayer = start
+    }
+
+    func deactivateHardwareImmediately() {
+        hardwareSession?.deactivateImmediately()
     }
 
     // MainActor entry keeps enqueue order equal to playback ownership changes, even before suspension.
@@ -117,17 +132,19 @@ final class PlaybackAudioSession: @unchecked Sendable {
             let source = try PlaybackPCMReader(part: part)
             logicalDuration = source.duration
             guard offset.isFinite, offset >= 0, offset < logicalDuration else { throw PlaybackError.unavailable }
-            let url: URL
+            let audio: AVAudioPlayer
             if source.coversEntireFile {
-                url = part.lease.audioURL
+                audio = try AVAudioPlayer(contentsOf: part.lease.audioURL)
+            } else if source.canBuildInMemoryWAV {
+                let wav = try source.wavData { [self] in try requireRequested(attempt) }
+                audio = try AVAudioPlayer(data: wav, fileTypeHint: AVFileType.wav.rawValue)
             } else {
                 // A citation must end at its frame boundary in the native player, not at the next UI poll.
                 let clip = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoPlayback-\(UUID()).caf")
                 temporaryClip = clip
                 try source.writeClip(to: clip) { [self] in try requireRequested(attempt) }
-                url = clip
+                audio = try AVAudioPlayer(contentsOf: clip)
             }
-            let audio = try AVAudioPlayer(contentsOf: url)
             player = audio
             completion.reset(for: audio)
             audio.delegate = completion
@@ -194,5 +211,74 @@ private nonisolated final class PlaybackCompletion: NSObject, AVAudioPlayerDeleg
     }
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         lock.withLock { if identity == ObjectIdentifier(player) { value = flag } }
+    }
+}
+
+/// Keeps `AVAudioSession` warm across consecutive clip plays to avoid 500–2000 ms route churn,
+/// while releasing the session after an idle grace window or immediately upon background/capture handoff.
+private nonisolated final class PlaybackHardwareSessionCoordinator: @unchecked Sendable {
+    private static let idleGraceSeconds: TimeInterval = 15
+    private let queue = DispatchQueue(label: "MoMoAgent.playback-hardware-session", qos: .userInitiated)
+    private var isActive = false
+    private var idleGeneration: UInt64 = 0
+    private var observers: [NSObjectProtocol] = []
+
+    init() {
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            self?.markInvalidated()
+        })
+        observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.markInvalidated()
+        })
+    }
+
+    deinit {
+        for token in observers { NotificationCenter.default.removeObserver(token) }
+        if isActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+
+    func activate() throws {
+        try queue.sync {
+            idleGeneration &+= 1
+            if isActive { return }
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio)
+            try session.setActive(true)
+            isActive = true
+        }
+    }
+
+    func scheduleIdleDeactivation() {
+        queue.async { [self] in
+            idleGeneration &+= 1
+            let expected = idleGeneration
+            guard isActive else { return }
+            queue.asyncAfter(deadline: .now() + Self.idleGraceSeconds) { [weak self] in
+                guard let self, self.idleGeneration == expected, self.isActive else { return }
+                self.isActive = false
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
+    }
+
+    func deactivateImmediately() {
+        queue.sync {
+            idleGeneration &+= 1
+            guard isActive else { return }
+            isActive = false
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+
+    private func markInvalidated() {
+        queue.async { [self] in
+            idleGeneration &+= 1
+            isActive = false
+        }
     }
 }

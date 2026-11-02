@@ -207,6 +207,7 @@ final class AudioPlaybackController {
     }
 
     func play(_ target: AudioPlaybackTarget, from requestedPosition: TimeInterval? = nil) async throws {
+        suspendWaveformPreparation()
         generation &+= 1
         let attempt = generation
         snapshot = nil
@@ -253,6 +254,7 @@ final class AudioPlaybackController {
     }
 
     func resume() async throws {
+        suspendWaveformPreparation()
         guard let current = snapshot, let timeline else { throw PlaybackError.unavailable }
         if current.state == .playing { return }
         generation &+= 1
@@ -319,6 +321,10 @@ final class AudioPlaybackController {
     }
 
     func stop() async {
+        await stop(deactivateImmediately: false)
+    }
+
+    func stop(deactivateImmediately: Bool) async {
         generation &+= 1
         let operation = generation
         snapshot = nil
@@ -328,10 +334,17 @@ final class AudioPlaybackController {
         waveformGeneration = UUID()
         stoppedWaveform?.cancel()
         await clearNative()
+        if deactivateImmediately {
+            audioSession.deactivateHardwareImmediately()
+        }
         // A canceled envelope reader must finish releasing its own file lease before close returns.
         // Keep it discoverable for another concurrent stop; never clear a newer target's reader.
         await stoppedWaveform?.value
         if generation == operation { waveformTask = nil }
+    }
+
+    func deactivateHardwareSessionImmediately() {
+        audioSession.deactivateHardwareImmediately()
     }
 
     private func pauseForInterruption() async {
@@ -360,8 +373,17 @@ final class AudioPlaybackController {
         }
         let additional: [SourceReference]
         if case .turn(_, let sources) = target { additional = sources } else { additional = [] }
-        return PlaybackTimeline(try await archive.playbackTimeline(sessionID: target.sessionID,
-            expectedGeneration: target.generation, source: target.source, additionalSources: additional))
+        do {
+            return PlaybackTimeline(try await archive.playbackTimeline(sessionID: target.sessionID,
+                expectedGeneration: target.generation, source: target.source, additionalSources: additional))
+        } catch ArchiveError.staleSource {
+            guard let primary = target.source else { throw ArchiveError.staleSource }
+            let resolved = try await archive.resolveCurrentSpeakerSources([primary] + additional)
+            guard let refreshedPrimary = resolved.first else { throw ArchiveError.staleSource }
+            return PlaybackTimeline(try await archive.playbackTimeline(sessionID: target.sessionID,
+                expectedGeneration: target.generation, source: refreshedPrimary,
+                additionalSources: Array(resolved.dropFirst())))
+        }
     }
 
     private func validate(_ timeline: PlaybackTimeline, active: Bool = false) async throws {
