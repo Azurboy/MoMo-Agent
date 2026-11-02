@@ -93,9 +93,9 @@ struct DesktopDevices: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 22) {
                 HStack {
-                    Text(showingMethod ? "连接方式" : "设备").font(.system(size: 20, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                    Text(showingMethod ? "连接方式" : "设备").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
                     Spacer()
                     if showingMethod {
                         Button("返回") { showingMethod = false }.buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(.secondary)
@@ -116,14 +116,14 @@ struct DesktopDevices: View {
                     }.desktopSettingsRow()
                     }
                 } else {
-                    VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 22) {
                         devices
                         network
                     }
                 }
                 if !showingMethod, let busy = model.busy { ProgressView(busy).controlSize(.small) }
                 if !showingMethod, let failure = model.failure { Text(failure).font(.system(size: 12)).foregroundStyle(MoMoPalette.failure).textSelection(.enabled) }
-            }.padding(.horizontal, 28).padding(.vertical, 20).frame(maxWidth: 808).frame(maxWidth: .infinity)
+            }.padding(20).frame(maxWidth: 808).frame(maxWidth: .infinity)
         }
         .sheet(isPresented: $showingPairing, onDismiss: { model.isPairingDevice = false }) {
             DesktopPairingSheet(model: model, onFinish: { showingPairing = false })
@@ -355,8 +355,8 @@ struct DesktopSettings: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 Text("设置").font(.system(size: 16, weight: .semibold))
-                    .padding(.horizontal, 8).padding(.bottom, 16)
-                HStack(spacing: 8) {
+                    .padding(.horizontal, 10).padding(.bottom, 18)
+                HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
                     TextField("搜索", text: $search).textFieldStyle(.plain)
                         .accessibilityIdentifier("settings.search")
@@ -366,31 +366,31 @@ struct DesktopSettings: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("清除搜索")
                     }
                 }
-                .font(.system(size: 13)).padding(.horizontal, 12).frame(height: 32)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                .font(.system(size: 14)).padding(.horizontal, 12).frame(height: 34)
+                .background(Color.primary.opacity(0.045), in: Capsule())
                 .padding(.bottom, 20)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 3) {
                         if !search.isEmpty {
                             ForEach(matchingPages) { sidebarRow($0) }
                             if matchingPages.isEmpty {
                                 Text("没有匹配的设置").font(.system(size: 12)).foregroundStyle(.secondary).padding(10)
                             }
                         } else {
-                            Text("个人").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                                .padding(.horizontal, 8).padding(.bottom, 4)
+                            Text("个人").font(.system(size: 12)).foregroundStyle(.tertiary)
+                                .padding(.horizontal, 10).padding(.bottom, 5)
                             sidebarRow(.advanced)
                             sidebarRow(.model)
                             sidebarRow(.memory)
-                            Text("设备").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                                .padding(.horizontal, 8).padding(.top, 20).padding(.bottom, 4)
+                            Text("设备").font(.system(size: 12)).foregroundStyle(.tertiary)
+                                .padding(.horizontal, 10).padding(.top, 22).padding(.bottom, 5)
                             sidebarRow(.pairing)
                         }
                     }
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12).padding(.top, 44).frame(width: 208)
+            .padding(.horizontal, 8).padding(.top, 44).frame(width: 240)
             .background {
                 (colorScheme == .dark ? Color(nsColor: .windowBackgroundColor) : Color(.sRGB, white: 0.985, opacity: 1))
                     .ignoresSafeArea(.container)
@@ -435,13 +435,13 @@ struct DesktopSettings: View {
 
     private func sidebarRow(_ destination: Page) -> some View {
         Button { page = destination } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 9) {
                 Image(systemName: destination.icon).font(.system(size: 14, weight: .regular))
                     .frame(width: 18).accessibilityHidden(true)
-                Text(LocalizedStringKey(destination.rawValue)).font(.system(size: 13, weight: page == destination ? .medium : .regular))
+                Text(LocalizedStringKey(destination.rawValue)).font(.system(size: 14, weight: .regular))
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8).frame(height: 32)
+            .padding(.horizontal, 10).frame(height: 30)
             .background(page == destination ? Color.primary.opacity(0.055) : .clear, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
@@ -451,8 +451,8 @@ struct DesktopSettings: View {
 
     private var modelSettings: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text("模型").font(.system(size: 20, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 22) {
+                Text("模型").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
                 DesktopSettingsGroup("接入方式") {
                     ModelConnectionFields(model: model).padding(.vertical, 6)
                 }
@@ -470,14 +470,14 @@ struct DesktopSettings: View {
                 }
                 if let busy = model.busy { ProgressView(busy).controlSize(.small) }
                 if let failure = model.failure { Text(failure).font(.callout).foregroundStyle(MoMoPalette.failure).textSelection(.enabled) }
-            }.padding(.horizontal, 28).padding(.vertical, 20).frame(maxWidth: 808).frame(maxWidth: .infinity, alignment: .center)
+            }.padding(20).frame(maxWidth: 808).frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
     private var advancedSettings: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text("通用").font(.system(size: 20, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 22) {
+                Text("通用").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
                 DesktopNetworkProxy(model: model)
                 DesktopSettingsGroup("电脑控制") {
                     HStack {
@@ -516,25 +516,16 @@ struct DesktopSettings: View {
                                 .font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 16)
-                        Menu {
-                            Picker("Agent Runtime", selection: Binding(
-                                get: { model.runtimeEngine },
-                                set: { target in Task { await model.switchRuntimeEngine(target) } }
-                            )) {
-                                ForEach(DesktopAgentEngine.allCases) { engine in
-                                    Text(engine.title).tag(engine)
-                                }
-                            }.pickerStyle(.inline).labelsHidden()
-                        } label: {
-                            HStack(spacing: 12) {
-                                Text(model.runtimeEngine.title).lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Picker("Agent Runtime", selection: Binding(
+                            get: { model.runtimeEngine },
+                            set: { target in Task { await model.switchRuntimeEngine(target) } }
+                        )) {
+                            ForEach(DesktopAgentEngine.allCases) { engine in
+                                Text(engine.title).tag(engine)
                             }
                         }
-                        .menuStyle(.button).buttonStyle(DesktopSettingsButtonStyle()).menuIndicator(.hidden)
+                        .labelsHidden()
                         .frame(width: 196)
-                        .accessibilityLabel("Agent Runtime").accessibilityValue(model.runtimeEngine.title)
                         .disabled(model.busy != nil)
                         .accessibilityIdentifier("settings.runtimeEngine")
                     }.desktopSettingsRow()
@@ -571,7 +562,7 @@ struct DesktopSettings: View {
                     if let busy = model.busy { ProgressView(busy).controlSize(.small) }
                     if let failure = model.failure { Text(failure).font(.system(size: 12)).foregroundStyle(MoMoPalette.failure) }
                 }
-            }.padding(.horizontal, 28).padding(.vertical, 20).frame(maxWidth: 808).frame(maxWidth: .infinity, alignment: .center)
+            }.padding(20).frame(maxWidth: 808).frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -637,14 +628,14 @@ struct DesktopSettingsGroup<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).accessibilityAddTraits(.isHeader)
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title).font(.system(size: 13, weight: .regular)).accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 0) { content }
                 .padding(.horizontal, 16)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Color.primary.opacity(contrast == .increased ? 0.35 : 0.08), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(Color.primary.opacity(contrast == .increased ? 0.35 : 0.05), lineWidth: 1)
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
         }
@@ -659,14 +650,14 @@ struct DesktopSettingsControlSurface: ViewModifier {
     func body(content: Content) -> some View {
         content
             .font(.system(size: 13, weight: .regular))
-            .padding(.horizontal, 12).frame(minWidth: 52, minHeight: 28)
-            .background(Color.primary.opacity(active ? 0.055 : 0.025), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 10).frame(minHeight: 28)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color.primary.opacity(contrast == .increased ? 0.35 : active ? 0.18 : 0.1), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(active ? 0.45 : contrast == .increased ? 0.35 : 0.14), lineWidth: 1)
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
             .opacity(enabled ? 1 : 0.4)
     }
 }
@@ -678,7 +669,7 @@ struct DesktopSettingsButtonStyle: ButtonStyle {
             .foregroundStyle(configuration.role == .destructive ? MoMoPalette.failure : Color.primary)
             .modifier(DesktopSettingsControlSurface(active: hovered || configuration.isPressed))
             .overlay {
-                RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(configuration.isPressed ? 0.05 : 0))
+                RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(configuration.isPressed ? 0.05 : 0))
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
             .onHover { hovered = $0 }

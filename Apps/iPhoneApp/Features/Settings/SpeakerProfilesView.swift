@@ -65,6 +65,7 @@ struct SpeakerProfilesView: View {
         }
         .buttonStyle(.automatic)
         .disabled(busy)
+        .phoneSoftTopEdge()
         .navigationTitle("人物与声纹")
         .navigationBarTitleDisplayMode(.inline)
         .tint(MoMoPalette.ink)
@@ -120,6 +121,7 @@ private struct SpeakerRenameView: View {
                     .submitLabel(.done).onSubmit { save() }.accessibilityIdentifier("speaker.rename.name")
             }
             .buttonStyle(.automatic)
+            .phoneSoftTopEdge()
             .navigationTitle("改名").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(saving) }

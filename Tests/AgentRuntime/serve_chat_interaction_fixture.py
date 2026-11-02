@@ -12,7 +12,7 @@ memories = [
  dict(id='memory-layout-1',text='10/29–30 录音 0fcdf941-b14c-4087-ad0e-a3eab9495fe2 v78 (归属/执行未核)：讨论转录中的说话人分段。同一个人的连续发言应合并，换人时另起一行，保留自然的停顿。后续还需要用真实录音核对识别效果。',kind='memory',basis='hermes',status='current',revision=1,evidence=[]),
  dict(id='memory-layout-2',text='偏好简洁的界面，先看到内容和能做的操作。说明应放在需要它的地方。',kind='user',basis='hermes',status='current',revision=1,evidence=[]),
  dict(id='memory-layout-3',text='准备下周的产品评审：先验证主要流程，再整理反馈。原来的讨论有更新，需要核对后再执行。',kind='memory',basis='inferred',status='stale',revision=1,evidence=[dict(source_id='synthetic-source',source_revision='1',quote='先把主要流程测试一遍，再收集问题。',recorded_at=1793318400)]),
- dict(id='memory-layout-4',text='一段需要完整阅读的长记忆。'+'具体内容保留原始措辞，不把推断当作事实。'*25+'全文末尾保留标记。',kind='memory',basis='hermes',status='current',revision=1,evidence=[])
+ dict(id='memory-layout-4',text='一段需要完整阅读的长记忆。'+'具体内容保留原始措辞，不把推断当作事实。'*80+'全文末尾保留标记。',kind='memory',basis='hermes',status='current',revision=1,evidence=[])
 ] if '--memory' in sys.argv else []
 operations={};attempts=0;inputs=[];owner='agent';session=None;epoch=0
 async def serve(r):

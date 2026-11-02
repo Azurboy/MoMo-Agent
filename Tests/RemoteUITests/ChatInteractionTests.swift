@@ -75,6 +75,7 @@ import UIKit
         app.launchEnvironment["MOMO_UI_TEST_RUN_ID"] = "5F12C378-A804-4E20-A46D-213FE37495AB"
         app.launchEnvironment["MOMO_UI_TEST_TIMELINE_FIXTURE"] = "chat"
         app.launchEnvironment["MOMO_UI_TEST_AVATAR_UNAVAILABLE"] = "1"
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         if app.buttons["welcome.skip"].waitForExistence(timeout: 15) {
             app.buttons["welcome.skip"].tap()
@@ -107,6 +108,10 @@ import UIKit
         XCTAssertEqual(avatar.frame.midX, app.frame.midX, accuracy: 3)
         XCTAssertLessThan(abs(avatar.frame.midY - app.buttons["remote.settings"].frame.midY), 20)
         XCTAssertGreaterThan(try darkFraction(avatar.screenshot().image), 0.025)
+        if #available(iOS 26, *) {
+            let viewport = app.webViews["assistant.transcript"].firstMatch
+            XCTAssertLessThan(viewport.frame.minY, app.staticTexts["personalAgent.name"].frame.maxY)
+        }
         capture(app, "Aligned compact native MoMo after the first reply")
         capture(app, "Completed conversation bubbles without progress")
         input.tap(); input.typeText("保留这个草稿")

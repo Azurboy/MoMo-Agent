@@ -350,6 +350,7 @@ struct LibraryView: View {
                 }
             }.padding(.horizontal, 24)
         }
+        .modifier(TimelineReadingEdge())
         .overlay {
             if model.isSearching, model.searchResults.isEmpty, model.searchFailure == nil {
                 ProgressView("正在搜索…")
@@ -503,10 +504,36 @@ private struct TimelineDayPage: View {
             reading.position = position
         }
         .refreshable { await refresh() }
+        .modifier(TimelineReadingEdge())
         // Keep the gutter outside the scrollable coordinate space. When archive
         // regrouping replaces a row ID, scrollTo(id:) can otherwise align that
         // inset target horizontally and consume the 24pt page margin.
         .padding(.horizontal, 24)
     }
 
+}
+
+// The date controls stay outside the two-axis pager so changing days preserves
+// each list's scroll position. Soften just the content crossing that boundary.
+private struct TimelineReadingEdge: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var pastTop = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top > 1
+            } action: { _, pastTop in
+                self.pastTop = pastTop
+            }
+            .overlay(alignment: .top) {
+                if pastTop && !reduceTransparency {
+                    LinearGradient(colors: [MoMoPalette.canvas, MoMoPalette.canvas.opacity(0)],
+                        startPoint: .top, endPoint: .bottom)
+                        .frame(height: 16)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+    }
 }

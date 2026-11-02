@@ -109,6 +109,7 @@ private struct SpeakerPicker: View {
             .buttonStyle(.automatic)
             .disabled(!loaded || saving)
             .tint(MoMoPalette.ink)
+            .phoneSoftTopEdge()
             .navigationTitle("说话人")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

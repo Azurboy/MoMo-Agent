@@ -13,14 +13,14 @@ struct DesktopMemory: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 16) {
-                Text("记忆").font(.system(size: 20, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                Text("记忆").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button(listMode ? "星图" : "列表", systemImage: listMode ? "circle.hexagongrid" : "list.bullet") { listMode.toggle() }
                     .frame(width: 28, height: 28).accessibilityIdentifier("settings.memory.view")
                     .disabled(reducedMotion).help(reducedMotion ? "减少动态效果时使用列表" : "切换记忆视图")
                 Button("刷新", systemImage: "arrow.clockwise") { Task { await model.loadContext() } }.frame(width: 28, height: 28).help("刷新记忆").accessibilityIdentifier("settings.memory.refresh").disabled(model.contextLoading)
             }
-            .buttonStyle(.plain).labelStyle(.iconOnly).padding(.horizontal, 28).padding(.vertical, 20)
+            .buttonStyle(.plain).labelStyle(.iconOnly).padding(20)
             if let review = model.memoryReviewStatus {
                 HStack(spacing: 12) {
                     Label(review.running ? "正在整理记忆" : "自动整理已开启", systemImage: review.running ? "sparkles" : "checkmark.circle")
@@ -30,7 +30,7 @@ struct DesktopMemory: View {
                     } else if let dream = review.dream {
                         Text("Dream · \(Date(timeIntervalSince1970: dream.at).formatted(date: .abbreviated, time: .shortened))")
                     } else { Text("Dream 将在空闲时整理") }
-                }.font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 28).padding(.bottom, 16)
+                }.font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 16)
                     .accessibilityElement(children: .combine).accessibilityIdentifier("settings.memory.status")
             }
             if let error = model.memoryError ?? webFailure {
@@ -52,7 +52,7 @@ struct DesktopMemory: View {
                                 }.desktopSettingsRow().contentShape(Rectangle())
                             }.buttonStyle(.plain)
                         }
-                    }.padding(.horizontal, 28)
+                    }.padding(.horizontal, 24)
                 }
             } else {
                 HermesMemoryView(memories: memories, inspect: { id in inspecting = memories.first { $0.id == id } }, failure: { webFailure = $0 })
@@ -89,7 +89,7 @@ private struct DesktopMemoryDetail: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack { Text("记忆").font(.system(size: 20, weight: .semibold)); Spacer(); Button("完成") { dismiss() }.buttonStyle(.plain).foregroundStyle(.secondary) }
+            HStack { Text("记忆").font(.system(size: 22, weight: .medium)); Spacer(); Button("完成") { dismiss() }.buttonStyle(.plain).foregroundStyle(.secondary) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     ClientMemoryContent(memory: memory).textSelection(.enabled)

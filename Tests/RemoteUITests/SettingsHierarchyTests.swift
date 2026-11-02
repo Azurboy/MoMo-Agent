@@ -151,7 +151,9 @@ final class MemoryReadingTests: XCTestCase {
         longRow.tap()
         XCTAssertTrue(original.waitForExistence(timeout: 5))
         XCTAssertTrue(original.label.hasSuffix("全文末尾保留标记。"))
-        app.swipeUp()
+        let initialTextTop = original.frame.minY
+        app.scrollViews.firstMatch.swipeUp()
+        XCTAssertLessThan(original.frame.minY, initialTextTop, "The long memory must actually scroll beneath the navigation bar.")
         capture(app, "memory-full-text-scroll")
 
     }

@@ -418,9 +418,7 @@ struct AgentActiveTasksSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            headerBar
-            Divider().overlay(MoMoPalette.line)
+        Group {
             if snapshot.items.isEmpty {
                 emptyState
             } else {
@@ -433,6 +431,14 @@ struct AgentActiveTasksSheet: View {
                     .padding(16)
                 }
                 .scrollBounceBehavior(.basedOnSize)
+            }
+        }
+        .phoneScrollHeader {
+            VStack(spacing: 0) {
+                headerBar
+                #if os(macOS)
+                Divider().overlay(MoMoPalette.line)
+                #endif
             }
         }
         .phonePageSurface()

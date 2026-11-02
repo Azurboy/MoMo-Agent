@@ -65,6 +65,7 @@ struct TimelineShareView: View {
                     }
                 }
             }
+            .phoneSoftTopEdge()
             .navigationTitle("分享")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
