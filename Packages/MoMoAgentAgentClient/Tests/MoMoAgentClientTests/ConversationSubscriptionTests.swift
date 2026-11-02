@@ -83,6 +83,26 @@ import XCTest
         XCTAssertEqual(store.messages.first?.content, "completed while subscription was unavailable")
     }
 
+    func testRepeatedStreamFailuresCatchUpOverHTTPAndResumeWithoutResending() async throws {
+        let (wire, store, _, _) = try fixture()
+        await wire.rejectSubscription(502)
+        store.foreground(); defer { store.background() }
+        try await eventually { await wire.subscriptions.count == 1 }
+        await wire.appendMessage("arrived during outage")
+        try await eventually { store.messages.count == 1 && store.connectionState == .ready }
+        store.setDraft("send during outage")
+        _ = try store.enqueue()
+        await store.refresh(userInitiated: true)
+        try await eventually { store.messages.last?.content == "finished" && store.tasks.last?.run?.status == "completed" }
+        await wire.rejectSubscription(nil)
+        try await eventually { await wire.streams.count == 1 }
+        await wire.appendMessage("back on stream")
+        try await eventually { store.messages.count == 4 }
+        let requests = await wire.requests
+        XCTAssertEqual(requests.filter { $0.url?.path == "/momo/v1/conversation/messages" && $0.httpMethod == "POST" }.count, 1)
+        XCTAssertEqual(Set(store.messages.map(\.id)).count, 4)
+    }
+
     func testSameStoreResumesBackgroundCompletionAndColdReopenKeepsCanonicalReply() async throws {
         let (wire, store, file, client) = try fixture()
         store.foreground(); try await eventually { await wire.subscriptions.count == 1 }
@@ -353,7 +373,7 @@ private actor LiveWire: AgentTransport {
     func pushRunEvent(_ event: [String: Any]) { emit("run.event", ["run_event": event]) }
     init(_ connection: AgentConnection) { self.connection = connection }
     func commitDuringSnapshot() { betweenSnapshot = true }
-    func rejectSubscription(_ code: Int) { rejection = code }
+    func rejectSubscription(_ code: Int?) { rejection = code }
     func throttleOnce() { throttle = true }
     func losePostReceipt() { lostReceipt = true }
     func failPostOnce(_ code: URLError.Code = .networkConnectionLost) { postError = code }

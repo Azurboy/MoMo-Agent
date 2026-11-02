@@ -1206,6 +1206,9 @@ public final class RemoteTaskStore {
             if [403, 405, 426, 501].contains(status) { connectionState = .unavailable; return }
         }
         if transient {
+            // Concurrent failures from the stream and polling share one retry window.
+            // Only a server throttle can extend a retry that is already scheduled.
+            if !serverLimited, let deadline = nextConnectionAttempt, now() < deadline { return }
             connectionFailures += 1; connectionState = .retrying
             nextConnectionAttempt = now().addingTimeInterval(max(delay ?? 0, min(30, pow(2, Double(min(connectionFailures, 5))))))
             if serverLimited, let deadline = nextConnectionAttempt {
