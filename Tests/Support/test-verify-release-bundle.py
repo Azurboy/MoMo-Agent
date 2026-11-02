@@ -54,7 +54,7 @@ class ReleaseVerifierTests(unittest.TestCase):
             CFBundleIdentifier="com.momoagent.ios", CFBundleExecutable="MoMoAgent",
             MoMoGmailAuthentication="userProvided",
             CFBundleShortVersionString="1.2.3", CFBundleVersion="42",
-            UIBackgroundModes=["processing"], BGTaskSchedulerPermittedIdentifiers=[
+            UIBackgroundModes=["audio", "processing"], BGTaskSchedulerPermittedIdentifiers=[
                 "com.momoagent.ios.transcription.processing", "com.momoagent.ios.transcription.continued.*"]))
         self.write_plist(self.watch / "Info.plist", dict(
             CFBundleIdentifier="com.momoagent.ios.watchkitapp", CFBundleExecutable="MoMoAgentWatch",
@@ -341,6 +341,8 @@ class ReleaseVerifierTests(unittest.TestCase):
 
     def test_background_and_companion_contracts_are_required(self):
         cases = [(self.app, "background_processing_declared", dict(UIBackgroundModes=["audio"])),
+                 (self.app, "background_processing_declared", dict(UIBackgroundModes=["processing"])),
+                 (self.app, "background_processing_declared", dict(UIBackgroundModes=["audio", "processing", "location"])),
                  (self.app, "background_identifiers_declared", dict(BGTaskSchedulerPermittedIdentifiers=[])),
                  (self.app, "background_identifiers_declared", dict(BGTaskSchedulerPermittedIdentifiers=[
                      "com.momoagent.ios.transcription.processing"])),
