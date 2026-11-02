@@ -7,7 +7,7 @@ struct SpeechModelSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                modelCard(.senseVoice, subtitle: "默认 · 速度快，适合持续转录") {
+                modelCard(.senseVoice, subtitle: "默认 · 神经网络引擎加速，约 2–3 分钟 / 1 小时录音") {
                     if settings.choice != .senseVoice {
                         Button("使用 SenseVoice") { settings.select(.senseVoice) }
                             .disabled(busy)
@@ -18,8 +18,8 @@ struct SpeechModelSettingsView: View {
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.xASR, use: "使用 X-ASR")
                 }
-                modelCard(.funASRNano, subtitle: "实验性") {
-                    Text("离线识别中文及方言、英文、日文，耗时与耗电可能更高。")
+                modelCard(.funASRNano, subtitle: "实验性 · CPU 大模型推理") {
+                    Text("离线识别中文及方言、英文、日文；运行 0.6B 语言模型，转写速度显著慢于 SenseVoice 且耗电更高。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.funASRNano, use: "使用 FunASR Nano")
                 }

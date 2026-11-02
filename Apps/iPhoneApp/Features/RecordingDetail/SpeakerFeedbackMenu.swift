@@ -1,30 +1,55 @@
 import SwiftUI
 import MoMoArchive
 
+private struct OptimisticSpeakerSelection: Equatable {
+    let source: SourceReference
+    let speaker: String?
+    let attribution: SpeakerAttribution?
+}
+
 struct SpeakerFeedbackMenu: View {
     let speaker: String?
     let attribution: SpeakerAttribution?
     let source: SourceReference
     var additionalSources: [SourceReference] = []
+    var initialPeople: [SpeakerProfile] = []
     let archive: ArchiveStore
+    var enqueueFeedback: ((_ sources: [SourceReference], _ speakerNameHint: String?, _ feedback: SpeakerFeedback, _ scope: SpeakerFeedbackScope) -> Void)? = nil
     let changed: () async -> Void
     @State private var choosing = false
+    @State private var optimistic: OptimisticSpeakerSelection?
 
-    private var displayName: String {
-        guard let speaker, speaker != String(localized: "说话人未确定") else { return String(localized: "说话人") }
+    private var activeOptimistic: OptimisticSpeakerSelection? {
+        guard let optimistic, optimistic.source == source else { return nil }
+        return optimistic
+    }
+
+    private var effectiveSpeaker: String? {
+        if let activeOptimistic { return activeOptimistic.speaker }
         return speaker
     }
 
+    private var effectiveAttribution: SpeakerAttribution? {
+        if let activeOptimistic { return activeOptimistic.attribution }
+        return attribution
+    }
+
+    private var displayName: String {
+        guard let effectiveSpeaker, effectiveSpeaker != String(localized: "说话人未确定") else { return String(localized: "说话人") }
+        return effectiveSpeaker
+    }
+
     var body: some View {
+        let currentAttribution = effectiveAttribution
         Button { choosing = true } label: {
             HStack(spacing: 4) {
                 Text(displayName).lineLimit(1)
                 Image(systemName: "chevron.down").font(.caption2.weight(.medium)).accessibilityHidden(true)
             }
             .phoneText(.caption)
-            .foregroundStyle(attribution?.isUser == true ? MoMoPalette.success : (attribution?.personID != nil ? MoMoPalette.ink : MoMoPalette.muted))
+            .foregroundStyle(currentAttribution?.isUser == true ? MoMoPalette.success : (currentAttribution?.personID != nil ? MoMoPalette.ink : MoMoPalette.muted))
             .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(attribution?.isUser == true ? MoMoPalette.successBackground : MoMoPalette.ink.opacity(0.045), in: Capsule())
+            .background(currentAttribution?.isUser == true ? MoMoPalette.successBackground : MoMoPalette.ink.opacity(0.045), in: Capsule())
             .frame(minWidth: 44, minHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -33,10 +58,26 @@ struct SpeakerFeedbackMenu: View {
         .accessibilityValue(Text(displayName))
         .accessibilityIdentifier("transcript.speaker.\(source.spanID)")
         .sheet(isPresented: $choosing) {
-            SpeakerPicker(archive: archive, sources: [source] + additionalSources,
-                speaker: displayName, attribution: attribution, changed: changed)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+            SpeakerPicker(
+                archive: archive,
+                sources: [source] + additionalSources,
+                speaker: displayName,
+                attribution: currentAttribution,
+                initialPeople: initialPeople,
+                enqueueFeedback: enqueueFeedback.map { enqueue in
+                    { sources, speakerHint, feedback, scope, optimisticSpeaker, optimisticAttribution in
+                        optimistic = OptimisticSpeakerSelection(
+                            source: source,
+                            speaker: optimisticSpeaker,
+                            attribution: optimisticAttribution
+                        )
+                        enqueue(sources, speakerHint, feedback, scope)
+                    }
+                },
+                changed: changed
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
     }
 }
@@ -46,18 +87,41 @@ private struct SpeakerPicker: View {
     let sources: [SourceReference]
     let speaker: String
     let attribution: SpeakerAttribution?
+    let initialPeople: [SpeakerProfile]
+    let enqueueFeedback: ((_ sources: [SourceReference], _ speakerNameHint: String?, _ feedback: SpeakerFeedback, _ scope: SpeakerFeedbackScope, _ optimisticSpeaker: String?, _ optimisticAttribution: SpeakerAttribution?) -> Void)?
     let changed: () async -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var people: [SpeakerProfile] = []
-    @State private var wholeGroup = true
+    @State private var people: [SpeakerProfile]
+    @State private var wholeGroup: Bool
     @State private var groupCount = 0
     @State private var name = ""
     @State private var naming = false
     @State private var search = ""
     @FocusState private var nameFocused: Bool
-    @State private var loaded = false
+    @State private var loaded: Bool
     @State private var saving = false
     @State private var failure: String?
+
+    init(
+        archive: ArchiveStore,
+        sources: [SourceReference],
+        speaker: String,
+        attribution: SpeakerAttribution?,
+        initialPeople: [SpeakerProfile],
+        enqueueFeedback: ((_ sources: [SourceReference], _ speakerNameHint: String?, _ feedback: SpeakerFeedback, _ scope: SpeakerFeedbackScope, _ optimisticSpeaker: String?, _ optimisticAttribution: SpeakerAttribution?) -> Void)?,
+        changed: @escaping () async -> Void
+    ) {
+        self.archive = archive
+        self.sources = sources
+        self.speaker = speaker
+        self.attribution = attribution
+        self.initialPeople = initialPeople
+        self.enqueueFeedback = enqueueFeedback
+        self.changed = changed
+        _people = State(initialValue: initialPeople)
+        _wholeGroup = State(initialValue: attribution?.confirmed != true)
+        _loaded = State(initialValue: enqueueFeedback != nil || !initialPeople.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
@@ -122,15 +186,20 @@ private struct SpeakerPicker: View {
                     }
                 }
             }
-            .overlay { if !loaded && failure == nil || saving { ProgressView() } }
+            .overlay { if (!loaded && failure == nil) || saving { ProgressView() } }
             .task {
-                wholeGroup = attribution?.confirmed != true
                 do {
-                    people = try await archive.speakerProfiles()
+                    let latestPeople = try await archive.speakerProfiles()
+                    people = latestPeople
                     loaded = true
-                    let preview = try await archive.speakerFeedbackPreview(sources)
+                    let freshSources = (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
+                    let preview = try await archive.speakerFeedbackPreview(freshSources)
                     groupCount = preview.count
-                } catch { failure = error.localizedDescription }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if !loaded { failure = error.localizedDescription }
+                }
             }
             .alert("声纹未更新", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
                 Button("好", role: .cancel) { failure = nil; if !loaded { dismiss() } }
@@ -146,17 +215,75 @@ private struct SpeakerPicker: View {
         }.contentShape(Rectangle())
     }
 
+    private func validateAndProject(_ feedback: SpeakerFeedback) throws -> (SpeakerFeedback, String?, SpeakerAttribution?) {
+        let clusterID = attribution?.clusterID ?? UUID()
+        let canLearn = attribution?.canLearn ?? false
+        switch feedback {
+        case .owner:
+            let ownerID = people.first(where: \.isUser)?.id ?? UUID()
+            return (
+                .owner,
+                String(localized: "我"),
+                SpeakerAttribution(clusterID: clusterID, personID: ownerID, isUser: true, confirmed: true, canLearn: canLearn)
+            )
+        case .knownPerson(let id):
+            guard let person = people.first(where: { $0.id == id }) else {
+                throw VoiceprintError.missingPerson
+            }
+            return (
+                .knownPerson(id),
+                person.name,
+                SpeakerAttribution(clusterID: clusterID, personID: id, isUser: person.isUser, confirmed: true, canLearn: canLearn)
+            )
+        case .person(let raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.count <= 80,
+                  !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw VoiceprintError.invalidName
+            }
+            guard trimmed.caseInsensitiveCompare(String(localized: "我")) != .orderedSame,
+                  !people.contains(where: { $0.isUser && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) else {
+                throw VoiceprintError.duplicateName
+            }
+            let resolvedID = people.first(where: { !$0.isUser && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame })?.id ?? UUID()
+            return (
+                .person(trimmed),
+                trimmed,
+                SpeakerAttribution(clusterID: clusterID, personID: resolvedID, isUser: false, confirmed: true, canLearn: canLearn)
+            )
+        case .notOwner, .notPerson:
+            let fallbackAttribution = attribution.map {
+                SpeakerAttribution(clusterID: $0.clusterID, personID: nil, isUser: false, confirmed: false, canLearn: $0.canLearn)
+            }
+            return (feedback, nil, fallbackAttribution)
+        case .clear:
+            return (.clear, nil, nil)
+        }
+    }
+
     private func correct(_ feedback: SpeakerFeedback) {
         guard !saving else { return }
         nameFocused = false
+        let scope: SpeakerFeedbackScope = wholeGroup ? .cluster : .selection
+        if let enqueueFeedback {
+            do {
+                let (validatedFeedback, optimisticSpeaker, optimisticAttribution) = try validateAndProject(feedback)
+                enqueueFeedback(sources, speaker, validatedFeedback, scope, optimisticSpeaker, optimisticAttribution)
+                dismiss()
+            } catch {
+                failure = error.localizedDescription
+            }
+            return
+        }
         saving = true
         let notifyChanged = changed
         Task {
             do {
+                let freshSources = (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
                 try await archive.correctSpeakers(
-                    sources,
+                    freshSources,
                     feedback: feedback,
-                    scope: wholeGroup ? .cluster : .selection,
+                    scope: scope,
                     deferGlobalRematch: true
                 )
                 saving = false

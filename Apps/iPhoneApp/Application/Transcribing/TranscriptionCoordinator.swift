@@ -65,7 +65,7 @@ struct TranscriptionRefreshGate {
         }
         wasSettled = false
         guard completedNewWindow else { return false }
-        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(1) { return false }
+        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(2) { return false }
         lastRefresh = now
         return true
     }
@@ -393,6 +393,18 @@ public actor TranscriptionCoordinator {
             }
             if let existing = managed?.handle, existing.origin != .continuedProcessing {
                 try await stop(execution: existing, reason: .interrupted)
+            }
+            if let currentBatch = try? await archive.transcriptionBatch(id: id) {
+                if currentBatch.state == .completed {
+                    let handle = TranscriptionExecutionHandle(id: UUID(), origin: origin, batchExecution: nil)
+                    batchSnapshot = currentBatch
+                    publish()
+                    onFinished(TranscriptionExecutionCompletion(execution: handle, reason: .completed, failureCode: nil))
+                    return handle
+                }
+                if currentBatch.state == .paused {
+                    _ = try? await archive.resumeTranscriptionBatch(id: id)
+                }
             }
         }
         guard managed == nil, !startingManaged, !startingRetry, retryScope == nil else { throw TranscriptionExecutionError.busy }
@@ -866,6 +878,13 @@ public actor TranscriptionCoordinator {
         if restartAfterCancellation || managed != nil || (requested && canRun && phase != .failed) {
             restartAfterCancellation = false
             requestWork()
+        } else if requested && canRun && phase == .failed {
+            requested = false
+            retryWakeTask?.cancel()
+            retryWakeTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                await self?.requestWork()
+            }
         }
         return report
     }

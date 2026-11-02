@@ -12,6 +12,7 @@ struct RecordingDetailView: View {
     let canDiscuss: Bool
     let discuss: (SourceReference) -> Void
     var onSpeakersChanged: (() async -> Void)? = nil
+    var resolveFiles: ((RecordingFileIssue, RecordingFileRecoveryAction) async throws -> Void)? = nil
     #if DEBUG
     var readingPositionObserver: (@MainActor (RecordingReadingDiagnostic) -> Void)? = nil
     #endif
@@ -24,6 +25,8 @@ struct RecordingDetailView: View {
     @State private var deleting = false
     @State private var retrying = false
     @State private var retryFailure: String?
+    @State private var resolvingFiles = false
+    @State private var fileResolutionFailure: String?
     @State private var playbackSpanID: UUID?
     @State private var playbackRequestFailure: String?
     @State private var pendingReadingRestore: UUID?
@@ -111,10 +114,36 @@ struct RecordingDetailView: View {
                         }
                     }
                 }
-                if fileIssue != nil {
-                    Text("资料文件当前不可用，已有记录仍保留。")
-                        .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
-                        .accessibilityIdentifier("transcript.files.unavailable")
+                if let issue = fileIssue {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("资料文件当前不可用，已有记录仍保留。")
+                            .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                            .accessibilityIdentifier("transcript.files.unavailable")
+                        if let resolveFiles {
+                            let choices: [(RecordingFileRecoveryAction, String)] = [
+                                (.restoreDatabase, String(localized: "以应用内记录恢复导出文件")),
+                                (.useMarkdown, String(localized: "采用 Markdown 文件修改")),
+                                (.useJSON, String(localized: "采用 JSON 文件修改"))
+                            ]
+                            ForEach(choices.filter { issue.availableActions.contains($0.0) }, id: \.0.rawValue) { action, label in
+                                Button(resolvingFiles ? String(localized: "正在处理…") : label) {
+                                    resolvingFiles = true
+                                    fileResolutionFailure = nil
+                                    Task {
+                                        defer { resolvingFiles = false }
+                                        do { try await resolveFiles(issue, action) }
+                                        catch { fileResolutionFailure = String(localized: "文件恢复未完成，请刷新后再试。") }
+                                    }
+                                }
+                                .phoneText(.menu).frame(minHeight: 44)
+                                .disabled(resolvingFiles || deleting)
+                                .accessibilityIdentifier("transcript.files.resolve.\(action.rawValue)")
+                            }
+                            if let fileResolutionFailure {
+                                Text(fileResolutionFailure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                            }
+                        }
+                    }
                 } else if let document, document.sessionID == sessionID, document.generation == recording?.generation,
                           !document.spans.isEmpty {
                     let turns = document.readingTurns(locations: locations)
@@ -335,8 +364,25 @@ struct RecordingDetailView: View {
                         .fixedSize(horizontal: true, vertical: false)
                         .accessibilityIdentifier("transcript.time.\(span.id)")
                 }
-                SpeakerFeedbackMenu(speaker: span.speaker, attribution: span.attribution,
-                    source: span.source, additionalSources: Array(span.sources.dropFirst()), archive: library.archive) {
+                SpeakerFeedbackMenu(
+                    speaker: span.speaker,
+                    attribution: span.attribution,
+                    source: span.source,
+                    additionalSources: Array(span.sources.dropFirst()),
+                    initialPeople: library.speakerProfiles,
+                    archive: library.archive,
+                    enqueueFeedback: { sources, speakerHint, feedback, scope in
+                        library.enqueueSpeakerFeedback(
+                            sources: sources,
+                            speakerNameHint: speakerHint,
+                            feedback: feedback,
+                            scope: scope
+                        ) {
+                            if let onSpeakersChanged { await onSpeakersChanged() }
+                            await load()
+                        }
+                    }
+                ) {
                     if let onSpeakersChanged { await onSpeakersChanged() }
                     else { await library.refresh() }
                 }

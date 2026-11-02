@@ -6,7 +6,9 @@ import MoMoArchive
 final class LibraryModel {
     private(set) var watchStatus: WatchStatusObservation?
     private(set) var recordings: [RecordingSummary] = []
+    private(set) var speakerProfiles: [SpeakerProfile] = []
     private(set) var fileIssues: [UUID: RecordingFileIssue] = [:]
+    private(set) var speakerFeedbackFailure: String?
     private(set) var snapshotRevision: UInt64 = 0
     private(set) var searchRevision: UInt64 = 0
     let configurationFingerprint: String?
@@ -18,6 +20,7 @@ final class LibraryModel {
     @ObservationIgnored let archive: ArchiveStore
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var generation: UInt64 = 0
+    @ObservationIgnored private var speakerFeedbackChain: Task<Void, Never>?
     private var nextRecordingsCursor: String?
     private(set) var previews: [UUID: String] = [:]
     private(set) var searchResults: [LibrarySearchResult] = []
@@ -200,6 +203,89 @@ final class LibraryModel {
         watchStatus = observation
     }
 
+    func dismissSpeakerFeedbackFailure() {
+        speakerFeedbackFailure = nil
+    }
+
+    /// Applies optimistic profile updates immediately and serializes voiceprint/cluster writes off the UI interaction path.
+    func enqueueSpeakerFeedback(
+        sources: [SourceReference],
+        speakerNameHint: String?,
+        feedback: SpeakerFeedback,
+        scope: SpeakerFeedbackScope,
+        onCommitted: (@MainActor () async -> Void)? = nil
+    ) {
+        switch feedback {
+        case .owner:
+            if !speakerProfiles.contains(where: \.isUser) {
+                speakerProfiles.insert(SpeakerProfile(id: UUID(), name: String(localized: "我"), isUser: true), at: 0)
+            }
+        case .person(let raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty,
+               !speakerProfiles.contains(where: { !$0.isUser && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+                speakerProfiles.append(SpeakerProfile(id: UUID(), name: trimmed, isUser: false))
+            }
+        default:
+            break
+        }
+        let previous = speakerFeedbackChain
+        let archive = self.archive
+        speakerFeedbackChain = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self else { return }
+            do {
+                let freshSources = (try? await archive.resolveCurrentSpeakerSources(sources)) ?? sources
+                var effectiveFeedback = feedback
+                if case .notPerson(let candidateID) = feedback {
+                    let profiles = (try? await archive.speakerProfiles()) ?? self.speakerProfiles
+                    if !profiles.contains(where: { $0.id == candidateID }) {
+                        if speakerNameHint == String(localized: "我"), let owner = profiles.first(where: \.isUser) {
+                            effectiveFeedback = .notPerson(owner.id)
+                        } else if let hint = speakerNameHint,
+                                  let matched = profiles.first(where: { !$0.isUser && $0.name == hint }) {
+                            effectiveFeedback = .notPerson(matched.id)
+                        }
+                    }
+                }
+                try await archive.correctSpeakers(
+                    freshSources,
+                    feedback: effectiveFeedback,
+                    scope: scope,
+                    deferGlobalRematch: true
+                )
+                if let latestProfiles = try? await archive.speakerProfiles() {
+                    self.speakerProfiles = latestProfiles
+                }
+                let affectedSessions = Set(freshSources.map(\.sessionID))
+                var affectedDays: Set<TimelineDay> = [TimelineDay(Date())]
+                for sessionID in affectedSessions {
+                    try? await self.ensureRecording(sessionID)
+                    if let summary = self.recording(sessionID) {
+                        affectedDays.insert(TimelineDay(summary.recordedAt))
+                        if summary.transcriptVersion > 0, self.fileIssues[sessionID] == nil {
+                            self.previews[sessionID] = try? await archive.transcriptPreview(
+                                sessionID: sessionID,
+                                expectedVersion: summary.transcriptVersion,
+                                expectedGeneration: summary.generation
+                            )
+                        }
+                    }
+                }
+                self.searchGeneration &+= 1
+                self.searchRevision &+= 1
+                self.snapshotRevision &+= 1
+                self.timeline.discardPendingReads(days: affectedDays)
+                await self.timeline.refresh()
+                self.speakerFeedbackFailure = nil
+                await onCommitted?()
+            } catch {
+                self.speakerFeedbackFailure = error.localizedDescription
+                await self.refresh()
+            }
+        }
+    }
+
     func removeCachedRecording(_ sessionID: UUID) {
         timeline.invalidate(sessionID: sessionID)
         generation &+= 1
@@ -234,6 +320,7 @@ final class LibraryModel {
                     cursor = page.nextCursor
                 } while cursor != nil && recordings.count < visibleCount && generation == selection
                 let issues = try await archive.recordingFileIssues()
+                let loadedProfiles = (try? await archive.speakerProfiles()) ?? self.speakerProfiles
                 let previews = await transcriptPreviews(for: recordings, issues: Set(issues.map(\.sessionID)))
                 var searched: [UUID: RecordingSummary] = [:]
                 for id in searchedRecordings.keys {
@@ -278,6 +365,7 @@ final class LibraryModel {
                     }
                 }
                 self.recordings = recordings
+                self.speakerProfiles = loadedProfiles
                 self.previews = previews
                 searchedRecordings = searched
                 nextRecordingsCursor = cursor

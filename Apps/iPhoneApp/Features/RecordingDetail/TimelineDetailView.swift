@@ -1,5 +1,6 @@
 import SwiftUI
 import MoMoArchive
+import MoMoContracts
 
 struct TimelineDetailView: View {
     let id: TimelineWindowID
@@ -12,6 +13,8 @@ struct TimelineDetailView: View {
     let discuss: ([SourceReference]) -> Void
     var initialMarkID: UUID? = nil
     var onSpeakersChanged: (() async -> Void)? = nil
+    var resolveFiles: ((RecordingFileIssue, RecordingFileRecoveryAction) async throws -> Void)? = nil
+    var openRecording: ((UUID) -> Void)? = nil
     #if DEBUG
     var readingPositionObserver: (@MainActor (TimelineReadingDiagnostic) -> Void)? = nil
     #endif
@@ -22,6 +25,7 @@ struct TimelineDetailView: View {
     @State private var references: [SourceReference] = []
     @State private var failure: String?
     @State private var retrying = false
+    @State private var resolvingIssueSessionID: UUID?
     @State private var selectedMarkID: UUID?
     @State private var initialMarkConsumed = false
     @State private var readingPosition = ScrollPosition(idType: TimelineDetailEntry.ID.self)
@@ -230,6 +234,35 @@ struct TimelineDetailView: View {
                 .phoneText(.menu).frame(minHeight: 44).disabled(retrying)
                 .accessibilityLabel("\(issue.retryTitle)，\(TimelineDate.time(issue.start, offset: window.id.timezoneOffset, seconds: true))至\(TimelineDate.time(issue.end, offset: window.id.timezoneOffset, seconds: true))")
                 .accessibilityIdentifier("timeline.issue.retry.\(issue.id)")
+            } else if issue.issue.kind == .transcriptUnavailable {
+                let sessionID = issue.issue.source.sessionID
+                HStack(spacing: 16) {
+                    if let resolveFiles,
+                       let fileIssue = library.fileIssues[sessionID],
+                       fileIssue.availableActions.contains(.restoreDatabase) {
+                        Button(resolvingIssueSessionID == sessionID ? String(localized: "正在恢复…") : String(localized: "以应用内记录恢复")) {
+                            resolvingIssueSessionID = sessionID
+                            failure = nil
+                            Task {
+                                defer { resolvingIssueSessionID = nil }
+                                do {
+                                    try await resolveFiles(fileIssue, .restoreDatabase)
+                                    await load()
+                                } catch {
+                                    failure = String(localized: "导出文件恢复未完成，请稍后再试。")
+                                }
+                            }
+                        }
+                        .phoneText(.menu).frame(minHeight: 44)
+                        .disabled(resolvingIssueSessionID != nil)
+                        .accessibilityIdentifier("timeline.issue.restoreFiles.\(issue.id)")
+                    }
+                    if let openRecording {
+                        Button("查看原录音") { openRecording(sessionID) }
+                            .phoneText(.menu).frame(minHeight: 44)
+                            .accessibilityIdentifier("timeline.issue.openRecording.\(issue.id)")
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -244,8 +277,25 @@ struct TimelineDetailView: View {
                     .phoneText(.caption).foregroundStyle(MoMoPalette.muted).monospacedDigit()
                     .fixedSize(horizontal: true, vertical: false)
                     .accessibilityIdentifier("transcript.time.\(paragraph.id)")
-                SpeakerFeedbackMenu(speaker: paragraph.speaker, attribution: paragraph.attribution,
-                    source: paragraph.source, additionalSources: Array(paragraph.sources.dropFirst()), archive: library.archive) {
+                SpeakerFeedbackMenu(
+                    speaker: paragraph.speaker,
+                    attribution: paragraph.attribution,
+                    source: paragraph.source,
+                    additionalSources: Array(paragraph.sources.dropFirst()),
+                    initialPeople: library.speakerProfiles,
+                    archive: library.archive,
+                    enqueueFeedback: { sources, speakerHint, feedback, scope in
+                        library.enqueueSpeakerFeedback(
+                            sources: sources,
+                            speakerNameHint: speakerHint,
+                            feedback: feedback,
+                            scope: scope
+                        ) {
+                            if let onSpeakersChanged { await onSpeakersChanged() }
+                            await load()
+                        }
+                    }
+                ) {
                     if let onSpeakersChanged { await onSpeakersChanged() }
                     else { await library.refresh() }
                     await load()

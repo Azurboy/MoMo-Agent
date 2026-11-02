@@ -76,9 +76,22 @@ final class ContinuedBackgroundSubmission {
         return request.identifier
     }
 
+    var hasActiveGrant: Bool {
+        if case .active = state { return true }
+        return false
+    }
+
     func complete(identifier: String) {
         guard case .active(let request) = state, request.identifier == identifier else { return }
         state = nil
+    }
+
+    @discardableResult
+    func cancelPending(batchID: UUID) -> Bool {
+        guard case .pending(let request) = state, request.batchID == batchID else { return false }
+        state = nil
+        cancel(request.identifier)
+        return true
     }
 
     @discardableResult

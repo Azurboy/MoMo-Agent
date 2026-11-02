@@ -59,7 +59,8 @@ struct PhoneRootView: View {
                             ? { try await runtime.continueTranscriptionInBackground() } : nil,
                         hasBackgroundContinuation: runtime.hasTranscriptionContinuation,
                         requestWatchStatus: runtime.requestWatchStatus,
-                        onSpeakersChanged: { await runtime.didMutateSpeakers() })
+                        onSpeakersChanged: { await runtime.didCommitTargetedSpeakerFeedback() },
+                        resolveFiles: { try await runtime.resolveFiles($0, choosing: $1) })
                 }
             }
         }
@@ -77,7 +78,7 @@ struct PhoneRootView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let failure = runtime.failure ?? runtime.refreshFailure ?? runtime.syncFailure ?? runtime.statusFailure {
+            if let failure = runtime.failure ?? runtime.refreshFailure ?? runtime.syncFailure ?? runtime.statusFailure ?? runtime.library.speakerFeedbackFailure {
                 HStack {
                     Text(failure).font(.footnote).accessibilityIdentifier("app.failure")
                     Button("关闭", action: runtime.dismissFailure).accessibilityIdentifier("app.failure.dismiss")

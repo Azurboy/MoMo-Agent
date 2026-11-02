@@ -110,7 +110,11 @@ final class PhoneRuntime {
                     let completedNewWindows = snapshot.completedWindows > (self.transcriptionSnapshot?.completedWindows ?? 0)
                     self.transcriptionSnapshot = snapshot
                     self.speechPerformance?.record(snapshot, foreground: self.isForeground)
-                    if snapshot.completedWindows > 0 { self.modelStatus = .ready }
+                    if snapshot.completedWindows > 0
+                        || (snapshot.nativeInFlight && (snapshot.phase == .preparing || snapshot.phase == .transcribing)) {
+                        self.speechWarmed = true
+                        self.modelStatus = .ready
+                    }
                     self.backgroundTasks?.update(snapshot)
                     if !self.isForeground, self.transcriptionContinuation?.isActive == true, !snapshot.nativeInFlight,
                        [.idle, .systemSuspended, .paused, .failed, .waitingForAudio, .waitingForContext, .waitingForRetry, .audioUnavailable].contains(snapshot.phase) {
@@ -133,6 +137,15 @@ final class PhoneRuntime {
                     await self.refreshBatches()
                     if settled {
                         await self.refresh(reconcileFiles: false)
+                        if self.isForeground, snapshot.execution == nil, snapshot.phase != .failed,
+                           !self.preparingTranscriptionContinuation,
+                           (self.requestedTranscriptionBatchID == nil || self.backgroundTasks?.hasActiveContinuedGrant != true),
+                           self.activeBatches.contains(where: {
+                               $0.configurationFingerprint == self.speechFingerprint
+                                   && ($0.state == .ready || ($0.state == .paused && $0.endReason == .systemEndedUnknown))
+                           }) {
+                            await self.resumeAutomaticTranscription()
+                        }
                     } else if refreshProgress {
                         if completedNewWindows { self.remoteAgent.sourcesChanged() }
                         await self.library.refresh()
@@ -153,7 +166,12 @@ final class PhoneRuntime {
         receiver.onAudioReceived = { [weak self] chunkID in self?.audioReceived(chunkID) }
         if let earphone {
             playback.sessionWillActivate = { [weak earphone] in await earphone?.yieldAudioSession() }
-            playback.sessionDidDeactivate = { [weak earphone] in earphone?.reclaimAudioSession() }
+            playback.sessionDidDeactivate = { [weak playback, weak earphone] in
+                if earphone?.isActive == true {
+                    playback?.deactivateHardwareSessionImmediately()
+                }
+                earphone?.reclaimAudioSession()
+            }
         }
         // Earphone audio is archived in-process and then follows the same path as watch audio.
         earphone?.onDelivered = { [weak self] chunkIDs in
@@ -232,6 +250,14 @@ final class PhoneRuntime {
     }
 
     private func archiveChanged() async {
+        if isForeground,
+           let fingerprint = speechFingerprint,
+           let handle = transcriptionSnapshot?.execution,
+           handle.origin == .foreground,
+           handle.batchExecution != nil,
+           (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: fingerprint)) == true {
+            try? await transcription?.stop(execution: handle, reason: .interrupted)
+        }
         await transcription?.requestWork()
         await backgroundTasks?.scheduleAutomatic()
         if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
@@ -300,6 +326,7 @@ final class PhoneRuntime {
         syncFailure = nil
         refreshFailure = nil
         audioMaintenanceFailure = nil
+        library.dismissSpeakerFeedbackFailure()
         receiver.dismissFailures()
     }
 
@@ -346,6 +373,9 @@ final class PhoneRuntime {
             catch { refreshFailure = String(localized: "资料界面尚未更新：\(error.localizedDescription)"); return }
             guard isForeground else { return }
             libraryPresentationDeferred = false
+        } else {
+            await refresh(reconcileFiles: true)
+            guard isForeground else { return }
         }
         playback.requestWaveformPreparation()
         transport?.allowControlReplay()
@@ -385,7 +415,10 @@ final class PhoneRuntime {
         // A queued background callback must not suspend a scene that became active again.
         guard !isForeground else { return }
         libraryPresentationDeferred = true
-        speech?.setForegroundPriority(activeSystemTaskRunning && PhoneBackgroundTasks.resourcesAllowProcessing)
+        speech?.setForegroundPriority(
+            (activeSystemTaskRunning || transcriptionContinuation?.isActive == true || hasTranscriptionContinuation)
+                && PhoneBackgroundTasks.resourcesAllowProcessing
+        )
         remoteAgent.background()
         if transcriptionContinuation?.isActive != true && !hasTranscriptionContinuation {
             speechWarmup?.cancel()
@@ -397,7 +430,7 @@ final class PhoneRuntime {
             transcriptionContinuation?.finish()
         }
         guard !isForeground else { return }
-        await playback.stop()
+        await playback.stop(deactivateImmediately: true)
         guard !isForeground else { return }
         if let transcription, !(await transcription.snapshot()).userPaused {
             await backgroundTasks?.scheduleAutomatic()
@@ -452,14 +485,44 @@ final class PhoneRuntime {
             do {
                 // Older builds exposed a persistent pause switch. The product now always processes automatically.
                 if (await transcription.snapshot()).userPaused { try await transcription.resumeByUser() }
-                guard isForeground, !preparingTranscriptionContinuation, requestedTranscriptionBatchID == nil else { continue }
+                let continuedGrantActive = backgroundTasks?.hasActiveContinuedGrant == true
+                guard isForeground, !preparingTranscriptionContinuation, !continuedGrantActive else { continue }
                 await transcription.resumeAfterSystemSuspension()
                 guard (await transcription.snapshot()).execution == nil else { continue }
                 try await transcription.preserveCompletedHistory()
                 let batches = try await archive.activeTranscriptionBatches()
                 activeBatches = batches
-                guard isForeground, !preparingTranscriptionContinuation, requestedTranscriptionBatchID == nil else { continue }
-                if let batch = batches.first(where: {
+                guard isForeground, !preparingTranscriptionContinuation,
+                      backgroundTasks?.hasActiveContinuedGrant != true else { continue }
+                if let requestedID = requestedTranscriptionBatchID {
+                    if let requestedBatch = batches.first(where: { $0.id == requestedID }) {
+                        if requestedBatch.state == .ready || requestedBatch.state == .paused {
+                            if requestedBatch.state == .paused { _ = try await transcription.resumeBatch(id: requestedID) }
+                            _ = try await transcription.startBatch(id: requestedID, origin: .foreground) { [weak self] completion in
+                                Task { @MainActor in
+                                    guard let self else { return }
+                                    if completion.reason == .completed, self.requestedTranscriptionBatchID == requestedID {
+                                        self.backgroundTasks?.cancelPendingContinuedIfFinished(batchID: requestedID)
+                                        self.requestedTranscriptionBatchID = nil
+                                    }
+                                    guard completion.reason == .completed || completion.reason == .userPaused else { return }
+                                    await self.resumeAutomaticTranscription()
+                                }
+                            }
+                            continue
+                        }
+                    } else {
+                        backgroundTasks?.cancelPendingContinuedIfFinished(batchID: requestedID)
+                        requestedTranscriptionBatchID = nil
+                    }
+                }
+                let hasUrgentLiveWork: Bool
+                if let speechFingerprint {
+                    hasUrgentLiveWork = (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speechFingerprint)) ?? false
+                } else {
+                    hasUrgentLiveWork = false
+                }
+                if !hasUrgentLiveWork, let batch = batches.first(where: {
                     $0.configurationFingerprint == speechFingerprint
                         && ($0.state == .ready || ($0.state == .paused && $0.endReason == .systemEndedUnknown))
                 }) {
@@ -488,6 +551,12 @@ final class PhoneRuntime {
         scheduleSpeakerRematch()
     }
 
+    func didCommitTargetedSpeakerFeedback() async {
+        await transcription?.requestWork()
+        remoteAgent.sourcesChanged()
+        scheduleSpeakerRematch()
+    }
+
     func scheduleSpeakerRematch() {
         speakerRematchPending = true
         guard speakerRematchTask == nil else { return }
@@ -502,13 +571,10 @@ final class PhoneRuntime {
                         let step = try await self.archive.rematchPendingSpeakerSessionsBatch(limit: 6)
                         if step.updatedSessions > 0 {
                             anyUpdated = true
-                            if !self.libraryPresentationDeferred {
-                                await self.library.refresh()
-                            }
                         }
                         if !step.hasMore { break }
                         await Task.yield()
-                        try? await Task.sleep(for: .milliseconds(20))
+                        try? await Task.sleep(for: .milliseconds(80))
                     } catch is CancellationError { return }
                     catch {
                         self.logger.error("Incremental speaker rematch failed: \(error.localizedDescription, privacy: .public)")
@@ -516,6 +582,9 @@ final class PhoneRuntime {
                     }
                 }
                 if anyUpdated {
+                    if !self.libraryPresentationDeferred {
+                        await self.library.refresh()
+                    }
                     try? await self.archive.projectPendingDocuments(includeUnchanged: false)
                     self.remoteAgent.sourcesChanged()
                 }
@@ -533,16 +602,52 @@ final class PhoneRuntime {
         preparingTranscriptionContinuation = true
         defer { preparingTranscriptionContinuation = false }
         do {
-            guard let batch = try await transcription.prepareUserContinuationBatch() else {
-                // Work may have finished between displaying the button and freezing the queue.
+            var prepared = try await transcription.prepareUserContinuationBatch()
+            if prepared == nil {
+                let reconciled = try await archive.reconcileDocumentFiles()
+                if reconciled.contains(where: { $0.didRevise || $0.didUnblock }) {
+                    try? await archive.projectPendingDocuments(includeUnchanged: false)
+                    await library.refresh()
+                    prepared = try await transcription.prepareUserContinuationBatch()
+                } else if reconciled.contains(where: { $0.issue != nil }) {
+                    await library.refresh()
+                    throw BackgroundTranscriptionError.blockedByFileIssues
+                }
+            }
+            guard let batch = prepared else {
                 speechFailure = nil
                 await refreshBatches()
-                return
+                if let speechFingerprint,
+                   let waitState = try? await archive.processingWaitState(configurationFingerprint: speechFingerprint) {
+                    switch waitState {
+                    case .awaitingAudio: throw BackgroundTranscriptionError.waitingForSync
+                    case .retryScheduled: throw BackgroundTranscriptionError.waitingForRetry
+                    case .unavailableAudio: throw BackgroundTranscriptionError.audioUnavailable
+                    case .awaitingContext, .idle, .queued: throw BackgroundTranscriptionError.nothingToContinue
+                    }
+                }
+                throw BackgroundTranscriptionError.nothingToContinue
             }
             requestedTranscriptionBatchID = batch.id
             try await backgroundTasks.requestBatch(id: batch.id)
             speechFailure = nil
             await refreshBatches()
+            if isForeground, backgroundTasks.hasActiveContinuedGrant != true,
+               (await transcription.snapshot()).execution == nil {
+                let batchID = batch.id
+                _ = try? await transcription.startBatch(id: batchID, origin: .foreground) { [weak self] completion in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        if completion.reason == .completed, self.requestedTranscriptionBatchID == batchID {
+                            self.backgroundTasks?.cancelPendingContinuedIfFinished(batchID: batchID)
+                            self.requestedTranscriptionBatchID = nil
+                        }
+                        if completion.reason == .completed || completion.reason == .userPaused {
+                            await self.resumeAutomaticTranscription()
+                        }
+                    }
+                }
+            }
         } catch {
             requestedTranscriptionBatchID = nil
             // A denied/late request leaves its frozen batch available to ordinary foreground processing.
@@ -564,10 +669,8 @@ final class PhoneRuntime {
             fileReconciliationRequested = false
             var stage = String(localized: "核对录音文件")
             do {
-                if reconcileFiles {
-                    let reconciled = try await archive.reconcileDocumentFiles()
-                    if reconciled.contains(where: \.didRevise) { await transcription?.requestWork() }
-                }
+                let reconciled = try await archive.reconcileDocumentFiles(onlyBlockedOrChanged: !reconcileFiles)
+                if reconciled.contains(where: { $0.didRevise || $0.didUnblock }) { await transcription?.requestWork() }
                 await refreshBatches()
                 stage = String(localized: "保存转录文件")
                 try await archive.projectPendingDocuments(includeUnchanged: reconcileFiles)
@@ -718,7 +821,10 @@ final class PhoneRuntime {
                 await transcription?.cancel(sessionID: issue.sessionID)
             }
             try await invalidatePendingContexts()
-                if case .revised = result { await transcription?.requestWork() }
+            switch result {
+            case .revised, .restored: await transcription?.requestWork()
+            case .deleted: break
+            }
             await receiver.reconcile()
             await refresh()
             } catch {

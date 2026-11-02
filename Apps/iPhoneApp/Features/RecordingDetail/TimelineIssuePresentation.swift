@@ -36,7 +36,7 @@ struct TimelineIssuePresentation: Identifiable {
         case .waitingForTranscription: return String(localized: "已确认这部分有语音，文字尚未整理完成。")
         case .transcriptionFailed: return String(localized: "这部分处理未完成；已有文字和原音保留。")
         case .audioUnavailable: return String(localized: "这部分原音文件目前不可用，无法重新整理；已有文字仍可阅读。")
-        case .transcriptUnavailable: return String(localized: "已有转录文件暂不可读，请从更多菜单打开原始录音并检查文件恢复。")
+        case .transcriptUnavailable: return String(localized: "这段录音的本地导出文件与记录不一致，恢复或确认文件版本后即可继续显示文字。")
         }
     }
     var retryTitle: String { failure != nil || issue.kind == .transcriptionFailed ? String(localized: "重试这一段") : String(localized: "整理这一段") }

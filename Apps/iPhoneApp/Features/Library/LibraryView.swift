@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import MoMoArchive
+import MoMoContracts
 
 private struct TimelineDestination: Hashable {
     let windowID: TimelineWindowID
@@ -25,8 +26,11 @@ struct LibraryView: View {
     var hasBackgroundContinuation = false
     var requestWatchStatus: (() -> Void)? = nil
     var onSpeakersChanged: (() async -> Void)? = nil
+    var resolveFiles: ((RecordingFileIssue, RecordingFileRecoveryAction) async throws -> Void)? = nil
     @State private var requestingContinuation = false
     @State private var continuationFailure: String?
+    @State private var resolvingDayFiles = false
+    @State private var fileResolutionFailure: String?
     @State private var query = ""
     @State private var searching = false
     @State private var choosingDate = false
@@ -54,6 +58,9 @@ struct LibraryView: View {
             }
             .padding(.horizontal, 24).padding(.top, 12)
             dateBar
+            if !searching, !selectedDayFileIssues.isEmpty {
+                fileIssueBanner(selectedDayFileIssues).padding(.horizontal, 24)
+            }
             if !searching, let progress = timeline.processingProgress[timeline.selectedDay], progress.received > 0,
                progress.processed == nil || (progress.remaining ?? 0) >= 0.01 || progress.awaitingSync > 0 {
                 processingProgress(progress).padding(.horizontal, 24)
@@ -79,13 +86,14 @@ struct LibraryView: View {
                 retryTimeline: retryTimeline, canDiscuss: canDiscuss, discuss: { sources in
                     if let discussSources { discussSources(sources) }
                     else if let first = sources.first { discuss(first) }
-                }, initialMarkID: destination.markID, onSpeakersChanged: onSpeakersChanged)
+                }, initialMarkID: destination.markID, onSpeakersChanged: onSpeakersChanged,
+                resolveFiles: resolveFiles, openRecording: { openRecording($0) })
         }
         .navigationDestination(item: $recordingID) { id in
             RecordingDetailView(sessionID: id, library: model, playback: playback,
                 transcription: transcription, retryTranscription: retryTranscription,
                 delete: delete, canDiscuss: canDiscuss, discuss: discuss,
-                onSpeakersChanged: onSpeakersChanged)
+                onSpeakersChanged: onSpeakersChanged, resolveFiles: resolveFiles)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -213,6 +221,64 @@ struct LibraryView: View {
                 }
             }
         }.accessibilityElement(children: .contain)
+    }
+
+    private var selectedDayFileIssues: [RecordingFileIssue] {
+        guard !model.fileIssues.isEmpty else { return [] }
+        let day = timeline.selectedDay
+        var sessionIDs = Set((timeline.listWindows[day] ?? []).flatMap { $0.sources.map(\.sessionID) })
+        for summary in model.recordings where TimelineDay(summary.recordedAt) == day {
+            sessionIDs.insert(summary.id)
+        }
+        return sessionIDs.compactMap { model.fileIssues[$0] }.sorted { $0.sessionID.uuidString < $1.sessionID.uuidString }
+    }
+
+    private func fileIssueBanner(_ issues: [RecordingFileIssue]) -> some View {
+        let restorable = issues.filter { $0.availableActions.contains(.restoreDatabase) }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(issues.count == 1
+                ? String(localized: "有 1 段录音的本地导出文件与记录不一致，暂未继续更新转录。")
+                : String(localized: "有 \(issues.count) 段录音的本地导出文件与记录不一致，暂未继续更新转录。"))
+                .phoneText(.metadata).foregroundStyle(MoMoPalette.ink)
+            HStack(spacing: 16) {
+                if let resolveFiles, !restorable.isEmpty {
+                    Button {
+                        resolvingDayFiles = true
+                        fileResolutionFailure = nil
+                        Task {
+                            defer { resolvingDayFiles = false }
+                            do {
+                                for issue in restorable {
+                                    try await resolveFiles(issue, .restoreDatabase)
+                                }
+                            } catch {
+                                fileResolutionFailure = String(localized: "导出文件恢复未完成，请打开录音详情检查。")
+                            }
+                        }
+                    } label: {
+                        Label(resolvingDayFiles ? String(localized: "正在恢复…") : String(localized: "以应用内记录恢复并继续整理"),
+                              systemImage: "arrow.clockwise.circle")
+                            .phoneText(.metadata).frame(minHeight: 44)
+                    }
+                    .disabled(resolvingDayFiles)
+                    .accessibilityIdentifier("timeline.fileIssues.restore")
+                }
+                if let first = issues.first {
+                    Button { openRecording(first.sessionID) } label: {
+                        Text("查看录音").phoneText(.metadata).frame(minHeight: 44)
+                    }
+                    .accessibilityIdentifier("timeline.fileIssues.openRecording")
+                }
+            }
+            if let fileResolutionFailure {
+                Text(fileResolutionFailure).phoneText(.caption).foregroundStyle(MoMoPalette.failure)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(MoMoPalette.surface, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("timeline.fileIssues")
     }
 
     private var processingNotice: String? {

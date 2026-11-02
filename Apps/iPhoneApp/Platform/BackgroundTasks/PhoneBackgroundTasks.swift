@@ -10,6 +10,7 @@ enum TranscriptionBackgroundPolicy: Sendable, Equatable {
 
 enum BackgroundTranscriptionError: Error, LocalizedError {
     case registrationFailed, runtimeUnavailable, alreadyRequested, unavailable, notForeground
+    case blockedByFileIssues, waitingForSync, waitingForRetry, audioUnavailable, nothingToContinue
     var errorDescription: String? {
         switch self {
         case .registrationFailed: String(localized: "系统暂未接受后台整理申请，App 内仍可继续处理。")
@@ -17,6 +18,11 @@ enum BackgroundTranscriptionError: Error, LocalizedError {
         case .alreadyRequested: String(localized: "已有后台整理任务正在申请或处理。")
         case .unavailable: String(localized: "当前系统或设备状态暂不支持持续后台整理。")
         case .notForeground: String(localized: "请在 App 内发起后台整理。")
+        case .blockedByFileIssues: String(localized: "部分录音导出文件存在冲突待核对，请先恢复文件后再继续整理。")
+        case .waitingForSync: String(localized: "剩余片段正在等待手表同步原音，传到手机后会自动整理。")
+        case .waitingForRetry: String(localized: "剩余片段正在等待稍后自动重试，其余内容已整理完成。")
+        case .audioUnavailable: String(localized: "剩余未完成片段的原音文件不可用，其余内容已整理完成。")
+        case .nothingToContinue: String(localized: "当前可整理的内容已完成，最新结尾片段将在收到后续音频后自动整理。")
         }
     }
 }
@@ -160,6 +166,16 @@ final class PhoneBackgroundTasks {
         guard UIApplication.shared.applicationState == .active else { throw BackgroundTranscriptionError.notForeground }
         guard grants.isEmpty else { throw BackgroundTranscriptionError.alreadyRequested }
         try await continued.request(batchID: id)
+    }
+
+    var hasActiveContinuedGrant: Bool {
+        continued.hasActiveGrant
+    }
+
+    func cancelPendingContinuedIfFinished(batchID: UUID) {
+        if continued.cancelPending(batchID: batchID) {
+            onContinuedBatchFinished?(batchID, true)
+        }
     }
 
     func cancelByUser() {
