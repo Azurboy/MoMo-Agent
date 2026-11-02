@@ -127,11 +127,25 @@ struct ChatRendererView: View {
                     }
                     Color.clear.frame(height: 1).id("composer-bottom")
                 }.padding(.horizontal, 24).padding(.top, 20)
+                #if os(macOS)
+                .padding(.top, renderingFailed ? 0 : headerInset)
+                #endif
             }
             .scrollBounceBehavior(.always, axes: .vertical)
             #if os(iOS)
             .safeAreaPadding(.top, renderingFailed ? 0 : headerInset)
             .scrollDismissesKeyboard(.interactively)
+            #endif
+            #if os(macOS)
+            .overlay(alignment: .top) {
+                if !renderingFailed {
+                    LinearGradient(colors: [MoMoPalette.canvas, MoMoPalette.canvas.opacity(0)],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: headerInset)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             #endif
             .accessibilityIdentifier("assistant.nativeTranscript")
             .onChange(of: scrollToBottomRequest) { reader.scrollTo("composer-bottom", anchor: .bottom) }
@@ -286,6 +300,9 @@ struct ChatRenderPayload: Encodable, Equatable {
         let reduceMotion: Bool
         let scale: Double
         var headerInset: CGFloat = 0
+        #if os(macOS)
+        let desktopHeader = true
+        #endif
     }
     let snapshot: ChatRenderSnapshot
     let appearance: Appearance

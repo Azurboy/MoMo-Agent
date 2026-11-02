@@ -228,6 +228,7 @@ struct PairingQRCode: View {
 }
 
 struct DesktopChat: View {
+    private let headerOverlap: CGFloat = 28
     @Bindable var model: DesktopModel
     @State private var composeRevision = 0
     @State private var previewAttachment: AgentAttachment?
@@ -246,11 +247,13 @@ struct DesktopChat: View {
                 .frame(maxHeight: isEmpty ? .infinity : nil)
                 .padding(.top, isEmpty ? 0 : 12)
                 .padding(.bottom, isEmpty ? 0 : 8)
+                .zIndex(1)
                 if !isEmpty {
-                    ChatRendererView(snapshot: snapshot, scrollToBottomRequest: composeRevision, onReadingPosition: model.rememberReadingPosition,
+                    ChatRendererView(snapshot: snapshot, scrollToBottomRequest: composeRevision, headerInset: headerOverlap, onReadingPosition: model.rememberReadingPosition,
                         onAttachment: { id in previewAttachment = store.attachment(id: id) },
                         onRetryMessage: { id in Task { await store.checkAgain(id: id) } })
                         .frame(maxWidth: 780)
+                        .padding(.top, -headerOverlap)
                 }
                 RemoteTaskControlsView(store: store, returnDesktop: {
                     do { try model.desktopHost?.returnControl() }
