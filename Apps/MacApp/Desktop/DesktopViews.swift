@@ -228,7 +228,7 @@ struct PairingQRCode: View {
 }
 
 struct DesktopChat: View {
-    private let headerOverlap: CGFloat = 28
+    private let headerOverlap: CGFloat = 12
     @Bindable var model: DesktopModel
     @State private var composeRevision = 0
     @State private var previewAttachment: AgentAttachment?

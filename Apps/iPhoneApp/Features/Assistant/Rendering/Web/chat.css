@@ -46,7 +46,7 @@ body { margin: 0; padding: calc(20px + var(--header-inset, 0px)) 24px 0; font-fa
   content: "";
   position: fixed;
   inset: 0 0 auto;
-  height: var(--header-inset);
+  height: calc(var(--header-inset) + 16px);
   z-index: 3;
   pointer-events: none;
   background: linear-gradient(to bottom, var(--paper) 0%, transparent 100%);

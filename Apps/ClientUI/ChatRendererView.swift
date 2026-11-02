@@ -141,7 +141,7 @@ struct ChatRendererView: View {
                 if !renderingFailed {
                     LinearGradient(colors: [MoMoPalette.canvas, MoMoPalette.canvas.opacity(0)],
                                    startPoint: .top, endPoint: .bottom)
-                        .frame(height: headerInset)
+                        .frame(height: headerInset + 16)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
