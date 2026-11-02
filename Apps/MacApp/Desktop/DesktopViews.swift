@@ -313,7 +313,7 @@ struct DesktopChat: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("查看正在进行的子智能体与后台任务")
+        .help("正在进行的任务")
         .accessibilityLabel(tasksSnap.count > 0 ? LocalizedStringKey("正在进行的任务，\(tasksSnap.count) 项") : LocalizedStringKey("正在进行的任务"))
         .accessibilityIdentifier("desktop.activeTasks")
         .popover(isPresented: $showingActiveTasks, arrowEdge: .bottom) {
@@ -510,11 +510,7 @@ struct DesktopSettings: View {
                 }
                 DesktopSettingsGroup("智能体引擎") {
                     HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Agent Runtime").font(.system(size: 14))
-                            Text(model.runtimeEngine.summary)
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
+                        Text("Agent Runtime").font(.system(size: 14))
                         Spacer(minLength: 16)
                         Picker("Agent Runtime", selection: Binding(
                             get: { model.runtimeEngine },

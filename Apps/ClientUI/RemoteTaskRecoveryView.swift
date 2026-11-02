@@ -269,8 +269,6 @@ struct AgentActiveTasksSnapshot: Equatable {
     struct Item: Identifiable, Equatable {
         let id: String
         let title: String
-        let sourceLabel: String
-        let icon: String
         let statusLabel: String
         let isUrgent: Bool
         let isStopping: Bool
@@ -302,22 +300,7 @@ struct AgentActiveTasksSnapshot: Equatable {
             }
             let rawTitle = (work.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let fallbackTitle = (parent?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedTitle = !rawTitle.isEmpty ? rawTitle : (!fallbackTitle.isEmpty ? fallbackTitle : String(localized: "子智能体任务"))
-
-            let isSuperAgent = work.id.hasPrefix("superagent:")
-            let isProactive = (work.workID ?? "").hasPrefix("proactive-") || (work.nativeState ?? "").hasPrefix("proactive:")
-            let sourceLabel: String
-            let icon: String
-            if isSuperAgent {
-                sourceLabel = isProactive ? String(localized: "SuperAgent · 主动子智能体") : String(localized: "SuperAgent · 子智能体工单")
-                icon = isProactive ? "sparkles" : "person.2"
-            } else if work.kind == "process" {
-                sourceLabel = String(localized: "Hermes · 后台终端任务")
-                icon = "terminal"
-            } else {
-                sourceLabel = String(localized: "Hermes · 子智能体任务")
-                icon = "person.2"
-            }
+            let resolvedTitle = !rawTitle.isEmpty ? rawTitle : (!fallbackTitle.isEmpty ? fallbackTitle : String(localized: "后台任务"))
 
             let terminalWork = ["completed", "failed", "cancelled", "unknown"].contains(work.state)
             let stopping = store.isControlInFlight(work.id) || (work.cancelRequested == true && !terminalWork)
@@ -344,8 +327,6 @@ struct AgentActiveTasksSnapshot: Equatable {
                 Item(
                     id: "work:\(work.id)",
                     title: resolvedTitle,
-                    sourceLabel: sourceLabel,
-                    icon: icon,
                     statusLabel: statusLabel,
                     isUrgent: urgent,
                     isStopping: stopping,
@@ -376,8 +357,6 @@ struct AgentActiveTasksSnapshot: Equatable {
                 Item(
                     id: "run:\(run.runID)",
                     title: store.title(for: run),
-                    sourceLabel: String(localized: "当前对话任务"),
-                    icon: "bubble.left.and.text.bubble.right",
                     statusLabel: statusLabel,
                     isUrgent: waiting,
                     isStopping: stopping,
@@ -393,8 +372,6 @@ struct AgentActiveTasksSnapshot: Equatable {
                 Item(
                     id: "pending:\(task.id.uuidString)",
                     title: trimmed.isEmpty ? String(localized: "新消息") : trimmed,
-                    sourceLabel: String(localized: "发送队列"),
-                    icon: "arrow.up.circle",
                     statusLabel: String(localized: "排队发送中"),
                     isUrgent: false,
                     isStopping: false,
@@ -493,11 +470,6 @@ struct AgentActiveTasksSheet: View {
             Text("当前没有正在进行的任务")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(MoMoPalette.ink)
-            Text("SuperAgent 派发的子智能体任务与 Hermes 后台委派任务会实时显示在这里。")
-                .font(.system(size: 13))
-                .foregroundStyle(MoMoPalette.muted)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 280)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(28)
@@ -511,16 +483,13 @@ private struct ActiveTaskItemRow: View {
     let item: AgentActiveTasksSnapshot.Item
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: item.icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(MoMoPalette.muted)
-                    .accessibilityHidden(true)
-                Text(item.sourceLabel)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(MoMoPalette.muted)
-                Spacer(minLength: 8)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.title)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(MoMoPalette.ink)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 5) {
                     if item.isStopping {
                         ProgressView().controlSize(.mini)
@@ -535,40 +504,31 @@ private struct ActiveTaskItemRow: View {
                         .foregroundStyle(item.isUrgent ? Color.orange : MoMoPalette.muted)
                 }
             }
-
-            HStack(alignment: .center, spacing: 12) {
-                Text(item.title)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(MoMoPalette.ink)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if item.canStop, let store {
-                    Button {
-                        Task {
-                            switch item.backing {
-                            case .work(let work):
-                                await store.cancelBackgroundWork(work)
-                            case .run(let run):
-                                await store.stopSharedRun(run)
-                            case .pendingSubmission:
-                                break
-                            }
+            if item.canStop, let store {
+                Button {
+                    Task {
+                        switch item.backing {
+                        case .work(let work):
+                            await store.cancelBackgroundWork(work)
+                        case .run(let run):
+                            await store.stopSharedRun(run)
+                        case .pendingSubmission:
+                            break
                         }
-                    } label: {
-                        Text("停止")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(MoMoPalette.ink)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(MoMoPalette.ink.opacity(0.08), in: Capsule())
-                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!store.canContactServer || item.isStopping)
-                    .accessibilityLabel("停止任务：\(item.title)")
-                    .accessibilityIdentifier("activeTasks.stop.\(item.id)")
+                } label: {
+                    Text("停止")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(MoMoPalette.ink)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(MoMoPalette.ink.opacity(0.08), in: Capsule())
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .disabled(!store.canContactServer || item.isStopping)
+                .accessibilityLabel("停止任务：\(item.title)")
+                .accessibilityIdentifier("activeTasks.stop.\(item.id)")
             }
         }
         .padding(14)
