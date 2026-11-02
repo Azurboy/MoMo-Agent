@@ -47,22 +47,41 @@ extension AgentClient {
             defer { self?.isRunning = false }
             var backoff: TimeInterval = 0.25
             var needsSnapshot = cursor() == nil
+            var streamFailures = 0
             while !Task.isCancelled {
                 var failure: Error?
+                var attemptedStream = false
                 do {
                     if needsSnapshot {
                         let value = try await client.conversationSnapshot()
                         try Task.checkCancellation(); try snapshot(value); needsSnapshot = false
                     }
                     guard let after = cursor() else { throw RemoteTaskStore.StoreError.invalidResponse }
+                    attemptedStream = true
                     for try await value in try client.conversationEvents(after: after) {
                         try Task.checkCancellation(); try event(value)
-                        if value.kind != "ready" { backoff = 0.25 }
+                        if value.kind != "ready" { backoff = 0.25; streamFailures = 0 }
                     }
                     failure = URLError(.networkConnectionLost)
                 } catch { failure = error }
-                guard !Task.isCancelled, let failure else { return }
-                failed(failure)
+                guard !Task.isCancelled, var failure else { return }
+                var snapshotRecovered = false
+                if attemptedStream && Self.canUseSnapshot(after: failure) {
+                    streamFailures += 1
+                    if streamFailures >= 2 {
+                        // A route can serve ordinary requests even while it drops event streams.
+                        do {
+                            let value = try await client.conversationSnapshot()
+                            try Task.checkCancellation()
+                            try snapshot(value)
+                            snapshotRecovered = true
+                        } catch {
+                            guard !Task.isCancelled else { return }
+                            failure = error
+                        }
+                    }
+                }
+                if !snapshotRecovered { failed(failure) }
                 var delay = backoff
                 if case AgentClientError.http(let status, _, _, let retryAfter) = failure {
                     if status == 409 { needsSnapshot = true }
@@ -78,6 +97,14 @@ extension AgentClient {
             }
         }
     }
+    private static func canUseSnapshot(after error: Error) -> Bool {
+        if case AgentClientError.http(let status, _, _, let retryAfter) = error {
+            return retryAfter == nil && [408, 500, 502, 503, 504].contains(status)
+        }
+        if case AgentClientError.invalidResponse = error { return true }
+        return AgentTransportFailure.isSocketOrLinkFailure(error)
+    }
+
     func stop() { worker?.cancel(); worker = nil; isRunning = false }
     deinit { worker?.cancel() }
 }
