@@ -146,12 +146,16 @@ class RuntimeTests(unittest.TestCase):
         connection = runtime.initialize(self.data, 8765)
         soul = self.data / "hermes/SOUL.md"
         suffix = "\n\n用户保留的偏好，历史名称 MoMoAgent 不改。\n"
-        soul.write_text("你是 MoMo，MoMoAgent 的私人助手，运行在 Hermes 引擎上。" + suffix)
-        runtime.install_prompt(self.data, {})
-        expected = "你是 MoMo，MoMo Agent 的私人助手，运行在 Hermes 引擎上。" + suffix
-        self.assertEqual(expected, soul.read_text())
-        runtime.install_prompt(self.data, {})
-        self.assertEqual(expected, soul.read_text())
+        expected = runtime.default_soul().split("\n", 1)[0] + suffix
+        for legacy in (
+            "你是 MoMo，MoMoAgent 的私人助手，运行在 Hermes 引擎上。",
+            "你是 MoMo，MoMo Agent 的私人助手，运行在 Hermes 引擎上。",
+        ):
+            soul.write_text(legacy + suffix)
+            runtime.install_prompt(self.data, {})
+            self.assertEqual(expected, soul.read_text())
+            runtime.install_prompt(self.data, {})
+            self.assertEqual(expected, soul.read_text())
         self.assertEqual("MoMoAgent", connection["application"])
 
     def test_product_rename_leaves_custom_identity_unchanged(self):

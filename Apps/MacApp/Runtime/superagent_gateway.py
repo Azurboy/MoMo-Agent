@@ -39,6 +39,7 @@ from superagent_runtime import (
     dsh_api_request,
     node_environment,
     prepare_dsh_instance,
+    prepare_superagent,
     prepared_dsh_binary,
     resolve_superagent_llm,
     seed_superagent_orchestrator,
@@ -247,13 +248,76 @@ class BridgeStore:
                 items.append(event)
         return items, str(int(rows[-1]["seq"])), polled_runs
 
+    def coalesce_unpolled_transcripts(self, *, max_chars: int = 2400) -> int:
+        """Merge backlogged micro-chunk transcript triggers for the same source_id while preserving monotonic seq."""
+        rows = self.db.execute(
+            """SELECT seq, source_id, title, text
+               FROM triggers
+               WHERE polled_at IS NULL AND kind='transcripts' AND source_id IS NOT NULL
+               ORDER BY seq ASC"""
+        ).fetchall()
+        if len(rows) <= 1:
+            return 0
+        by_source: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_source.setdefault(str(row["source_id"]), []).append(row)
+
+        def _strip_header(raw_text: str) -> str:
+            text = raw_text.strip()
+            if text.startswith("[MoMo 同步录音转写 |"):
+                _, sep, rest = text.partition("\n")
+                return rest.strip() if sep else text
+            return text
+
+        to_delete: list[int] = []
+        to_update: list[tuple[str, int]] = []
+        for sid, group in by_source.items():
+            if len(group) <= 1:
+                continue
+            bucket_rows: list[sqlite3.Row] = []
+            bucket_lines: list[str] = []
+            bucket_chars = 0
+            for item in group:
+                body = _strip_header(str(item["text"] or ""))
+                if not body:
+                    to_delete.append(int(item["seq"]))
+                    continue
+                if bucket_rows and bucket_chars + len(body) + 1 > max_chars:
+                    keep = bucket_rows[-1]
+                    title = str(keep["title"] or sid)
+                    merged = f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n" + "\n".join(bucket_lines)
+                    to_update.append((merged, int(keep["seq"])))
+                    to_delete.extend(int(r["seq"]) for r in bucket_rows[:-1])
+                    bucket_rows = []
+                    bucket_lines = []
+                    bucket_chars = 0
+                bucket_rows.append(item)
+                bucket_lines.append(body)
+                bucket_chars += len(body) + 1
+            if len(bucket_rows) > 1:
+                keep = bucket_rows[-1]
+                title = str(keep["title"] or sid)
+                merged = f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n" + "\n".join(bucket_lines)
+                to_update.append((merged, int(keep["seq"])))
+                to_delete.extend(int(r["seq"]) for r in bucket_rows[:-1])
+        if not to_delete and not to_update:
+            return 0
+        with self.db:
+            for merged_text, keep_seq in to_update:
+                self.db.execute("UPDATE triggers SET text=? WHERE seq=?", (merged_text, keep_seq))
+            if to_delete:
+                placeholders = ",".join("?" for _ in to_delete)
+                self.db.execute(f"DELETE FROM triggers WHERE seq IN ({placeholders})", to_delete)
+        return len(to_delete)
+
 
 class SuperAgentGateway:
     """Serves MoMo's local HTTP/SSE protocol while supervising DeepSeek SuperAgent (dsh)."""
 
-    TRANSCRIPT_SETTLE_SECONDS = 5.0
+    TRANSCRIPT_SETTLE_SECONDS = 15.0
+    TRANSCRIPT_MIN_LIVE_CHARS = 120
     TRANSCRIPT_PASSAGE_CHARS = 600
-    TRANSCRIPT_MAX_DEFER_SECONDS = 30.0
+    TRANSCRIPT_MAX_DEFER_SECONDS = 75.0
 
     def __init__(
         self,
@@ -291,6 +355,8 @@ class SuperAgentGateway:
         self.dsh_ready = False
         self.dsh_error: str | None = None
         self.dsh_proc: subprocess.Popen | None = None
+        self.dsh_reaper_proc: subprocess.Popen | None = None
+        self._dsh_consecutive_failures = 0
         self.dsh_work_dir = self.data / "superagent/work"
         self._trigger_wakeup = asyncio.Event()
         self._run_streams: dict[str, list[asyncio.Queue]] = {}
@@ -342,6 +408,10 @@ class SuperAgentGateway:
 
     async def on_startup(self, _: web.Application) -> None:
         self._ensure_proactive_baseline()
+        with suppress(Exception):
+            merged = self.bridge.coalesce_unpolled_transcripts()
+            if merged:
+                log.info("Coalesced %d backlogged transcript micro-triggers", merged)
         self._prepare_bridge_secret()
         self._tasks.append(asyncio.create_task(self.push.run()))
         self._tasks.append(asyncio.create_task(self._watch_context_loop()))
@@ -404,7 +474,117 @@ class SuperAgentGateway:
             with self.store.db:
                 self.store.db.execute("INSERT INTO push_meta VALUES('baseline', '1')")
 
+    def _dsh_pid_file(self) -> Path:
+        return self.data / "superagent/dsh.pid"
+
+    def _reclaim_stale_dsh_processes(self) -> None:
+        """Terminate any orphaned `dsh --profile momo` holding session write locks for this data directory."""
+        targets: dict[int, int] = {}
+        runner_marker = str(self.data / "runtime/superagent")
+        pid_file = self._dsh_pid_file()
+        if pid_file.is_file():
+            with suppress(ValueError, OSError):
+                recorded = json.loads(pid_file.read_text(encoding="utf-8"))
+                rec_pid = int(recorded.get("pid") or 0)
+                rec_pgid = int(recorded.get("pgid") or rec_pid)
+                if rec_pid > 1:
+                    ps_cmd = subprocess.run(
+                        ["/bin/ps", "-p", str(rec_pid), "-o", "command="],
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                    if "--profile momo" in ps_cmd and ("dsh" in ps_cmd or runner_marker in ps_cmd):
+                        targets[rec_pid] = rec_pgid
+            with suppress(OSError):
+                pid_file.unlink()
+
+        with suppress(Exception):
+            ps_all = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,pgid=,command="],
+                capture_output=True,
+                text=True,
+            ).stdout
+            for raw in ps_all.splitlines():
+                parts = raw.strip().split(None, 2)
+                if len(parts) < 3:
+                    continue
+                pid_s, pgid_s, cmd = parts
+                if runner_marker in cmd and "--profile momo" in cmd:
+                    pid_i, pgid_i = int(pid_s), int(pgid_s)
+                    if pid_i > 1 and pid_i != os.getpid():
+                        targets[pid_i] = pgid_i
+
+        if not targets:
+            return
+        log.info("Reclaiming %d stale dsh process(es): %s", len(targets), sorted(targets))
+        for pid_i, pgid_i in targets.items():
+            if pgid_i > 1:
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pgid_i, signal.SIGTERM)
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid_i, signal.SIGTERM)
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            alive = False
+            for pid_i in list(targets):
+                try:
+                    os.kill(pid_i, 0)
+                    alive = True
+                except ProcessLookupError:
+                    targets.pop(pid_i, None)
+                except PermissionError:
+                    targets.pop(pid_i, None)
+            if not alive:
+                return
+            time.sleep(0.1)
+        for pid_i, pgid_i in list(targets.items()):
+            if pgid_i > 1:
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pgid_i, signal.SIGKILL)
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid_i, signal.SIGKILL)
+        time.sleep(0.15)
+
+    def _start_dsh_reaper(self, dsh_pid: int) -> None:
+        """Spawn a tiny parent-death watchdog so SIGKILL of gateway never leaves an orphaned dsh holding session locks."""
+        reaper_code = (
+            "import os, signal, sys, time\n"
+            "gw_pid, dsh_pid = int(sys.argv[1]), int(sys.argv[2])\n"
+            "while True:\n"
+            "    time.sleep(1.0)\n"
+            "    try:\n"
+            "        os.kill(dsh_pid, 0)\n"
+            "    except ProcessLookupError:\n"
+            "        sys.exit(0)\n"
+            "    try:\n"
+            "        os.kill(gw_pid, 0)\n"
+            "    except ProcessLookupError:\n"
+            "        for sig, wait_s in ((signal.SIGTERM, 3.0), (signal.SIGKILL, 0.2)):\n"
+            "            for fn in (lambda: os.killpg(dsh_pid, sig), lambda: os.kill(dsh_pid, sig)):\n"
+            "                try:\n"
+            "                    fn()\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "            end = time.monotonic() + wait_s\n"
+            "            while time.monotonic() < end:\n"
+            "                try:\n"
+            "                    os.kill(dsh_pid, 0)\n"
+            "                    time.sleep(0.1)\n"
+            "                except ProcessLookupError:\n"
+            "                    sys.exit(0)\n"
+            "        sys.exit(0)\n"
+        )
+        with suppress(Exception):
+            self.dsh_reaper_proc = subprocess.Popen(
+                [str(self.python_executable), "-I", "-c", reaper_code, str(os.getpid()), str(dsh_pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
     def _start_dsh_process(self) -> dict:
+        self._reclaim_stale_dsh_processes()
         try:
             dsh_bin = prepared_dsh_binary(self.data)
         except ValueError:
@@ -419,18 +599,22 @@ class SuperAgentGateway:
         self.model_name = instance["model_id"]
         self.dsh_provider = instance["dsh_provider"]
         self.dsh_work_dir = instance["work_dir"]
+        workspace_dir = self.data / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         env = dict(self.base_env)
         env.update(instance["llm_env"])
         env["DSH_HOME"] = str(instance["dsh_home"])
         env["MOMO_DATA_DIR"] = str(self.data)
         env["MOMO_COMPUTER_BRIDGE"] = f"http://127.0.0.1:{self.connection['port']}"
+        env["DSH_SUPERAGENT_MOMO_CLI"] = str(instance["state_dir"] / "momo-cli")
+        env["DSH_SUPERAGENT_MOMO_WORKSPACE"] = str(workspace_dir)
         log_path = self.data / "superagent/dsh.log"
         log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             proc = subprocess.Popen(
                 [str(dsh_bin), "--profile", "momo"],
-                cwd=str(self.data / "workspace"),
+                cwd=str(workspace_dir),
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fd,
@@ -440,29 +624,46 @@ class SuperAgentGateway:
         finally:
             os.close(log_fd)
         self.dsh_proc = proc
+        with suppress(OSError):
+            pid_file = self._dsh_pid_file()
+            pid_file.write_text(
+                json.dumps({"pid": proc.pid, "pgid": proc.pid, "gateway_pid": os.getpid()}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            pid_file.chmod(0o600)
+        self._start_dsh_reaper(proc.pid)
         return instance
 
     def _stop_dsh_process(self) -> None:
+        reaper = self.dsh_reaper_proc
+        self.dsh_reaper_proc = None
+        if reaper is not None and reaper.poll() is None:
+            with suppress(ProcessLookupError):
+                reaper.terminate()
+            with suppress(Exception):
+                reaper.wait(timeout=1)
         proc = self.dsh_proc
         self.dsh_proc = None
         self.dsh_ready = False
-        if proc is None or proc.poll() is not None:
-            return
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
+        with suppress(OSError):
+            self._dsh_pid_file().unlink()
+        if proc is not None and proc.poll() is None:
             with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with suppress(Exception):
-                proc.wait(timeout=2)
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                with suppress(Exception):
+                    proc.wait(timeout=2)
 
     async def _supervise_dsh_loop(self) -> None:
         while not self._stopping:
             try:
-                if self.dsh_proc is None or self.dsh_proc.poll() is not None:
+                if not self.dsh_ready or self.dsh_proc is None or self.dsh_proc.poll() is not None:
                     self.dsh_ready = False
+                    await asyncio.to_thread(self._stop_dsh_process)
                     await asyncio.to_thread(self._start_dsh_process)
                     # Wait for dsh /orchestrator/api/state to come online on loopback.
                     started_ok = False
@@ -487,6 +688,7 @@ class SuperAgentGateway:
                             model_id=self.model_name,
                         )
                         self._cached_state = state
+                        self._dsh_consecutive_failures = 0
                         self.dsh_ready = True
                         self.dsh_error = None
                         log.info("DeepSeek SuperAgent ready on 127.0.0.1:%s (model=%s)", self.dsh_port, self.model_name)
@@ -497,15 +699,27 @@ class SuperAgentGateway:
                 self.dsh_ready = False
                 self.dsh_error = str(exc)
                 log.warning("SuperAgent supervisor cycle error: %s", exc)
+                await asyncio.to_thread(self._stop_dsh_process)
             await asyncio.sleep(2.0)
 
     async def _reconcile_dsh_loop(self) -> None:
         while not self._stopping:
             if self.dsh_ready:
-                with suppress(Exception):
+                try:
                     fetched = await asyncio.to_thread(self._fetch_dsh_snapshots)
+                    runtime_state = fetched[0].get("health", {}).get("runtime", {}).get("state")
+                    if runtime_state == "error":
+                        raise RuntimeError(f"DSH runtime reported error state: {fetched[0].get('health', {}).get('runtime')}")
+                    self._dsh_consecutive_failures = 0
                     self._apply_dsh_projections(*fetched)
                     self.publish_live_state()
+                except Exception as exc:
+                    self._dsh_consecutive_failures += 1
+                    if self._dsh_consecutive_failures >= 3:
+                        log.warning("DSH health check failed %d times (%s); restarting dsh", self._dsh_consecutive_failures, exc)
+                        self.dsh_ready = False
+                        self.dsh_error = str(exc)
+                        await asyncio.to_thread(self._stop_dsh_process)
             await asyncio.sleep(1.0)
 
     def _fetch_dsh_snapshots(self) -> tuple[dict, list[dict], list[dict]]:
@@ -675,13 +889,30 @@ class SuperAgentGateway:
                 if settle_seconds > 0 and not is_final:
                     quiet_elapsed = max(0.0, now - float(src["updated"]))
                     defer_elapsed = max(0.0, now - float(watermark["updated_at"])) if watermark else quiet_elapsed
+                    needs_more_settle = quiet_elapsed < settle_seconds or (
+                        len(body) < self.TRANSCRIPT_MIN_LIVE_CHARS and quiet_elapsed < 45.0
+                    )
                     if (
-                        quiet_elapsed < settle_seconds
+                        needs_more_settle
                         and len(body) < self.TRANSCRIPT_PASSAGE_CHARS
                         and defer_elapsed < self.TRANSCRIPT_MAX_DEFER_SECONDS
                     ):
                         # Hold watermark while streaming ASR spans are actively arriving mid-thought.
                         continue
+                context_prefix = ""
+                if 0 <= prev_max < len(spans) and prev_max + 1 < len(spans):
+                    prior_spans = spans[max(0, prev_max - 5) : prev_max + 1]
+                    prior_lines = []
+                    for pspan in prior_spans:
+                        pts = float(pspan.get("recorded_at") or now)
+                        phhmmss = time.strftime("%H:%M:%S", time.localtime(pts))
+                        pspeaker = f"{pspan['speaker']}: " if pspan.get("speaker") else ""
+                        ptxt = str(pspan.get("text") or "").strip()
+                        if ptxt:
+                            prior_lines.append(f"[{phhmmss}] {pspeaker}{ptxt}")
+                    if prior_lines:
+                        prior_joined = "\n".join(prior_lines)[-480:]
+                        context_prefix = f"[近期前文参考]\n{prior_joined}\n[本次新增转写]\n"
                 with self.bridge.db:
                     self.bridge.db.execute(
                         "INSERT OR REPLACE INTO source_watermarks VALUES(?,?,?,?)",
@@ -692,7 +923,7 @@ class SuperAgentGateway:
                 trigger_id = f"momo:{event_id}"
                 text = (
                     f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n"
-                    f"{body}"
+                    f"{context_prefix}{body}"
                 )
                 self.bridge.enqueue_trigger(
                     trigger_id=trigger_id,
@@ -1596,10 +1827,20 @@ class SuperAgentGateway:
         thread_id = request.query.get("thread_id", "")
         source_id = request.query.get("source_id", "")
         message_id = request.query.get("message_id", "")
+        cursor = request.query.get("cursor", "")
+        try:
+            limit = max(5, min(50, int(request.query.get("limit", "20") or 20)))
+        except ValueError:
+            limit = 20
         if thread_id.startswith("transcript:") or source_id:
             sid = source_id or thread_id.partition(":")[2]
-            messages = self._transcript_thread_messages(sid, message_id=message_id)
-            return web.json_response({"messages": messages, "body": {"source_id": sid}})
+            messages, next_cursor = self._transcript_thread_messages(
+                sid, message_id=message_id, cursor=cursor, limit=limit
+            )
+            payload: dict = {"messages": messages, "body": {"source_id": sid}}
+            if next_cursor:
+                payload["next"] = next_cursor
+            return web.json_response(payload)
         rows = self.store.db.execute(
             "SELECT id, role, content, created_at FROM messages ORDER BY seq DESC LIMIT 30"
         ).fetchall()
@@ -1615,10 +1856,17 @@ class SuperAgentGateway:
         ]
         return web.json_response({"messages": messages, "body": {"thread_id": thread_id}})
 
-    def _transcript_thread_messages(self, source_id: str, *, message_id: str = "") -> list[dict]:
+    def _transcript_thread_messages(
+        self,
+        source_id: str,
+        *,
+        message_id: str = "",
+        cursor: str = "",
+        limit: int = 20,
+    ) -> tuple[list[dict], str | None]:
         context_dir = self.data / "context"
         if not (context_dir / "context.sqlite").is_file():
-            return []
+            return [], None
         from context_store import ContextStore
 
         cstore = ContextStore(context_dir)
@@ -1628,21 +1876,99 @@ class SuperAgentGateway:
                 (source_id,),
             ).fetchone()
             if not src:
-                return []
+                return [], None
             payload = json.loads(src["payload"])
-            spans = (payload.get("spans") or [])[:120]
-            items = [
-                {
-                    "id": f"rec-{source_id}-{idx}",
-                    "from": str(span.get("speaker") or "owner"),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(span.get("recorded_at") or src["updated"]))),
-                    "text": str(span.get("text") or ""),
-                }
-                for idx, span in enumerate(spans)
-            ]
-            if items and message_id and all(item["id"] != message_id for item in items):
-                items[-1]["id"] = message_id
-            return items
+            spans = payload.get("spans") or []
+            if not spans:
+                return [], None
+
+            # Group spans into ~1000-char chronological passages across the entire recording (never truncating at 120 spans).
+            passages: list[dict] = []
+            buf_lines: list[str] = []
+            buf_chars = 0
+            buf_speaker = "owner"
+            buf_at = float(src["updated"])
+            for span in spans:
+                raw_text = str(span.get("text") or "").strip()
+                if not raw_text:
+                    continue
+                ts = float(span.get("recorded_at") or src["updated"])
+                hhmmss = time.strftime("%H:%M:%S", time.localtime(ts))
+                spk = str(span.get("speaker") or "").strip()
+                line = f"[{hhmmss}] {spk}: {raw_text}" if spk else f"[{hhmmss}] {raw_text}"
+                if buf_lines and buf_chars + len(line) + 1 > 1000:
+                    passages.append(
+                        {
+                            "id": f"rec-{source_id}-p{len(passages)}",
+                            "from": buf_speaker,
+                            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(buf_at)),
+                            "text": "\n".join(buf_lines),
+                        }
+                    )
+                    buf_lines = []
+                    buf_chars = 0
+                if not buf_lines:
+                    buf_speaker = spk or "owner"
+                    buf_at = ts
+                buf_lines.append(line)
+                buf_chars += len(line) + 1
+            if buf_lines:
+                passages.append(
+                    {
+                        "id": f"rec-{source_id}-p{len(passages)}",
+                        "from": buf_speaker,
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(buf_at)),
+                        "text": "\n".join(buf_lines),
+                    }
+                )
+            if not passages:
+                return [], None
+
+            target_idx = len(passages) - 1
+            if message_id:
+                trig_row = self.bridge.db.execute(
+                    "SELECT text, at_iso FROM triggers WHERE message_id=? OR id=? ORDER BY seq DESC LIMIT 1",
+                    (message_id, f"momo:{message_id}"),
+                ).fetchone()
+                if trig_row and trig_row["text"]:
+                    trig_lines = [
+                        ln.strip()
+                        for ln in str(trig_row["text"]).splitlines()
+                        if ln.strip() and not ln.strip().startswith("[")
+                        or (ln.strip().startswith("[") and len(ln.strip()) > 10 and ln.strip()[3:4] == ":")
+                    ]
+                    probe = trig_lines[-1] if trig_lines else ""
+                    if probe:
+                        for p_idx in range(len(passages) - 1, -1, -1):
+                            if probe in passages[p_idx]["text"]:
+                                target_idx = p_idx
+                                break
+                    passages[target_idx]["id"] = message_id
+                    if str(trig_row["text"]) not in passages[target_idx]["text"]:
+                        passages[target_idx]["text"] = passages[target_idx]["text"] + "\n" + str(trig_row["text"])
+                else:
+                    passages[target_idx]["id"] = message_id
+
+            if len(passages) <= limit:
+                return passages, None
+
+            if cursor.startswith("offset:"):
+                try:
+                    offset = max(0, int(cursor.partition(":")[2]))
+                except ValueError:
+                    offset = 0
+                page = passages[offset : offset + limit]
+                nxt = f"offset:{offset + limit}" if offset + limit < len(passages) else None
+                return page, nxt
+
+            if target_idx < limit:
+                return passages[:limit], f"offset:{limit}"
+
+            win_len = max(3, limit - 2)
+            start = max(2, min(len(passages) - win_len, target_idx - (win_len // 2)))
+            initial = [passages[0], passages[1], *passages[start : start + win_len]]
+            nxt = f"offset:{start + win_len}" if start + win_len < len(passages) else None
+            return initial, nxt
         finally:
             cstore.close()
 

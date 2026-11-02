@@ -369,7 +369,7 @@ def default_soul() -> str:
     identity, separator, behavior = upstream.partition(". ")
     if identity != "You are Hermes Agent, built by Nous Research" or not separator:
         raise ValueError("Review the upstream SOUL identity before updating the MoMo persona")
-    return "你是 MoMo，MoMo Agent 的私人助手，运行在 Hermes 引擎上。\n\n" + behavior + "\n"
+    return "你是 Momo，运行在用户的 Mac 上（执行引擎为 Hermes）。你的名字就是 Momo，不要自称“Momo 的 AI 助手”或“MoMo Agent 的助手”。\n\n" + behavior + "\n"
 
 
 def install_prompt(data: Path, config: dict) -> None:
@@ -398,10 +398,14 @@ def install_prompt(data: Path, config: dict) -> None:
     old_identity = "你是 MoMo，MoMoAgent 的私人助手。用明确的来源和真实执行结果提供帮助；资料或执行状态未知时直接说明。"
     if text.startswith(old_identity):
         text = default_soul() + text[len(old_identity):]
-    # Rename only our exact generated opening; keep the user's remaining SOUL unchanged.
-    previous_brand = "你是 MoMo，MoMoAgent 的私人助手，运行在 Hermes 引擎上。"
-    if text.startswith(previous_brand + "\n"):
-        text = default_soul().split("\n", 1)[0] + text[len(previous_brand):]
+    # Rename only our exact generated openings; keep the user's remaining SOUL unchanged.
+    for previous_brand in (
+        "你是 MoMo，MoMoAgent 的私人助手，运行在 Hermes 引擎上。",
+        "你是 MoMo，MoMo Agent 的私人助手，运行在 Hermes 引擎上。",
+    ):
+        if text.startswith(previous_brand + "\n"):
+            text = default_soul().split("\n", 1)[0] + text[len(previous_brand):]
+            break
     # User-authored identities and text outside managed paragraphs are preserved verbatim.
     if soul.read_text() != text:
         atomic_private(soul, text)

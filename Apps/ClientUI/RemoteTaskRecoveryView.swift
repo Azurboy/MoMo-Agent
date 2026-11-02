@@ -262,8 +262,6 @@ private struct RemoteControlCard: View {
 struct AgentActiveTasksSnapshot: Equatable {
     enum Backing: Equatable {
         case work(ConversationWork)
-        case run(AgentRun)
-        case pendingSubmission(UUID)
     }
 
     struct Item: Identifiable, Equatable {
@@ -289,6 +287,8 @@ struct AgentActiveTasksSnapshot: Equatable {
             self.items = []
             return
         }
+        // Only surface non-main-thread background tasks (SuperAgent Worker tickets,
+        // delegated subagents, and background processes) — never main-thread chat turns.
         var collected: [Item] = []
         let activeWorks = store.backgroundWork.filter { work in
             work.isPending && !(work.state == "cancelled" && work.reportState == "cancelled")
@@ -332,51 +332,6 @@ struct AgentActiveTasksSnapshot: Equatable {
                     isStopping: stopping,
                     canStop: canStop,
                     backing: .work(work)
-                )
-            )
-        }
-
-        for run in store.sharedRuns where !run.isTerminal {
-            let coveredBySubAgent = activeWorks.contains { work in
-                (work.workID != nil && work.workID == run.workID) || work.originRunID == run.runID
-            }
-            if coveredBySubAgent { continue }
-            let stopping = store.isControlInFlight(run.runID) || run.cancelRequested == true
-            let waiting = run.pendingControls?.isEmpty == false || ["computer", "computer_human", "clarify"].contains(run.waitReason ?? "")
-            let statusLabel: String
-            if stopping {
-                statusLabel = String(localized: "正在停止")
-            } else if waiting {
-                statusLabel = String(localized: "等待确认")
-            } else if run.status == "queued" || run.waitReason == "computer_task" {
-                statusLabel = String(localized: "排队中")
-            } else {
-                statusLabel = String(localized: "正在处理")
-            }
-            collected.append(
-                Item(
-                    id: "run:\(run.runID)",
-                    title: store.title(for: run),
-                    statusLabel: statusLabel,
-                    isUrgent: waiting,
-                    isStopping: stopping,
-                    canStop: run.cancellable == true && !stopping,
-                    backing: .run(run)
-                )
-            )
-        }
-
-        for task in store.tasks where task.isPending && task.run == nil && !task.needsReview && task.lastError == nil {
-            let trimmed = task.input.trimmingCharacters(in: .whitespacesAndNewlines)
-            collected.append(
-                Item(
-                    id: "pending:\(task.id.uuidString)",
-                    title: trimmed.isEmpty ? String(localized: "新消息") : trimmed,
-                    statusLabel: String(localized: "排队发送中"),
-                    isUrgent: false,
-                    isStopping: false,
-                    canStop: false,
-                    backing: .pendingSubmission(task.id)
                 )
             )
         }
@@ -510,10 +465,6 @@ private struct ActiveTaskItemRow: View {
                         switch item.backing {
                         case .work(let work):
                             await store.cancelBackgroundWork(work)
-                        case .run(let run):
-                            await store.stopSharedRun(run)
-                        case .pendingSubmission:
-                            break
                         }
                     }
                 } label: {

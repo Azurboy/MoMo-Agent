@@ -365,6 +365,58 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(coalesced_events), 1)
                 self.assertIn("billing.py", coalesced_events[0]["text"])
                 self.assertIn("0.80", coalesced_events[0]["text"])
+
+                # 7. Long recordings (>300 spans) preserve trigger text in thread context without 120-span truncation.
+                long_sess = str(uuid.uuid4())
+                long_texts = [f"前段闲聊第 {i} 句：嗯" for i in range(260)]
+                long_texts.append("刚才定下来把 pricing_config.json 里的试用额度统一改成 200。")
+                cstore = ContextStore(data / "context")
+                try:
+                    p_long = make_source_payload("超长评审录音", long_texts, session_id=long_sess)
+                    p_long["ended_at"] = 1761905000.0
+                    synced_long = cstore.sync_source(p_long)
+                finally:
+                    cstore.close()
+
+                await client.post("/momo/v1/proactive/ingest", headers=auth, json={})
+                polled_long = await (
+                    await client.get(f"/momo/internal/superagent/triggers?after={polled3['next_cursor']}", headers=bridge_headers)
+                ).json()
+                long_trig = next(e for e in polled_long["events"] if e.get("source_id") == synced_long["source_id"])
+                long_ctx = await (
+                    await client.get(
+                        f"/momo/internal/superagent/context?thread_id={long_trig['thread_id']}&message_id={long_trig['id']}&source_id={synced_long['source_id']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                matched_msg = next((m for m in long_ctx["messages"] if m["id"] == long_trig["id"]), None)
+                self.assertIsNotNone(matched_msg)
+                self.assertIn("pricing_config.json", matched_msg["text"])
+                self.assertIn("200", matched_msg["text"])
+
+                # 8. Unpolled transcript micro-triggers coalesce cleanly while preserving monotonic seq.
+                sid_backlog = "lib/backlog-rec"
+                for idx in range(5):
+                    gateway.bridge.enqueue_trigger(
+                        trigger_id=f"momo:transcript:{sid_backlog}:rev{idx}",
+                        kind="transcripts",
+                        thread_id=f"transcript:{sid_backlog}",
+                        message_id=f"transcript:{sid_backlog}:rev{idx}",
+                        source_id=sid_backlog,
+                        title="积压录音",
+                        addressed=False,
+                        observed=True,
+                        text=f"[MoMo 同步录音转写 | source_id={sid_backlog} | 标题=积压录音]\n[20:0{idx}:00] 第 {idx} 段讨论内容",
+                    )
+                merged_count = gateway.bridge.coalesce_unpolled_transcripts(max_chars=2400)
+                self.assertEqual(merged_count, 4)
+                polled_backlog = await (
+                    await client.get(f"/momo/internal/superagent/triggers?after={polled_long['next_cursor']}", headers=bridge_headers)
+                ).json()
+                backlog_events = [e for e in polled_backlog["events"] if e.get("source_id") == sid_backlog]
+                self.assertEqual(len(backlog_events), 1)
+                for idx in range(5):
+                    self.assertIn(f"第 {idx} 段讨论内容", backlog_events[0]["text"])
             finally:
                 await client.close()
 
