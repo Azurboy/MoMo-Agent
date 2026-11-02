@@ -40,6 +40,27 @@ html {
   overflow-anchor: none;
 }
 body { margin: 0; padding: calc(20px + var(--header-inset, 0px)) 24px 0; font-family: var(--ui); }
+/* Desktop chat extends under the wordmark. Paint the edge in the same
+   compositing surface as the scrolling bubbles, without intercepting input. */
+:root[data-desktop-edge] body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto;
+  height: calc(var(--header-inset) + 16px);
+  z-index: 3;
+  pointer-events: none;
+  background: linear-gradient(to bottom, var(--paper) 0%, transparent 100%);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  mask-image: linear-gradient(to bottom, black 0%, transparent 100%);
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-desktop-edge] body::before {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--paper);
+  }
+}
 ::selection { background: var(--line); color: var(--ink); }
 button, summary { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
 button, summary { cursor: pointer; }
