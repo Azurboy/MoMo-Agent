@@ -488,6 +488,57 @@ final class BackgroundGrantLifecycleTests: XCTestCase {
             justCommittedWindow: true, thermalState: .nominal))
     }
 
+    func testGrantFollowUpStageRunsAfterFirstStageCompletesAndHonorsExpirationBarrier() async throws {
+        let stage1Admitted = expectation(description: "Stage 1 admitted")
+        let stage2Admitted = expectation(description: "Stage 2 admitted")
+        let stage2Stopping = expectation(description: "Stage 2 stop barrier")
+        let grantCompleted = expectation(description: "Grant completed")
+        let stage1 = GrantHarness(admitted: stage1Admitted, stopping: nil)
+        let stage2 = GrantHarness(admitted: stage2Admitted, stopping: stage2Stopping)
+        var outcomes: [(Bool, String?)] = []
+        let grant = TranscriptionTaskGrant(
+            start: { await stage1.start($0) },
+            followUp: { await stage2.start($0) },
+            stop: { execution, reason in try await stage2.stop(execution, reason) }
+        ) { success, failure in
+            outcomes.append((success, failure))
+            grantCompleted.fulfill()
+        }
+        let run = Task { await grant.run() }
+        await fulfillment(of: [stage1Admitted], timeout: 5)
+        await stage1.releaseAdmission()
+        await run.value
+        await stage1.deliverLateCompletion()
+        await fulfillment(of: [stage2Admitted], timeout: 5)
+        XCTAssertTrue(outcomes.isEmpty, "Grant must stay open while follow-up stage runs")
+        grant.expire(reason: .backgroundExpired)
+        await stage2.releaseAdmission()
+        await fulfillment(of: [stage2Stopping], timeout: 5)
+        XCTAssertTrue(outcomes.isEmpty, "Expiration during follow-up admission must await stop barrier")
+        await stage2.releaseStop()
+        await fulfillment(of: [grantCompleted], timeout: 5)
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertFalse(outcomes[0].0)
+        XCTAssertNil(outcomes[0].1)
+        let reasons = await stage2.stopReasons
+        XCTAssertEqual(reasons, [.backgroundExpired])
+    }
+
+    func testTimelineDurationDisplaysHoursAndMinutesWithoutWholeHourStuckRounding() {
+        let sec45 = TimelineDate.duration(45)
+        let min2 = TimelineDate.duration(120)
+        let near1Hr = TimelineDate.duration(3_580)
+        let exact3Hr = TimelineDate.duration(10_800)
+        let threeHr21Min = TimelineDate.duration(3 * 3_600 + 21 * 60)
+        XCTAssertTrue(sec45.contains("45"))
+        XCTAssertTrue(min2.contains("2"))
+        XCTAssertFalse(near1Hr.contains("60"), "59m40s must roll over to 1 hour, not 60 minutes: \(near1Hr)")
+        XCTAssertTrue(near1Hr.contains("1"))
+        XCTAssertTrue(exact3Hr.contains("3") && !exact3Hr.contains("0"))
+        XCTAssertTrue(threeHr21Min.contains("3") && threeHr21Min.contains("21"),
+                      "Multi-hour remaining duration must show minute precision: \(threeHr21Min)")
+    }
+
     private enum TestFailure: Error { case stopFailed }
 }
 

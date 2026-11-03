@@ -24,14 +24,34 @@ public enum Probe {
     nonisolated(unsafe) private static var loginDelay: Duration?
     nonisolated(unsafe) private static var loginStarted: ContinuousClock.Instant?
     nonisolated(unsafe) private static var loginRequests = 0
+    nonisolated(unsafe) private static var upCalls = 0
+    nonisolated(unsafe) private static var resumeRunningOnUp = false
+    nonisolated(unsafe) private static var mappedPeers: [String] = []
     public static func configureLogin(state: String = "NeedsLogin", delay: Duration? = nil) {
         lock.withLock { loginState = state; loginDelay = delay; loginStarted = nil; loginRequests = 0 }
+    }
+    public static func configureState(_ state: String, resumeOnUp: Bool = false, peers: [String] = []) {
+        lock.withLock { loginState = state; resumeRunningOnUp = resumeOnUp; mappedPeers = peers }
+    }
+    public static func setMappedPeers(_ peers: [String]) {
+        lock.withLock { mappedPeers = peers }
+    }
+    public static var ups: Int { lock.withLock { upCalls } }
+    static func recordUp() {
+        lock.withLock {
+            upCalls += 1
+            if resumeRunningOnUp { loginState = "Running" }
+        }
     }
     public static func requestLogin() { lock.withLock { loginRequests += 1; loginStarted = .now } }
     public static var requests: Int { lock.withLock { loginRequests } }
     public static var status: Data {
         lock.withLock {
-            var object: [String: Any] = ["BackendState": loginState, "TailscaleIPs": ["100.64.0.1"]]
+            var peerMap: [String: Any] = [:]
+            for (index, ip) in mappedPeers.enumerated() {
+                peerMap["peer-\(index)"] = ["InNetworkMap": true, "TailscaleIPs": [ip]]
+            }
+            var object: [String: Any] = ["BackendState": loginState, "TailscaleIPs": ["100.64.0.1"], "Peer": peerMap]
             if let delay = loginDelay, let start = loginStarted, start.duration(to: .now) >= delay {
                 object["AuthURL"] = "https://login.tailscale.com/a/fixture"
             }
@@ -51,7 +71,7 @@ public actor TailscaleNode {
     public nonisolated static func configureProxy(mode: String, address: String = "") throws {}
     private var closed = false
     public init(config: Configuration, logger: String?) throws { Probe.opened() }
-    public func up() async throws {}
+    public func up() async throws { Probe.recordUp() }
     public func close() async throws {
         guard !closed else { return }; closed = true; Probe.beginClose()
         try await Task.sleep(for: .milliseconds(30)); Probe.closed()
@@ -233,6 +253,83 @@ import TailscaleKit
         try await corrupt.updateProxy(TailnetProxySettings())
         try await corrupt.start(); await corrupt.close()
         print("PASS: proxy persistence, validation, node-only restart, identity retention and corrupt-setting recovery")
+
+        // Regression 1: Zombie "Stopped" node after background wakeup with healthy localapi proxy
+        // must re-invoke node.up() and recover in-place without trapping connectedSession forever.
+        let recoveryDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: recoveryDir) }
+        let zombieNet = EmbeddedTailnet(directory: recoveryDir, device: "fixture")
+        zombieNet.startupTimeout = .milliseconds(350)
+        zombieNet.peerMapTimeout = .milliseconds(300)
+        Probe.useHealthyProxy(true)
+        Probe.configureState("Running", resumeOnUp: false, peers: ["100.118.16.18"])
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        let createdBeforeZombie = Probe.counts.0
+        let upsBeforeZombie = Probe.ups
+        zombieNet.suspendSessions()
+        Probe.configureState("Stopped", resumeOnUp: true, peers: ["100.118.16.18"])
+        zombieNet.prepareForForeground()
+        let recoveredFromStopped = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        precondition(zombieNet.state == "Running", "Stopped node must re-up to Running")
+        precondition(Probe.ups > upsBeforeZombie, "Stopped node must re-run up()")
+        precondition(Probe.counts.0 == createdBeforeZombie, "Recoverable Stopped node re-ups in place")
+        _ = recoveredFromStopped
+
+        // Regression 2: A wedged node stuck in "Stopped" past startupTimeout marks needsRestart
+        // so the immediate next retry recycles the node instead of looping forever.
+        zombieNet.suspendSessions()
+        Probe.configureState("Stopped", resumeOnUp: false, peers: ["100.118.16.18"])
+        zombieNet.prepareForForeground()
+        do {
+            _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+            preconditionFailure("Expected timeout while node refuses to leave Stopped")
+        } catch let error as URLError where error.code == .notConnectedToInternet {}
+        Probe.configureState("Running", resumeOnUp: true, peers: ["100.118.16.18"])
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        precondition(Probe.counts.0 == createdBeforeZombie + 1, "Wedged Stopped node must recycle on next attempt")
+
+        // Regression 3: Missing peer netmap refreshes directly and recycles after 2 consecutive timeouts.
+        Probe.setMappedPeers([])
+        zombieNet.prepareForForeground()
+        let delayedPeerTask = Task {
+            try await Task.sleep(for: .milliseconds(80))
+            Probe.setMappedPeers(["100.118.16.18"])
+        }
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        try await delayedPeerTask.value
+        Probe.setMappedPeers([])
+        zombieNet.prepareForForeground()
+        let beforePeerTimeoutNodes = Probe.counts.0
+        for _ in 0..<2 {
+            do {
+                _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+                preconditionFailure("Expected peer map timeout")
+            } catch let error as URLError where error.code == .notConnectedToInternet {}
+        }
+        Probe.setMappedPeers(["100.118.16.18"])
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        precondition(Probe.counts.0 == beforePeerTimeoutNodes + 1, "Repeated stale peer netmap must recycle node")
+
+        // Regression 4: Transport success resets failure streak; 6 consecutive socket failures recycle wedged node.
+        var activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        let beforeStreakNodes = Probe.counts.0
+        for _ in 0..<3 {
+            zombieNet.failedRequest(URLError(.badURL), session: activePool)
+            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        }
+        zombieNet.recordTransportSuccess()
+        for _ in 0..<3 {
+            zombieNet.failedRequest(URLError(.badURL), session: activePool)
+            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        }
+        precondition(Probe.counts.0 == beforeStreakNodes, "Reset streak must not restart healthy node")
+        for _ in 0..<3 {
+            zombieNet.failedRequest(URLError(.badURL), session: activePool)
+            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        }
+        precondition(Probe.counts.0 == beforeStreakNodes + 1, "6 consecutive socket failures must recycle wedged node")
+        await zombieNet.close()
+        print("PASS: zombie Stopped recovery, wedged node recycle, peer netmap refresh/recycle and streak self-healing")
     }
 }
 '''

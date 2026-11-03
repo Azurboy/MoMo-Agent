@@ -648,6 +648,181 @@ final class TranscriptionBatchIntegrationTests: XCTestCase {
     }
     #endif
 
+    func testYieldToPriorityWorkFinishesActiveNativeDecodeBeforeSwitchingToLiveChunk() async throws {
+        let fixture = try fixture()
+        let archive = try ArchiveStore(rootURL: fixture.root.appendingPathComponent("phone"), receiverDeviceID: UUID())
+        let first = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let second = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let gate = BatchNativeGate()
+        defer { gate.release() }
+        let outcomes = OSAllocatedUnfairLock(initialState: [SpeechDiagnostics.Outcome]())
+        let engine = try SpeechEngine(
+            bundle: fixture.model,
+            configuration: SpeechConfiguration(),
+            onDiagnostics: { diag in outcomes.withLock { $0.append(diag.outcome) } },
+            onEvent: gate.observe
+        )
+        try await prepareWindows(archive: archive, engine: engine)
+        let coordinator = try TranscriptionCoordinator(archive: archive, speech: engine, startSuspended: false)
+        let frozen = try await coordinator.freezeBatch()
+        let batch = try XCTUnwrap(frozen)
+        XCTAssertEqual(batch.windowIDs.count, 2)
+        let completions = OSAllocatedUnfairLock(initialState: [TranscriptionExecutionCompletion]())
+        let handle = try await coordinator.startBatch(id: batch.id, origin: .foreground) { result in
+            completions.withLock { $0.append(result) }
+        }
+        let preemption = Task { () -> UUID in
+            defer { gate.release() }
+            try await gate.waitForStart()
+            let live = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+            try await coordinator.yieldToPriorityWork(execution: handle)
+            XCTAssertTrue(completions.withLock { $0.isEmpty }, "Cooperative yield must wait for in-flight window commit.")
+            return live.sessionID
+        }
+        let report = await coordinator.runUntilIdle()
+        gate.finishEvents()
+        let liveSessionID = try await preemption.value
+        XCTAssertFalse(gate.timedOut)
+        XCTAssertNil(report.snapshot.failureCode)
+        XCTAssertFalse(outcomes.withLock { $0.contains(.cancelled) }, "Cooperative yield must never cancel in-flight native inference.")
+        XCTAssertEqual(completions.withLock { $0.map(\.reason) }, [.interrupted])
+        try await assertOfficialTranscript(first.sessionID, archive: archive)
+        try await assertOfficialTranscript(liveSessionID, archive: archive)
+        let yieldedBatch = try await archive.transcriptionBatch(id: batch.id)
+        XCTAssertEqual(yieldedBatch.state, .ready)
+        let secondSummary = try await archive.recordings().first { $0.id == second.sessionID }
+        XCTAssertEqual(secondSummary?.transcriptVersion, 0)
+    }
+
+    #if DEBUG
+    func testPriorityInterleavingProcessesLiveWatchChunksWithoutCancellingOrTearingDownBatch() async throws {
+        let fixture = try fixture()
+        let archive = try ArchiveStore(rootURL: fixture.root.appendingPathComponent("phone"), receiverDeviceID: UUID())
+        let first = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let second = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let gate = BatchNativeGate()
+        defer { gate.release() }
+        let outcomes = OSAllocatedUnfairLock(initialState: [SpeechDiagnostics.Outcome]())
+        let engine = try SpeechEngine(
+            bundle: fixture.model,
+            configuration: SpeechConfiguration(),
+            onDiagnostics: { diag in outcomes.withLock { $0.append(diag.outcome) } },
+            onEvent: gate.observe
+        )
+        try await prepareWindows(archive: archive, engine: engine)
+        let coordinator = try TranscriptionCoordinator(archive: archive, speech: engine, startSuspended: false)
+        let transcribedSessions = OSAllocatedUnfairLock(initialState: [UUID]())
+        await coordinator.observeClaims { kind, sessionID in
+            if kind == .transcription {
+                transcribedSessions.withLock { $0.append(sessionID) }
+            }
+        }
+        let frozen = try await coordinator.freezeBatch()
+        let batch = try XCTUnwrap(frozen)
+        XCTAssertEqual(batch.windowIDs.count, 2)
+        let completions = OSAllocatedUnfairLock(initialState: [TranscriptionExecutionCompletion]())
+        let handle = try await coordinator.startBatch(id: batch.id, origin: .foreground) { result in
+            completions.withLock { $0.append(result) }
+        }
+        let arrival = Task { () -> UUID in
+            defer { gate.release() }
+            try await gate.waitForStart()
+            let live = try await TranscriptionIntegrationScenario.ingest(
+                fixture.chunks,
+                archive: archive,
+                wallClockAnchor: Date().addingTimeInterval(-120)
+            )
+            await coordinator.requestPriorityInterleaving(execution: handle)
+            return live.sessionID
+        }
+        let report = await coordinator.runUntilIdle()
+        gate.finishEvents()
+        let liveSessionID = try await arrival.value
+        XCTAssertFalse(gate.timedOut)
+        XCTAssertNil(report.snapshot.failureCode)
+        XCTAssertFalse(outcomes.withLock { $0.contains(.cancelled) },
+                       "In-place priority interleaving must never cancel in-flight native inference.")
+        XCTAssertEqual(transcribedSessions.withLock { $0 }, [first.sessionID, liveSessionID, second.sessionID],
+                       "Live Watch audio must interleave right after the active batch window and seamlessly return to the batch.")
+        XCTAssertEqual(completions.withLock { $0.map(\.reason) }, [.completed],
+                       "Batch execution must complete in a single uninterrupted run without stop/start churn.")
+        try await assertOfficialTranscript(first.sessionID, archive: archive)
+        try await assertOfficialTranscript(liveSessionID, archive: archive)
+        try await assertOfficialTranscript(second.sessionID, archive: archive)
+        let finishedBatch = try await archive.transcriptionBatch(id: batch.id)
+        XCTAssertEqual(finishedBatch.state, .completed)
+    }
+    #endif
+
+    func testBackgroundBatchRecoveryResumesReadyAndExpiredBatchesExceptUserPaused() async throws {
+        let fixture = try fixture()
+        let archive = try ArchiveStore(rootURL: fixture.root.appendingPathComponent("phone"), receiverDeviceID: UUID())
+        _ = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let engine = try SpeechEngine(bundle: fixture.model, configuration: SpeechConfiguration())
+        try await prepareWindows(archive: archive, engine: engine)
+        let coordinator = try TranscriptionCoordinator(archive: archive, speech: engine)
+        let frozen = try await coordinator.freezeBatch()
+        let batch = try XCTUnwrap(frozen)
+
+        // 1. Newly frozen `.ready` batch is excluded only while its continued request is pending, otherwise resumable.
+        let skippedWhilePending = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: batch.id)
+        XCTAssertNil(skippedWhilePending)
+        let readyResumed = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing()
+        XCTAssertEqual(readyResumed, batch.id)
+
+        // 2. `.ready` with `endReason == .backgroundExpired` (e.g. after a prior BGProcessingTask expired) must resume.
+        let bgExec = try await archive.beginTranscriptionBatch(id: batch.id, origin: .backgroundProcessing)
+        let bgExpired = try await archive.finishTranscriptionBatch(execution: bgExec, reason: .backgroundExpired)
+        XCTAssertEqual(bgExpired.state, .ready)
+        XCTAssertEqual(bgExpired.endReason, .backgroundExpired)
+        let expiredResumed = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing()
+        XCTAssertEqual(expiredResumed, batch.id)
+
+        // 3. `.paused` with `endReason == .userPaused` must never auto-resume in background.
+        let contExec = try await archive.beginTranscriptionBatch(id: batch.id, origin: .continuedProcessing)
+        let userPaused = try await archive.finishTranscriptionBatch(execution: contExec, reason: .userPaused)
+        XCTAssertEqual(userPaused.state, .paused)
+        let notResumed = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing()
+        XCTAssertNil(notResumed)
+    }
+
+    func testFiniteBackgroundBudgetStopsAtCleanWindowBoundaryWithoutCancellingNextWindow() async throws {
+        let fixture = try fixture()
+        let archive = try ArchiveStore(rootURL: fixture.root.appendingPathComponent("phone"), receiverDeviceID: UUID())
+        let first = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let second = try await TranscriptionIntegrationScenario.ingest(fixture.chunks, archive: archive)
+        let remainingSeconds = OSAllocatedUnfairLock<TimeInterval?>(initialState: 28.0)
+        let outcomes = OSAllocatedUnfairLock(initialState: [SpeechDiagnostics.Outcome]())
+        let engine = try SpeechEngine(
+            bundle: fixture.model,
+            configuration: SpeechConfiguration(),
+            onDiagnostics: { diag in
+                outcomes.withLock { $0.append(diag.outcome) }
+                if diag.operation == .transcribe && diag.outcome == .completed {
+                    remainingSeconds.withLock { $0 = 9.0 }
+                }
+            },
+            onEvent: { _ in }
+        )
+        try await prepareWindows(archive: archive, engine: engine)
+        let coordinator = try TranscriptionCoordinator(
+            archive: archive,
+            speech: engine,
+            remainingFiniteBackgroundSeconds: { remainingSeconds.withLock { $0 } }
+        )
+        let completions = OSAllocatedUnfairLock(initialState: [TranscriptionExecutionCompletion]())
+        _ = try await coordinator.startBackgroundAutomatic(finiteBudget: true) { result in
+            completions.withLock { $0.append(result) }
+        }
+        let report = await coordinator.runUntilIdle()
+        XCTAssertEqual(report.transcribedWindows, 1)
+        XCTAssertFalse(outcomes.withLock { $0.contains(.cancelled) })
+        XCTAssertEqual(completions.withLock { $0.map(\.reason) }, [.backgroundExpired])
+        try await assertOfficialTranscript(first.sessionID, archive: archive)
+        let secondSummary = try await archive.recordings().first { $0.id == second.sessionID }
+        XCTAssertEqual(secondSummary?.transcriptVersion, 0)
+    }
+
     private func fixture() throws -> (root: URL, model: SpeechModelBundle, chunks: [URL]) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoBatchIntegration-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

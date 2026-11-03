@@ -28,13 +28,26 @@ enum BackgroundTranscriptionError: Error, LocalizedError {
 }
 
 extension ReceivedAudioTranscription {
-    convenience init(coordinator: TranscriptionCoordinator) {
+    convenience init(coordinator: TranscriptionCoordinator,
+                     excludingBatchID: @escaping @MainActor @Sendable () -> UUID? = { nil }) {
         self.init(begin: { expiration in
             let id = UIApplication.shared.beginBackgroundTask(withName: "Transcribe received Watch audio",
                 expirationHandler: expiration)
             guard id != .invalid else { return nil }
             return { UIApplication.shared.endBackgroundTask(id) }
-        }, start: { try await coordinator.startBackgroundAutomatic(onFinished: $0) },
+        }, start: { try await coordinator.startBackgroundAutomatic(finiteBudget: true, onFinished: $0) },
+        followUp: { finish in
+            let (sufficientBudget, excluded) = await MainActor.run {
+                let remaining = UIApplication.shared.applicationState == .background
+                    ? UIApplication.shared.backgroundTimeRemaining : .infinity
+                return (remaining >= 16, excludingBatchID())
+            }
+            guard sufficientBudget,
+                  let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) else {
+                return nil
+            }
+            return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, finiteBudget: true, onFinished: finish)
+        },
         stop: { try await coordinator.stop(execution: $0, reason: $1) })
     }
 }
@@ -190,6 +203,10 @@ final class PhoneBackgroundTasks {
 
     var hasActiveContinuedGrant: Bool {
         continued.hasActiveGrant
+    }
+
+    var pendingContinuedBatchID: UUID? {
+        continued.pendingBatchID
     }
 
     func cancelPendingContinuedIfFinished(batchID: UUID) {
@@ -479,6 +496,23 @@ final class PhoneBackgroundTasks {
         let origin: TranscriptionBatchOrigin = continued ? .continuedProcessing : .backgroundProcessing
         // Install expiration before archive recovery or any async admission work.
         let holder = BackgroundCoordinatorHolder()
+        let pendingExcludedBatch: @MainActor @Sendable () -> UUID? = { [weak self] in
+            self?.continued.pendingBatchID
+        }
+        let followUpClosure: TranscriptionTaskGrant.FollowUpStart?
+        if continued {
+            followUpClosure = nil
+        } else {
+            followUpClosure = { finish in
+                guard let coordinator = await holder.coordinator else { return nil }
+                let excluded = await pendingExcludedBatch()
+                if let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) {
+                    return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, onFinished: finish)
+                }
+                if await holder.ranAutomaticFirst { return nil }
+                return try await coordinator.startBackgroundAutomatic(onFinished: finish)
+            }
+        }
         let grant = TranscriptionTaskGrant(prepare: { @MainActor [weak self] in
             guard let self else { throw BackgroundTranscriptionError.runtimeUnavailable }
             let coordinator = try await self.prepare()
@@ -488,11 +522,15 @@ final class PhoneBackgroundTasks {
         }, start: { finish in
             guard let coordinator = await holder.coordinator else { throw BackgroundTranscriptionError.runtimeUnavailable }
             if let batchID { return try await coordinator.startBatch(id: batchID, origin: origin, onFinished: finish) }
-            if let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing() {
+            let excluded = await pendingExcludedBatch()
+            let priorityFirst = await coordinator.hasUnreservedPriorityWork()
+            if !priorityFirst,
+               let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) {
                 return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, onFinished: finish)
             }
+            await holder.markRanAutomaticFirst()
             return try await coordinator.startBackgroundAutomatic(onFinished: finish)
-        }, stop: { execution, reason in
+        }, followUp: followUpClosure, stop: { execution, reason in
             guard let coordinator = await holder.coordinator else { throw BackgroundTranscriptionError.runtimeUnavailable }
             try await coordinator.stop(execution: execution, reason: reason)
         }, completion: { [weak self] success, failure in
@@ -597,6 +635,7 @@ final class PhoneTranscriptionContinuation {
     private let begin: Begin
     private let end: @MainActor (UIBackgroundTaskIdentifier) -> Void
     private let stop: @MainActor () async -> Void
+    var onActivityChanged: (@MainActor () -> Void)?
     private var identifier: UIBackgroundTaskIdentifier = .invalid
     private var expiring = false
     private var generation: UInt64 = 0
@@ -623,6 +662,7 @@ final class PhoneTranscriptionContinuation {
             guard let self, self.generation == revision else { return }
             _ = self.beginExpiration()
         }
+        if identifier != .invalid { onActivityChanged?() }
     }
 
     func finish() {
@@ -631,6 +671,7 @@ final class PhoneTranscriptionContinuation {
         identifier = .invalid
         generation &+= 1
         end(completed)
+        onActivityChanged?()
     }
 
     func expire() async {
@@ -646,6 +687,7 @@ final class PhoneTranscriptionContinuation {
         // UIKit must receive this before its expiration handler returns. Durable cancellation
         // may await inference or storage; it still fences a new run, but cannot retain OS time.
         end(completed)
+        onActivityChanged?()
         return Task {
             await stop()
             expiring = false
@@ -655,5 +697,7 @@ final class PhoneTranscriptionContinuation {
 
 private actor BackgroundCoordinatorHolder {
     private(set) var coordinator: TranscriptionCoordinator?
+    private(set) var ranAutomaticFirst = false
     func set(_ coordinator: TranscriptionCoordinator) { self.coordinator = coordinator }
+    func markRanAutomaticFirst() { ranAutomaticFirst = true }
 }

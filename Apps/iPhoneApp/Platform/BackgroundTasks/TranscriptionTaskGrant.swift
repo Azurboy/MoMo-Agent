@@ -5,9 +5,11 @@ import MoMoArchive
 @MainActor
 final class TranscriptionTaskGrant {
     typealias Start = @Sendable (@escaping @Sendable (TranscriptionExecutionCompletion) -> Void) async throws -> TranscriptionExecutionHandle
+    typealias FollowUpStart = @Sendable (@escaping @Sendable (TranscriptionExecutionCompletion) -> Void) async throws -> TranscriptionExecutionHandle?
     typealias Stop = @Sendable (TranscriptionExecutionHandle, TranscriptionBatchEndReason) async throws -> Void
 
     private let start: Start
+    private var followUp: FollowUpStart?
     private let prepare: @Sendable () async throws -> Void
     private let stop: Stop
     private let completion: @MainActor (Bool, String?) -> Void
@@ -19,10 +21,12 @@ final class TranscriptionTaskGrant {
     private var started = false
     private var admissionStarted = false
 
-    init(prepare: @escaping @Sendable () async throws -> Void = {}, start: @escaping Start, stop: @escaping Stop,
+    init(prepare: @escaping @Sendable () async throws -> Void = {}, start: @escaping Start,
+         followUp: FollowUpStart? = nil, stop: @escaping Stop,
          completion: @escaping @MainActor (Bool, String?) -> Void) {
         self.prepare = prepare
         self.start = start
+        self.followUp = followUp
         self.stop = stop
         self.completion = completion
     }
@@ -70,7 +74,40 @@ final class TranscriptionTaskGrant {
     private func completed(_ result: TranscriptionExecutionCompletion) {
         // An expiration or proactive slice completion already owns completion; wait for its durable stop barrier.
         guard expiration == nil else { return }
+        if result.reason == .completed, result.failureCode == nil, let nextStage = followUp {
+            followUp = nil
+            execution = nil
+            Task { @MainActor [weak self] in
+                await self?.runFollowUp(nextStage)
+            }
+            return
+        }
         finish(success: result.reason == .completed && result.failureCode == nil, failure: result.failureCode, reason: result.reason)
+    }
+
+    private func runFollowUp(_ nextStage: FollowUpStart) async {
+        guard !finished else { return }
+        if let expiration {
+            finish(success: completedProactively, failure: nil, reason: expiration)
+            return
+        }
+        do {
+            guard let handle = try await nextStage({ [weak self] nextResult in
+                Task { @MainActor in self?.completed(nextResult) }
+            }) else {
+                finish(success: true, failure: nil, reason: .completed)
+                return
+            }
+            execution = handle
+            if let expiration { await stopAndFinish(handle, reason: expiration) }
+        } catch is TranscriptionExecutionError {
+            finish(success: completedProactively || expiration == nil, failure: nil, reason: expiration ?? .completed)
+        } catch is CancellationError {
+            finish(success: completedProactively || expiration == nil, failure: nil, reason: expiration ?? .completed)
+        } catch {
+            completedProactively = false
+            finish(success: false, failure: "background_start_failed", reason: expiration ?? .interrupted)
+        }
     }
 
     private func stopAndFinish(_ execution: TranscriptionExecutionHandle, reason: TranscriptionBatchEndReason) async {
@@ -98,8 +135,17 @@ final class ReceivedAudioTranscription {
     typealias Begin = @MainActor (@escaping @MainActor @Sendable () -> Void) -> Release?
     private let begin: Begin
     private let start: TranscriptionTaskGrant.Start
+    private let followUp: TranscriptionTaskGrant.FollowUpStart?
     private let stop: TranscriptionTaskGrant.Stop
-    private var grant: TranscriptionTaskGrant?
+    var onActivityChanged: (@MainActor () -> Void)?
+    private var grant: TranscriptionTaskGrant? {
+        didSet {
+            if (oldValue != nil) != (grant != nil) {
+                onActivityChanged?()
+            }
+        }
+    }
+    var isActive: Bool { grant != nil }
     private var release: Release?
     private var generation: UInt64 = 0
     private var receivedWhileRunning = false
@@ -109,8 +155,9 @@ final class ReceivedAudioTranscription {
     private var handoffWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(begin: @escaping Begin, start: @escaping TranscriptionTaskGrant.Start,
+         followUp: TranscriptionTaskGrant.FollowUpStart? = nil,
          stop: @escaping TranscriptionTaskGrant.Stop) {
-        self.begin = begin; self.start = start; self.stop = stop
+        self.begin = begin; self.start = start; self.followUp = followUp; self.stop = stop
     }
 
     deinit {
@@ -146,7 +193,7 @@ final class ReceivedAudioTranscription {
         receivedWhileRunning = false
         receivedAfterExpiration = false
         expirationReason = nil
-        return TranscriptionTaskGrant(start: start, stop: stop) { [weak self] success, failure in
+        return TranscriptionTaskGrant(start: start, followUp: followUp, stop: stop) { [weak self] success, failure in
             guard let self, self.generation == revision else { return }
             self.grant = nil
             // An arrival can race the worker's final empty-queue check. Recheck within the same OS grant.

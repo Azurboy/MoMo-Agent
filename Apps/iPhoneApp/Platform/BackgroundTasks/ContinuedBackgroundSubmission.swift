@@ -81,6 +81,11 @@ final class ContinuedBackgroundSubmission {
         return request.identifier
     }
 
+    var pendingBatchID: UUID? {
+        guard case .pending(let request) = state else { return nil }
+        return request.batchID
+    }
+
     var pendingAge: TimeInterval? {
         guard case .pending(let request) = state else { return nil }
         return max(0, now().timeIntervalSince(request.requestedAt))
