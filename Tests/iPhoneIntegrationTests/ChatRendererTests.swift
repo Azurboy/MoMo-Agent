@@ -912,7 +912,7 @@ final class ChatRendererTests: XCTestCase {
             .init(id:"body",content:.text(markdown))
         ])])
         try await renderer.wait("document.querySelectorAll('table').length === 1 && document.querySelectorAll('.katex').length === 1")
-        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontSize === '16px' && getComputedStyle(document.querySelector('.prose')).lineHeight === '24px'")
+        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontSize === '14px' && getComputedStyle(document.querySelector('.prose')).fontWeight === '430' && getComputedStyle(document.querySelector('.prose')).lineHeight === '18px' && getComputedStyle(document.querySelector('.prose strong')).fontWeight === '600'")
         try await renderer.check("document.querySelectorAll('.process').length === 0 && document.querySelectorAll('.tool-card').length === 2")
         try await renderer.check("document.querySelector('.badge.failed').textContent === '失败'")
         try await renderer.check("document.querySelector('.user-bubble').textContent === '## **原样输入**'")
@@ -951,7 +951,7 @@ final class ChatRendererTests: XCTestCase {
         _ = try await renderer.web.evaluateJavaScript("document.querySelectorAll('details').forEach(node => node.open = false); window.scrollTo(0,0); true")
         await renderer.attach(to:self,name:"claude-aligned-rendering-light")
         renderer.render(previewMessages,dark:true)
-        try await renderer.wait("getComputedStyle(document.documentElement).backgroundColor === 'rgb(22, 22, 22)' && getComputedStyle(document.querySelector('.prose')).fontSize === '16px'")
+        try await renderer.wait("getComputedStyle(document.documentElement).backgroundColor === 'rgb(22, 22, 22)' && getComputedStyle(document.querySelector('.prose')).fontSize === '14px'")
         await renderer.attach(to:self,name:"claude-aligned-rendering-dark")
     }
 
@@ -998,7 +998,7 @@ final class ChatRendererTests: XCTestCase {
         try await renderer.check("document.querySelector('#announcer').textContent === '回复已完成'")
         try await renderer.check("!document.querySelector('[data-action=copy-reply]') && !document.querySelector('[data-action=copy-code]')")
         try await renderer.check("getComputedStyle(document.querySelector('.user-bubble')).backgroundColor !== getComputedStyle(document.querySelector('.assistant .prose')).backgroundColor")
-        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontFamily.includes('system') && getComputedStyle(document.querySelector('.prose')).lineHeight === '24px'")
+        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontFamily.includes('system') && getComputedStyle(document.querySelector('.prose')).fontSize === '14px' && getComputedStyle(document.querySelector('.prose')).lineHeight === '18px'")
         await renderer.attach(to:self,name:"streaming-completed-with-stable-blocks")
     }
 
@@ -1207,6 +1207,52 @@ final class ChatRendererTests: XCTestCase {
         try await renderer.check("document.querySelector('.activity-mark').dataset.motionState === 'paused' && document.documentElement.dataset.activityAnimating === 'false' && getComputedStyle(document.querySelector('.working-label')).animationName === 'none'")
         let stillSuspendedPebbles = try await renderer.pebblePixels()
         XCTAssertEqual(suspendedPebbles,stillSuspendedPebbles)
+    }
+
+    func testDotsDateHeadersAndBubbleTypographyCenterAcrossTranscript() async throws {
+        let renderer = try RendererHarness()
+        defer { renderer.close() }
+        try await renderer.ready()
+        let calendar = Calendar.current
+        let now = Date()
+        let todayStart = calendar.startOfDay(for: now)
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .hour, value: -10, to: todayStart))
+        let todayFirst = try XCTUnwrap(calendar.date(byAdding: .minute, value: -45, to: now))
+        let todayGrouped = try XCTUnwrap(calendar.date(byAdding: .minute, value: -35, to: now))
+        let todaySecondMarker = try XCTUnwrap(calendar.date(byAdding: .minute, value: -5, to: now))
+        let messages: [AgentChatMessage] = [
+            .init(id: "u-yesterday", turnID: "t1", role: "user", blocks: [.init(id: "b1", content: .text("昨天的记录"))], state: .complete, sentAt: yesterday),
+            .init(id: "a-today-1", turnID: "t2", role: "assistant", blocks: [.init(id: "b2", content: .text("今天的第一条 **重点** 与 `代码`"))], state: .complete, sentAt: todayFirst),
+            .init(id: "u-today-grouped", turnID: "t3", role: "user", blocks: [.init(id: "b3", content: .text("十分钟内的追问"))], state: .complete, sentAt: todayGrouped),
+            .init(id: "a-today-2", turnID: "t4", role: "assistant", blocks: [.init(id: "b4", content: .text("超过半小时后的新分组"))], state: .complete, sentAt: todaySecondMarker)
+        ]
+        renderer.render(messages)
+        try await renderer.wait("document.querySelectorAll('.turn-timestamp > time').length === 3")
+        try await renderer.check("document.querySelectorAll('.turn[data-has-timestamp=true]').length === 3 && document.querySelectorAll('.turn[data-has-timestamp=false]').length === 1")
+        try await renderer.check("""
+        (() => {
+          const transcriptRect = document.querySelector('#transcript').getBoundingClientRect();
+          const transcriptCenter = transcriptRect.left + transcriptRect.width / 2;
+          const headers = [...document.querySelectorAll('.turn-timestamp')];
+          const centered = headers.every(node => {
+            const rect = node.getBoundingClientRect();
+            return Math.abs((rect.left + rect.width / 2) - transcriptCenter) < 1.5;
+          });
+          const userBubble = getComputedStyle(document.querySelector('.user-bubble'));
+          const prose = getComputedStyle(document.querySelector('.prose'));
+          const strong = getComputedStyle(document.querySelector('.prose strong'));
+          const code = getComputedStyle(document.querySelector('.prose code'));
+          const time = getComputedStyle(document.querySelector('.turn-timestamp > time'));
+          return centered &&
+            userBubble.fontSize === '14px' && userBubble.fontWeight === '430' && userBubble.lineHeight === '18px' &&
+            prose.fontSize === '14px' && prose.fontWeight === '430' && prose.lineHeight === '18px' &&
+            strong.fontWeight === '600' && code.fontSize === '13px' &&
+            time.fontSize === '12px' && time.fontWeight === '430' && time.lineHeight === '16px';
+        })()
+        """)
+        let snapshot = ChatRenderSnapshot(sessionID: UUID(), messages: messages, busy: false)
+        let nativeMarkers = snapshot.nativeTimestampMarkers(now: now)
+        XCTAssertEqual(Set(nativeMarkers.keys), ["u-yesterday", "a-today-1", "a-today-2"])
     }
 
     private func user(_ text: String) -> AgentChatMessage {

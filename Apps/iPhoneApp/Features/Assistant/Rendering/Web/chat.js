@@ -14,6 +14,7 @@
   let reduced = false, pageSuspended = false, userScrolling = false, wheelScrolling = false, wheelTimer;
   let restoring = null, restoreEpoch = 0, readingTimer = null, lastReading = null;
   let focusedRequest = null;
+  let referenceNowMs = Date.now(), previousTurnCount = -1;
   const post = (type, value) => window.webkit?.messageHandlers?.chat?.postMessage({ type, value });
   const escape = text => text.replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
   core.installRecordingSourceLinks(marked);
@@ -293,6 +294,11 @@
   }
   function renderTurns(hydrated) {
     const items = core.turns(latest.messages), kept = new Set();
+    if (hydrated || items.length !== previousTurnCount || Number.isFinite(latest.nowMs)) {
+      referenceNowMs = Number.isFinite(latest.nowMs) ? latest.nowMs : Date.now();
+      previousTurnCount = items.length;
+    }
+    let previousMarkerSentAtMs = null;
     const receiptIndex = items.findLastIndex(turn => turn.role === 'user');
     const finishing = items.some((turn,index) => core.replyFinished(turn,latest.busy && index === items.length - 1) &&
       [...(views.get(turn.id)?.pieces.values() || [])].some(piece => piece.type === 'process' && !piece.completed));
@@ -310,7 +316,39 @@
         if (!hydrated && turn.role === 'assistant') node.classList.add('assistant-enter');
         node.dataset.message = turn.id;
         if (turn.role !== 'system') node.setAttribute('aria-label',turn.role === 'user' ? t("你") : t("助理"));
-        node.append(parts); view = { node, parts, pieces:new Map(), actions:null }; views.set(turn.id,view);
+        node.append(parts); view = { node, parts, pieces:new Map(), actions:null, timestamp:null, sentAtMs:null }; views.set(turn.id,view);
+      }
+      if (view.sentAtMs == null && Number.isFinite(turn.sentAtMs)) view.sentAtMs = turn.sentAtMs;
+      let marker = null;
+      if (turn.role !== 'system' && Number.isFinite(view.sentAtMs)) {
+        if (core.shouldShowTimestampMarker(previousMarkerSentAtMs, view.sentAtMs)) {
+          marker = {
+            iso: new Date(view.sentAtMs).toISOString(),
+            label: core.formatTimestampMarker(view.sentAtMs, referenceNowMs)
+          };
+          previousMarkerSentAtMs = view.sentAtMs;
+        }
+      }
+      view.node.dataset.hasTimestamp = String(Boolean(marker));
+      if (marker) {
+        if (!view.timestamp) {
+          const wrap = element('div','turn-timestamp'), time = element('time');
+          wrap.setAttribute('data-markdown-copy','exclude');
+          wrap.append(time);
+          view.node.insertBefore(wrap,view.parts);
+          view.timestamp = { wrap, time, iso:null, label:null };
+        }
+        if (view.timestamp.iso !== marker.iso) {
+          view.timestamp.time.setAttribute('datetime',marker.iso);
+          view.timestamp.iso = marker.iso;
+        }
+        if (view.timestamp.label !== marker.label) {
+          view.timestamp.time.textContent = marker.label;
+          view.timestamp.label = marker.label;
+        }
+      } else if (view.timestamp) {
+        view.timestamp.wrap.remove();
+        view.timestamp = null;
       }
       // Capture IDs from the snapshot actually rendered into this DOM node.
       view.node.dataset.sourceIds = JSON.stringify(turn.messageIDs);
@@ -520,10 +558,12 @@
       root.setAttribute('aria-label', t('聊天记录'));
       document.querySelector('#jump').setAttribute('aria-label', t('回到最新消息'));
       views.clear(); root.replaceChildren();
+      previousTurnCount = -1; referenceNowMs = Date.now();
     }
     if (snapshot.sessionID !== session) {
       saveReadingPosition();
       session = snapshot.sessionID; views.clear(); root.replaceChildren(); pin.reset(); first = true; focusedRequest = null;
+      previousTurnCount = -1; referenceNowMs = Date.now();
       previousBusy = false; previousStopped = false; previousActivity = 'idle';
       lastReading = null; userScrolling = false; wheelScrolling = false;
       restoring = snapshot.readingPosition?.sessionID === session ? snapshot.readingPosition : null;

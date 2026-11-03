@@ -2,8 +2,47 @@
 (() => {
   'use strict';
   const t = (key, ...args) => globalThis.MoMoChatLocalization ? MoMoChatLocalization.text(key, ...args) : key.replace(/\{(\d+)\}/g, (_, i) => String(args[Number(i)] ?? ''));
+  let currentLocale = 'zh-Hans';
   let segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
   const graphemes = text => [...segmenter.segment(text)].map(item => item.segment);
+  const TIMESTAMP_GROUP_WINDOW_MS = 30 * 60 * 1000;
+
+  function sameCalendarDay(first, second) {
+    return first.getFullYear() === second.getFullYear() &&
+      first.getMonth() === second.getMonth() &&
+      first.getDate() === second.getDate();
+  }
+  function shouldShowTimestampMarker(previousMarkerSentAtMs, sentAtMs) {
+    if (!Number.isFinite(sentAtMs)) return false;
+    if (!Number.isFinite(previousMarkerSentAtMs)) return true;
+    const previous = new Date(previousMarkerSentAtMs), current = new Date(sentAtMs);
+    if (!Number.isFinite(previous.getTime()) || !Number.isFinite(current.getTime())) return false;
+    if (!sameCalendarDay(previous, current)) return true;
+    return sentAtMs - previousMarkerSentAtMs >= TIMESTAMP_GROUP_WINDOW_MS;
+  }
+  function formatTimestampMarker(sentAtMs, nowMs = Date.now()) {
+    if (!Number.isFinite(sentAtMs)) return null;
+    const date = new Date(sentAtMs);
+    if (!Number.isFinite(date.getTime())) return null;
+    const now = Number.isFinite(nowMs) ? new Date(nowMs) : new Date();
+    const activeLocale = globalThis.MoMoChatLocalization?.locale || currentLocale;
+    const intlLocale = ({ 'zh-Hans': 'zh-CN', en: 'en-US', ja: 'ja-JP', ko: 'ko-KR' })[activeLocale] || 'en-US';
+    const targetDay = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+    const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    const dayOffset = Math.round((targetDay - today) / 86_400_000);
+    if (dayOffset === 0 || dayOffset === -1) {
+      const time = new Intl.DateTimeFormat(intlLocale, { hour: 'numeric', minute: '2-digit' }).format(date);
+      return dayOffset === 0 ? t("今天 {0}", time) : t("昨天 {0}", time);
+    }
+    const sameYear = date.getFullYear() === now.getFullYear();
+    return new Intl.DateTimeFormat(intlLocale, {
+      year: sameYear ? undefined : 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    }).format(date);
+  }
 
   // Recognize only complete recording references. Native archive validation still decides
   // whether the cited version/span exists; presentation must never retarget a citation.
@@ -217,8 +256,12 @@
       if (message.role !== 'assistant' || !turn || turn.role !== 'assistant' || turn.turnID !== message.turnID) {
         // A task may speak again after other tasks. Its run ID is not a unique UI row.
         turn = { id: message.role !== 'assistant' ? message.id : `${message.id}:reply`,
-          turnID: message.turnID, role: message.role, state: message.state, parts: [], text: '', attachments: [], messageIDs: [] };
+          turnID: message.turnID, role: message.role, state: message.state, sentAtMs: null,
+          parts: [], text: '', attachments: [], messageIDs: [] };
         result.push(turn);
+      }
+      if (message.role !== 'system' && turn.sentAtMs == null && Number.isFinite(message.sentAtMs)) {
+        turn.sentAtMs = message.sentAtMs;
       }
       turn.messageIDs.push(message.id);
       turn.state = message.state; turn.messageID = message.id;
@@ -292,7 +335,10 @@
 
   function setLocale(locale) {
     globalThis.MoMoChatLocalization?.setLocale(locale);
+    const language = String(locale || 'en').toLowerCase().split(/[-_]/)[0];
+    currentLocale = globalThis.MoMoChatLocalization?.locale ||
+      (language === 'zh' ? 'zh-Hans' : ['en', 'ja', 'ko'].includes(language) ? language : 'en');
     segmenter = new Intl.Segmenter(locale || 'en', {granularity:'grapheme'});
   }
-  globalThis.MoMoChatCore = { setLocale, advance, stablePrefix, graphemes, PinState, turns, toolLabel, toolPreview, toolOutcome, responseActivity, contextActivityLabel, actionReceipt, actionCard, toolDisplayState, processSummary, replyFinished, MarkdownStream, isRecordingSourceURL, installRecordingSourceLinks };
+  globalThis.MoMoChatCore = { setLocale, advance, stablePrefix, graphemes, PinState, turns, shouldShowTimestampMarker, formatTimestampMarker, toolLabel, toolPreview, toolOutcome, responseActivity, contextActivityLabel, actionReceipt, actionCard, toolDisplayState, processSummary, replyFinished, MarkdownStream, isRecordingSourceURL, installRecordingSourceLinks };
 })();

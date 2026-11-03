@@ -32,12 +32,18 @@ Task { @MainActor in
         for mode in ["light", "dark", "reduced-motion", "reading-history", "english"] {
             let modeJSON = String(data: try JSONEncoder().encode(mode), encoding: .utf8)!
             _ = try await web.evaluateJavaScript("window.mode = \(modeJSON);" + #"""
-            window.message = (id,role,text) => ({id,turnID:id,role,state:'complete',blocks:[{id:id+':input',type:'text',text}]});
-            window.fixture = {sessionID:mode,locale:mode==='english'?'en':'zh-Hans',messages:[],busy:true,stopped:false,
+            window.nowMs = new Date(2026, 10, 3, 15, 30, 0).getTime();
+            window.yesterdayBaseMs = new Date(2026, 10, 2, 20, 10, 0).getTime();
+            window.todayBaseMs = new Date(2026, 10, 3, 14, 45, 0).getTime();
+            window.message = (id,role,text,sentAtMs) => ({id,turnID:id,role,state:'complete',sentAtMs,blocks:[{id:id+':input',type:'text',text}]});
+            window.fixture = {sessionID:mode,locale:mode==='english'?'en':'zh-Hans',nowMs,messages:[],busy:true,stopped:false,
               canRegenerate:false,contextState:'idle',waitingForReply:false,
               appearance:{dark:mode==='dark',reduceMotion:mode==='reduced-motion',scale:1}};
-            for(let i=0;i<16;i++) fixture.messages.push(message('history-'+i,i%2?'assistant':'user','保留历史消息 '+i));
-            fixture.messages.push(message('operation:user','user','你会干嘛'));
+            for(let i=0;i<16;i++) {
+              const sentAtMs = (i < 8 ? yesterdayBaseMs : todayBaseMs) + (i % 8) * 60_000;
+              fixture.messages.push(message('history-'+i,i%2?'assistant':'user','保留历史消息 '+i,sentAtMs));
+            }
+            fixture.messages.push(message('operation:user','user','你会干嘛',nowMs - 60_000));
             MoMoChat.render(fixture);
             """#)
             try await settle()
@@ -48,6 +54,8 @@ Task { @MainActor in
             _ = try await web.evaluateJavaScript(#"""
             window.rows = [...document.querySelectorAll('.turn')];
             window.bubbles = [...document.querySelectorAll('.user-bubble,.prose')];
+            window.timestamps = [...document.querySelectorAll('.turn-timestamp > time')];
+            window.timestampISOs = timestamps.map(t=>t.getAttribute('datetime'));
             window.textNodes = bubbles.map(b=>b.firstChild);
             window.receipt = rows.at(-1).querySelector('.read-receipt');
             window.baseline = bubbles.map(b=>b.getBoundingClientRect().top);
@@ -76,11 +84,14 @@ Task { @MainActor in
             try await capture(mode + "-delivered")
             _ = try await web.evaluateJavaScript("fixture.messages.at(-1).delivery='read'; fixture.waitingForReply=true; MoMoChat.render(fixture); true")
             try await settle()
-            _ = try await web.evaluateJavaScript("fixture.messages.at(-1).blocks[0].id='server-echo:text'; MoMoChat.render(fixture); true")
+            _ = try await web.evaluateJavaScript("fixture.messages.at(-1).blocks[0].id='server-echo:text'; fixture.messages.at(-1).sentAtMs += 650; MoMoChat.render(fixture); true")
             try await settle()
             try await capture(mode + "-read")
             let report = try await web.evaluateJavaScript(#"""
             window.result = {mode:fixture.sessionID,maxShift,minOpacity,replays,removals,
+              timestampCount:timestamps.length,
+              sameTimestamps:timestamps.length===3 && timestamps.every((t,i)=>t===document.querySelectorAll('.turn-timestamp > time')[i] && t.getAttribute('datetime')===timestampISOs[i]),
+              typographyOK:getComputedStyle(bubbles[0]).fontSize==='14px' && getComputedStyle(bubbles[0]).fontWeight==='430' && getComputedStyle(bubbles[0]).lineHeight==='18px' && getComputedStyle(timestamps[0]).fontSize==='12px',
               sameRows:rows.every((n,i)=>n===document.querySelectorAll('.turn')[i]),
               sameBubbles:bubbles.every((n,i)=>n===document.querySelectorAll('.user-bubble,.prose')[i] && n.firstChild===textNodes[i]),
               sameReceipt:receipt!=null && receipt===rows.at(-1).querySelector('.read-receipt'),
@@ -91,7 +102,7 @@ Task { @MainActor in
             JSON.stringify(result);
             """#)
             print(report ?? "No result")
-            let stable = try await web.evaluateJavaScript("result.maxShift < 0.5 && result.minOpacity===1 && result.replays===0 && result.removals===0 && result.sameRows && result.sameBubbles && result.sameReceipt && result.readVisible && result.dotsVisible && receipt.textContent===(mode==='english'?'Read':'已读')") as? Bool == true
+            let stable = try await web.evaluateJavaScript("result.maxShift < 0.5 && result.minOpacity===1 && result.replays===0 && result.removals===0 && result.sameTimestamps && result.typographyOK && result.sameRows && result.sameBubbles && result.sameReceipt && result.readVisible && result.dotsVisible && receipt.textContent===(mode==='english'?'Read':'已读')") as? Bool == true
             passed = passed && stable
             _ = try await web.evaluateJavaScript("fixture.messages.push(message('reply','assistant','我可以帮你查资料、整理录音和完成任务。')); fixture.waitingForReply=false; fixture.busy=false; MoMoChat.render(fixture); true")
             try await settle()

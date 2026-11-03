@@ -35,7 +35,7 @@ struct ChatRendererView: View {
             } else {
                 ZStack(alignment: .top) {
                     ChatWebSurface(snapshot: snapshot, scrollToBottomRequest: scrollToBottomRequest, dark: colorScheme == .dark,
-                        reduceMotion: reduceMotion, scale: fontSize / 16, headerInset: headerInset, active: scenePhase == .active,
+                        reduceMotion: reduceMotion, scale: fontSize / Double(PhoneTextStyle.body.size), headerInset: headerInset, active: scenePhase == .active,
                         failed: { renderingFailed = true }, rendered: { rendererReady = true },
                         recovering: { rendererReady = false },
                         open: { openURL($0) }, regenerate: onRegenerate,
@@ -63,50 +63,70 @@ struct ChatRendererView: View {
 
     // First send paints natively while WebKit starts; no network or rich renderer admission is required.
     private var plainTranscript: some View {
-        GeometryReader { geometry in
+        let typeScale = fontSize / Double(PhoneTextStyle.body.size)
+        let markers = snapshot.nativeTimestampMarkers()
+        return GeometryReader { geometry in
             ScrollViewReader { reader in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(snapshot.messages, id: \.id) { message in
+                    ForEach(Array(snapshot.messages.enumerated()), id: \.element.id) { index, message in
                         let body = message.blocks.filter { $0.type == "text" }.compactMap(\.text).joined()
                         let text = body.isEmpty ? message.blocks.filter { $0.type == "attachment" }.compactMap(\.name).joined(separator: "\n") : body
                         if !text.isEmpty {
-                            if message.role == "user" {
-                                HStack(alignment: .center, spacing: 8) {
-                                    Spacer(minLength: 0)
-                                    Text(text).phoneText(.body).textSelection(.enabled)
-                                        .foregroundStyle(MoMoPalette.canvas)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .padding(.horizontal, 16).padding(.vertical, 10)
-                                        .background(MoMoPalette.ink, in: .rect(cornerRadius: 22))
-                                        .frame(maxWidth: max(0, geometry.size.width - 40) * 0.85, alignment: .trailing)
-                                    if message.delivery == "failed", let id = UUID(uuidString: message.turnID) {
-                                        Button { onRetryMessage(id) } label: {
-                                            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(MoMoPalette.failure)
-                                                .frame(width: 28, height: 44)
-                                        }.buttonStyle(.plain).accessibilityLabel("发送失败，点击重试")
+                            VStack(alignment: .leading, spacing: 0) {
+                                if let marker = markers[message.id] {
+                                    Text(marker)
+                                        .font(.system(size: 12 * typeScale, weight: .regular))
+                                        .foregroundStyle(MoMoPalette.muted)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.top, index == 0 ? 0 : 4)
+                                        .padding(.bottom, 12)
+                                }
+                                if message.role == "user" {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        Spacer(minLength: 0)
+                                        Text(text)
+                                            .font(.system(size: 14 * typeScale, weight: .regular))
+                                            .tracking(-0.14 * typeScale)
+                                            .lineSpacing(2 * typeScale)
+                                            .textSelection(.enabled)
+                                            .foregroundStyle(MoMoPalette.canvas)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .padding(.horizontal, 16).padding(.vertical, 10)
+                                            .background(MoMoPalette.ink, in: .rect(cornerRadius: 22))
+                                            .frame(maxWidth: max(0, geometry.size.width - 40) * 0.85, alignment: .trailing)
+                                        if message.delivery == "failed", let id = UUID(uuidString: message.turnID) {
+                                            Button { onRetryMessage(id) } label: {
+                                                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(MoMoPalette.failure)
+                                                    .frame(width: 28, height: 44)
+                                            }.buttonStyle(.plain).accessibilityLabel("发送失败，点击重试")
+                                        }
                                     }
+                                    .overlay(alignment: .bottomTrailing) {
+                                        let delivered = snapshot.deliveryReceiptMessageID == message.id
+                                        Text(message.delivery == "read" ? "已读" : "已送达", bundle: AppLanguage.resourceBundle)
+                                            .font(.system(size: 12 * typeScale)).foregroundStyle(.secondary)
+                                            .frame(height: 16).offset(y: 18)
+                                            .opacity(delivered ? 1 : 0).accessibilityHidden(!delivered)
+                                            .allowsHitTesting(false)
+                                            .contentTransition(.identity)
+                                            .animation(reduceMotion ? nil : .timingCurve(0.19, 1, 0.22, 1, duration: 0.3), value: delivered)
+                                    }
+                                    .padding(.trailing, -8).padding(.bottom, 2)
+                                } else if message.role == "system" {
+                                    Text(text).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                                        .padding(.leading, 10).padding(.vertical, 4)
+                                } else {
+                                    Text(text)
+                                        .font(.system(size: 14 * typeScale, weight: .regular))
+                                        .tracking(-0.14 * typeScale)
+                                        .lineSpacing(2 * typeScale)
+                                        .textSelection(.enabled)
+                                        .padding(.horizontal, 16).padding(.vertical, 10)
+                                        .background(MoMoPalette.surface, in: .rect(cornerRadius: 22))
+                                        .frame(maxWidth: max(0, geometry.size.width - 40) * 0.85, alignment: .leading)
                                 }
-                                .overlay(alignment: .bottomTrailing) {
-                                    let delivered = snapshot.deliveryReceiptMessageID == message.id
-                                    Text(message.delivery == "read" ? "已读" : "已送达", bundle: AppLanguage.resourceBundle)
-                                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                                        .frame(height: 16).offset(y: 18)
-                                        .opacity(delivered ? 1 : 0).accessibilityHidden(!delivered)
-                                        .allowsHitTesting(false)
-                                        .contentTransition(.identity)
-                                        .animation(reduceMotion ? nil : .timingCurve(0.19, 1, 0.22, 1, duration: 0.3), value: delivered)
-                                }
-                                .padding(.trailing, -8).padding(.bottom, 2)
-                            } else if message.role == "system" {
-                                Text(text).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
-                                    .padding(.leading, 10).padding(.vertical, 4)
-                            } else {
-                                Text(text).phoneText(.body).textSelection(.enabled)
-                                    .padding(.horizontal, 16).padding(.vertical, 10)
-                                    .background(MoMoPalette.surface, in: .rect(cornerRadius: 22))
-                                    .frame(maxWidth: max(0, geometry.size.width - 40) * 0.85, alignment: .leading)
-                            }
+                            }.id(message.id)
                         }
                     }
                     let waiting = snapshot.waitingForReply ?? (snapshot.busy && snapshot.messages.last?.role == "user")

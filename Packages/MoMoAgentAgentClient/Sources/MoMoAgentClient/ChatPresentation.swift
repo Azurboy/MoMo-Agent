@@ -7,13 +7,14 @@ public struct AgentChatMessage: Identifiable, Equatable, Sendable {
     public let role: String
     public let blocks: [AgentMessageBlock]
     public let state: AgentMessageState
+    public var sentAt: Date?
 
     public var text: String {
         blocks.compactMap { if case .text(let text) = $0.content { text } else { nil } }.joined()
     }
 
-    public init(id: String, turnID: String, role: String, blocks: [AgentMessageBlock], state: AgentMessageState) {
-        self.id = id; self.turnID = turnID; self.role = role; self.blocks = blocks; self.state = state
+    public init(id: String, turnID: String, role: String, blocks: [AgentMessageBlock], state: AgentMessageState, sentAt: Date? = nil) {
+        self.id = id; self.turnID = turnID; self.role = role; self.blocks = blocks; self.state = state; self.sentAt = sentAt
     }
 }
 

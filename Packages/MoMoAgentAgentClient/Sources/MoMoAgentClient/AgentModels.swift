@@ -51,6 +51,7 @@ public struct AgentRun: Codable, Sendable, Equatable {
     public var cancellable: Bool? = nil
     public var cancelRequested: Bool? = nil
     public var deliveryState: String? = nil
+    public var createdAt: Double? = nil
 
     // Unknown outcomes need reconciliation; they are never successful completion.
     public var isTerminal: Bool {
@@ -63,6 +64,7 @@ public struct AgentRun: Codable, Sendable, Equatable {
         case status, output, error
         case workID = "work_id", title, originRunID = "origin_run_id", executionSessionID = "execution_session_id"
         case waitReason = "wait_reason", cancellable, cancelRequested = "cancel_requested", deliveryState = "delivery_state"
+        case createdAt = "created_at"
         case blockingWorkID = "blocking_work_id"
         case admissionID = "admission_id", executionGeneration = "execution_generation", pendingControls = "pending_controls"
     }

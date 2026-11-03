@@ -242,4 +242,37 @@ test('interleaved replies from one task keep separate stable rows and exact read
   assert.notEqual(rows[1].id,rows[4].id);
   assert.deepEqual(core.turns(history.concat(message('u3','run3','user'))).slice(0,6).map(row=>row.id),rows.map(row=>row.id));
 });
+test('Dots timestamp markers group within 30 minutes, split across calendar days, and ignore system rows', () => {
+  const day1Late = new Date(2026, 10, 2, 23, 50, 0).getTime();
+  const day1Soon = new Date(2026, 10, 2, 23, 58, 0).getTime();
+  const day2Early = new Date(2026, 10, 3, 0, 5, 0).getTime();
+  const day2Under30 = new Date(2026, 10, 3, 0, 34, 59).getTime();
+  const day2At30 = new Date(2026, 10, 3, 0, 35, 0).getTime();
+  assert.equal(core.shouldShowTimestampMarker(null, day1Late), true);
+  assert.equal(core.shouldShowTimestampMarker(day1Late, day1Soon), false);
+  assert.equal(core.shouldShowTimestampMarker(day1Late, day2Early), true, 'Cross-midnight within 30m still emits a date divider');
+  assert.equal(core.shouldShowTimestampMarker(day2Early, day2Under30), false);
+  assert.equal(core.shouldShowTimestampMarker(day2Early, day2At30), true);
+  assert.equal(core.shouldShowTimestampMarker(day2Early, null), false);
+
+  const now = new Date(2026, 10, 3, 15, 30, 0).getTime();
+  const todayLabel = core.formatTimestampMarker(new Date(2026, 10, 3, 14, 5, 0).getTime(), now);
+  const yesterdayLabel = core.formatTimestampMarker(new Date(2026, 10, 2, 9, 20, 0).getTime(), now);
+  const sameYearLabel = core.formatTimestampMarker(new Date(2026, 9, 15, 11, 45, 0).getTime(), now);
+  const priorYearLabel = core.formatTimestampMarker(new Date(2025, 4, 8, 16, 10, 0).getTime(), now);
+  assert.ok(todayLabel.startsWith('今天 ') && todayLabel.includes('05'), todayLabel);
+  assert.ok(yesterdayLabel.startsWith('昨天 ') && yesterdayLabel.includes('20'), yesterdayLabel);
+  assert.ok(!sameYearLabel.includes('2026') && sameYearLabel.includes('15'), sameYearLabel);
+  assert.ok(priorYearLabel.includes('2025'), priorYearLabel);
+
+  const grouped = core.turns([
+    { id: 'u1', turnID: 'r1', role: 'user', state: 'complete', sentAtMs: day1Late, blocks: [{ id: 'b1', type: 'text', text: 'Q' }] },
+    { id: 'a1', turnID: 'r1', role: 'assistant', state: 'complete', sentAtMs: day2Early, blocks: [{ id: 'b2', type: 'tool', tool: { id: 't1', name: 'read_transcript', state: 'succeeded' } }] },
+    { id: 'a2', turnID: 'r1', role: 'assistant', state: 'complete', sentAtMs: day2At30, blocks: [{ id: 'b3', type: 'text', text: 'A' }] },
+    { id: 'sys', turnID: 'sys', role: 'system', state: 'complete', sentAtMs: day2At30, blocks: [{ id: 'b4', type: 'text', text: 'status' }] }
+  ]);
+  assert.equal(grouped[0].sentAtMs, day1Late);
+  assert.equal(grouped[1].sentAtMs, day2Early, 'Multi-round assistant turn preserves its initial timestamp');
+  assert.equal(grouped[2].sentAtMs, null, 'System rows never carry turn timestamps');
+});
 console.log(`${passed} renderer core tests passed`);

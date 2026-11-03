@@ -35,6 +35,7 @@ struct ChatRenderSnapshot: Encodable, Equatable {
         let role: String
         let state: String
         let blocks: [Block]
+        var sentAtMs: Double? = nil
         var delivery: String? = nil
         var deliveryError: String? = nil
     }
@@ -54,6 +55,76 @@ struct ChatRenderSnapshot: Encodable, Equatable {
               let delivery = messages[index].delivery, ["delivered", "read"].contains(delivery),
               !messages.suffix(from: index + 1).contains(where: { $0.role == "assistant" }) else { return nil }
         return messages[index].id
+    }
+
+    private static let minimumPlausibleEpochSeconds = 946_684_800.0 // 2000-01-01T00:00:00Z
+    private static let timestampMarkerIntervalMs = 1_800_000.0 // 30 minutes (Dots thread marker threshold)
+
+    private static func epochMilliseconds(_ date: Date?) -> Double? {
+        guard let seconds = date?.timeIntervalSince1970 else { return nil }
+        return epochMilliseconds(seconds: seconds)
+    }
+
+    private static func epochMilliseconds(seconds: Double?) -> Double? {
+        guard let seconds, seconds.isFinite, seconds >= minimumPlausibleEpochSeconds else { return nil }
+        return (seconds * 1000).rounded()
+    }
+
+    func nativeTimestampMarkers(now: Date = Date()) -> [String: String] {
+        let calendar = Calendar.current
+        let localeIdentifier = locale == "zh-Hans" ? "zh-CN" : locale
+        let formatterLocale = Locale(identifier: localeIdentifier)
+        var result: [String: String] = [:]
+        var previousMarkerMs: Double?
+        var previousTurnKey: String?
+        for message in messages {
+            if message.role == "system" {
+                previousTurnKey = "system:\(message.id)"
+                continue
+            }
+            let turnKey = message.role == "assistant" ? "assistant:\(message.turnID)" : "user:\(message.id)"
+            if message.role == "assistant", previousTurnKey == turnKey { continue }
+            previousTurnKey = turnKey
+            guard let sentAtMs = message.sentAtMs, sentAtMs.isFinite else { continue }
+            let date = Date(timeIntervalSince1970: sentAtMs / 1000)
+            let isFirst = previousMarkerMs == nil
+            let shouldShow: Bool
+            if let prevMs = previousMarkerMs {
+                let prevDate = Date(timeIntervalSince1970: prevMs / 1000)
+                shouldShow = !calendar.isDate(prevDate, inSameDayAs: date) || sentAtMs - prevMs >= Self.timestampMarkerIntervalMs
+            } else {
+                shouldShow = true
+            }
+            if shouldShow {
+                let timeText = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(formatterLocale))
+                let dayStart = calendar.startOfDay(for: date)
+                let nowStart = calendar.startOfDay(for: now)
+                let dayOffset = calendar.dateComponents([.day], from: nowStart, to: dayStart).day
+                if dayOffset == 0 {
+                    result[message.id] = switch locale {
+                    case "en": "Today, \(timeText)"
+                    case "ja": "今日 \(timeText)"
+                    case "ko": "오늘 \(timeText)"
+                    default: "今天 \(timeText)"
+                    }
+                } else if dayOffset == -1 {
+                    result[message.id] = switch locale {
+                    case "en": "Yesterday, \(timeText)"
+                    case "ja": "昨日 \(timeText)"
+                    case "ko": "어제 \(timeText)"
+                    default: "昨天 \(timeText)"
+                    }
+                } else {
+                    var style = Date.FormatStyle().locale(formatterLocale).month(.abbreviated).day().hour().minute()
+                    if calendar.component(.year, from: date) != calendar.component(.year, from: now) {
+                        style = style.year()
+                    }
+                    result[message.id] = date.formatted(style)
+                }
+            }
+            if isFirst || shouldShow { previousMarkerMs = sentAtMs }
+        }
+        return result
     }
 
     @MainActor init(store: RemoteTaskStore, readingPosition: ChatReadingPosition? = nil, notificationTarget: AgentNotificationTarget? = nil) {
@@ -80,7 +151,7 @@ struct ChatRenderSnapshot: Encodable, Equatable {
             return AgentMessageReceipt.resolve(runs: [local, remote].compactMap { $0 },
                 messageState: messageState, serverConfirmed: serverConfirmed)?.rawValue
         }
-        func liveStreamingMessage(turnID: String, reply: RemoteReply, committedAssistantCount: Int = 0) -> Message? {
+        func liveStreamingMessage(turnID: String, reply: RemoteReply, committedAssistantCount: Int = 0, sentAtMs: Double? = nil) -> Message? {
             var blocks: [Message.Block] = (reply.tools ?? []).map { tool in
                 let identifier = tool.callID ?? String(tool.id)
                 return .init(id: "\(turnID):tool:\(identifier)", type: "tool",
@@ -95,7 +166,7 @@ struct ChatRenderSnapshot: Encodable, Equatable {
                 blocks.append(.init(id: "\(turnID):partial", type: "text", text: reply.partial))
             }
             guard !blocks.isEmpty else { return nil }
-            return Message(id: "\(turnID):streaming", turnID: turnID, role: "assistant", state: "streaming", blocks: blocks)
+            return Message(id: "\(turnID):streaming", turnID: turnID, role: "assistant", state: "streaming", blocks: blocks, sentAtMs: sentAtMs)
         }
         let timeline: [(Date, Message)] = store.tasks.filter { task in
             !confirmedOperations.contains(task.id) && !(task.run.map { confirmedRuns.contains($0.runID) } ?? false)
@@ -112,21 +183,25 @@ struct ChatRenderSnapshot: Encodable, Equatable {
                     blocks.append(.init(id: turn + ":input", type: "text", text: task.input))
                 }
                 rows.append((task.createdAt, Message(id: turn + ":user", turnID: turn, role: "user", state: "complete",
-                blocks: blocks,
+                blocks: blocks, sentAtMs: Self.epochMilliseconds(task.createdAt),
                 delivery: task.deliveryFailed ? "failed" : receipt(runID: task.run?.runID, operationID: task.id), deliveryError: task.lastError)))
             }
             for (index, text) in (task.reply?.messages ?? []).enumerated() {
                 let date = task.replyReceivedAt.flatMap { index < $0.count ? $0[index] : nil } ?? task.createdAt
                 rows.append((date, Message(id: turn + ":reply-\(index)", turnID: turn, role: "assistant", state: "complete",
-                    blocks: [.init(id: turn + ":reply-\(index)", type: "text", text: text)])))
+                    blocks: [.init(id: turn + ":reply-\(index)", type: "text", text: text)],
+                    sentAtMs: Self.epochMilliseconds(date))))
             }
             if !task.isFinished, let reply = task.reply,
-               let live = liveStreamingMessage(turnID: turn, reply: reply, committedAssistantCount: reply.messages.count) {
+               let live = liveStreamingMessage(turnID: turn, reply: reply, committedAssistantCount: reply.messages.count,
+                                               sentAtMs: Self.epochMilliseconds(task.firstTextReceivedAt ?? task.createdAt)) {
                 rows.append((task.firstTextReceivedAt ?? task.createdAt, live))
             }
             if let text = task.run?.output, !text.isEmpty {
-                rows.append((task.finishedAt ?? task.createdAt, Message(id: turn + ":assistant", turnID: turn, role: "assistant", state: "complete",
-                    blocks: [.init(id: turn + ":output", type: "text", text: text)])))
+                let outputDate = task.finishedAt ?? task.createdAt
+                rows.append((outputDate, Message(id: turn + ":assistant", turnID: turn, role: "assistant", state: "complete",
+                    blocks: [.init(id: turn + ":output", type: "text", text: text)],
+                    sentAtMs: Self.epochMilliseconds(outputDate))))
             }
             if let run = task.run, run.isTerminal, run.status != "completed" {
                 let text = run.status == "failed" ? String(localized: "这次没能完成。") + (run.error.map { "\n" + $0 } ?? "") : String(localized: "已停止。")
@@ -158,8 +233,16 @@ struct ChatRenderSnapshot: Encodable, Equatable {
             if !row.content.isEmpty || blocks.isEmpty {
                 blocks.append(.init(id: row.id + ":text", type: "text", text: row.content))
             }
+            // Keep the local outgoing timestamp on server echo so timestamp headers never jump.
+            let rowSentAtMs: Double? = if row.role == "system" {
+                nil
+            } else if row.role == "user", let opID = row.operationID, let localCreatedAt = tasksByID[opID]?.createdAt {
+                Self.epochMilliseconds(localCreatedAt)
+            } else {
+                Self.epochMilliseconds(seconds: row.createdAt)
+            }
             remoteRows.append(Message(id: outgoing.map { $0 + ":user" } ?? row.id, turnID: outgoing ?? (row.role == "system" ? row.id : row.runID ?? row.id),
-                role: row.role, state: "complete", blocks: blocks,
+                role: row.role, state: "complete", blocks: blocks, sentAtMs: rowSentAtMs,
                 delivery: row.role == "user" ? receipt(runID: row.runID, operationID: row.operationID,
                     messageState: row.deliveryState, serverConfirmed: true) : nil))
             if let runID = row.runID, lastDisplayIndexByRun[runID] == index {
@@ -167,7 +250,12 @@ struct ChatRenderSnapshot: Encodable, Equatable {
                 if run?.isTerminal != true,
                    let reply = store.sharedRunReplies[runID] ?? tasksByRunID[runID]?.reply {
                     let turnID = tasksByRunID[runID]?.id.uuidString ?? runID
-                    if let live = liveStreamingMessage(turnID: turnID, reply: reply, committedAssistantCount: assistantCountByRun[runID] ?? 0) {
+                    let liveSentAtMs = Self.epochMilliseconds(tasksByRunID[runID]?.firstTextReceivedAt)
+                        ?? Self.epochMilliseconds(seconds: run?.createdAt)
+                        ?? Self.epochMilliseconds(seconds: row.createdAt)
+                    if let live = liveStreamingMessage(turnID: turnID, reply: reply,
+                                                       committedAssistantCount: assistantCountByRun[runID] ?? 0,
+                                                       sentAtMs: liveSentAtMs) {
                         remoteRows.append(live)
                     }
                     renderedLiveRuns.insert(runID)
@@ -176,7 +264,8 @@ struct ChatRenderSnapshot: Encodable, Equatable {
         }
         for run in store.sharedRuns where !run.isTerminal && !renderedLiveRuns.contains(run.runID) && tasksByRunID[run.runID] == nil {
             if let reply = store.sharedRunReplies[run.runID],
-               let live = liveStreamingMessage(turnID: run.runID, reply: reply) {
+               let live = liveStreamingMessage(turnID: run.runID, reply: reply,
+                                               sentAtMs: Self.epochMilliseconds(seconds: run.createdAt)) {
                 remoteRows.append(live)
             }
         }
@@ -212,7 +301,8 @@ struct ChatRenderSnapshot: Encodable, Equatable {
                         return .init(id: block.id, type: "tool", tool: .init(id: tool.id, name: tool.name,
                             input: tool.input, output: tool.output, state: tool.state.rawValue))
                     }
-                })
+                },
+                sentAtMs: Self.epochMilliseconds(message.sentAt))
         }
     }
 }
