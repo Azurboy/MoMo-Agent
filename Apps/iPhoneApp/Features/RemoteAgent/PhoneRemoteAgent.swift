@@ -154,26 +154,37 @@ final class PhoneRemoteAgent {
             if connection.network == "tailscale" {
                 tailnet.prepareForForeground()
                 do {
-                    _ = try await client.capabilities()
+                    try await Self.probeCapabilities(client, timeout: .seconds(12))
                 } catch {
                     guard AgentTransportFailure.isSocketOrLinkFailure(error) else { throw error }
                     try Task.checkCancellation()
-                    // A timeout reaching the Mac does not establish that our SOCKS listener died.
-                    // connectedSession checks the local listener before replacing the node.
-                    tailnet.prepareForForeground()
-                    _ = try await client.capabilities()
+                    await tailnet.restartForRecovery()
+                    try await Self.probeCapabilities(client, timeout: .seconds(15))
                 }
             } else {
                 network?.resume()
-                _ = try await client.capabilities()
+                try await Self.probeCapabilities(client, timeout: .seconds(12))
             }
             guard self.store === store else { return }
-            await store.retryConnection(ifNeeded: true)
+            await store.retryConnection()
+            await context?.refresh()
         } catch is CancellationError { }
         catch {
             guard !AgentTransportFailure.isCancelled(error) else { return }
             store.recordConnectionFailure(error)
             failure = AgentTransportFailure.isTransient(error) ? String(localized: "暂时无法连接 Mac，请稍后重试。") : error.localizedDescription
+        }
+    }
+
+    private nonisolated static func probeCapabilities(_ client: AgentClient, timeout: Duration) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { _ = try await client.capabilities() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw URLError(.timedOut)
+            }
+            try await group.next()
+            group.cancelAll()
         }
     }
 

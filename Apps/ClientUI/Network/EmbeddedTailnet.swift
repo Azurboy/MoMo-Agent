@@ -35,6 +35,12 @@ final class EmbeddedTailnet {
     @ObservationIgnored private var signedOut = false
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathSignature: String?
+    @ObservationIgnored private var consecutiveTransportFailures = 0
+    @ObservationIgnored private var consecutivePeerMapTimeouts = 0
+    @ObservationIgnored var startupTimeout: Duration = .seconds(10)
+    @ObservationIgnored var peerMapTimeout: Duration = .seconds(8)
+
+    private static let startupStates: Set<String> = ["starting", "Starting", "NoState", "Stopped", "stopped"]
 
     init(directory: URL, device: String, controlURL: String = kDefaultControlURL) {
         self.directory = directory
@@ -47,12 +53,23 @@ final class EmbeddedTailnet {
 
     func start() async throws {
         guard proxySettingsError == nil else { throw TailnetError.unavailable }
+        let checkedProxy = needsProxyCheck
         await checkProxyIfNeeded()
-        if let closing { await closing.value }
+        if let closing { await Self.awaitCleanup(closing, timeout: .seconds(5)) }
         try Task.checkCancellation()
         guard !signingOut, !signedOut else { throw TailnetError.loginRequired }
         if needsRestart { await close(); return try await start() }
-        if node != nil { return }
+        if let existing = node {
+            if checkedProxy || state != "Running" {
+                await refreshStatus()
+                try Task.checkCancellation()
+                if needsRestart { await close(); return try await start() }
+            }
+            if Self.startupStates.contains(state) {
+                ensureNodeUp(existing, attempt: generation)
+            }
+            return
+        }
         let attempt = generation
         let task: Task<TailscaleNode, Error>
         if let startup { task = startup }
@@ -84,21 +101,31 @@ final class EmbeddedTailnet {
             guard attempt == generation else { try? await created.close(); throw CancellationError() }
             if node != nil { return }
             node = created; startup = nil
-            up = Task { [weak self] in
-                do { try await created.up() }
-                catch {
-                    guard !Task.isCancelled, let self, self.generation == attempt else { return }
-                    self.needsRestart = true
-                    self.state = "failed"
-                    self.message = String(localized: "Tailscale 暂未连接，请重试。")
-                }
-            }
+            ensureNodeUp(created, attempt: attempt)
             ensureWatchRunning(attempt: attempt)
             startPathMonitor(attempt: attempt)
             await refreshStatus()
         } catch {
             if attempt == generation { startup = nil; state = "failed"; message = String(localized: "无法启动 Tailscale，请重试。") }
             throw error
+        }
+    }
+
+    private func ensureNodeUp(_ target: TailscaleNode, attempt: UUID) {
+        guard up == nil, !signingOut, !signedOut, generation == attempt else { return }
+        up = Task { [weak self] in
+            defer {
+                if let self, self.generation == attempt {
+                    self.up = nil
+                }
+            }
+            do { try await target.up() }
+            catch {
+                guard !Task.isCancelled, let self, self.generation == attempt else { return }
+                self.needsRestart = true
+                self.state = "failed"
+                self.message = String(localized: "Tailscale 暂未连接，请重试。")
+            }
         }
     }
 
@@ -141,7 +168,8 @@ final class EmbeddedTailnet {
         try Task.checkCancellation()
         guard let node else { throw TailnetError.unavailable }
         await refreshStatus()
-        for _ in 0..<12 where ["starting", "Starting", "NoState"].contains(state) && authURL == nil {
+        for _ in 0..<12 where Self.startupStates.contains(state) && authURL == nil {
+            ensureNodeUp(node, attempt: attempt)
             try Task.checkCancellation()
             try await Task.sleep(for: .milliseconds(250))
             await refreshStatus()
@@ -176,25 +204,50 @@ final class EmbeddedTailnet {
         try await start()
         ensureWatchRunning(attempt: generation)
         let attempt = generation
-        for _ in 0..<120 where ["starting", "Starting", "NoState"].contains(state) {
-            try await Task.sleep(for: .milliseconds(250)); await refreshStatus()
-            guard attempt == generation else { throw CancellationError() }
+        if Self.startupStates.contains(state) {
+            if let node { ensureNodeUp(node, attempt: attempt) }
+            let startupDeadline = ContinuousClock.now.advanced(by: startupTimeout)
+            while Self.startupStates.contains(state), ContinuousClock.now < startupDeadline {
+                if let node { ensureNodeUp(node, attempt: attempt) }
+                try await Task.sleep(for: .milliseconds(200))
+                await refreshStatus()
+                guard attempt == generation else { throw CancellationError() }
+            }
         }
         guard attempt == generation else { throw CancellationError() }
         guard state == "Running", let node else {
             if state == "NeedsLogin" { throw TailnetError.loginRequired }
+            if state == "NeedsMachineAuth" { throw TailnetError.approvalRequired }
+            // A node wedged in Stopped/Starting/NoState/failed after startup wait
+            // must be recycled on the next attempt instead of trapping reconnect forever.
+            needsRestart = true
             throw URLError(.notConnectedToInternet)
         }
         // Running describes the local node. Its first netmap can still omit the
         // paired Mac. Dialing then can select a route outside the peer tunnel.
         if let peer, !mappedAddresses.contains(peer) {
-            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
-            while !mappedAddresses.contains(peer) {
-                guard attempt == generation else { throw CancellationError() }
-                guard state == "Running", ContinuousClock.now < deadline else { throw URLError(.notConnectedToInternet) }
-                try await Task.sleep(for: .milliseconds(200))
-            }
+            await refreshStatus()
             guard attempt == generation else { throw CancellationError() }
+            if !mappedAddresses.contains(peer) {
+                let deadline = ContinuousClock.now.advanced(by: peerMapTimeout)
+                while !mappedAddresses.contains(peer) {
+                    guard attempt == generation else { throw CancellationError() }
+                    guard state == "Running", ContinuousClock.now < deadline else {
+                        consecutivePeerMapTimeouts += 1
+                        needsProxyCheck = true
+                        if consecutivePeerMapTimeouts >= 2 {
+                            needsRestart = true
+                        }
+                        throw URLError(.notConnectedToInternet)
+                    }
+                    try await Task.sleep(for: .milliseconds(200))
+                    await refreshStatus()
+                }
+                guard attempt == generation else { throw CancellationError() }
+            }
+        }
+        if peer != nil {
+            consecutivePeerMapTimeouts = 0
         }
         func cached() -> URLSession? { media ? desktopMediaSession : desktopControl ? desktopControlSession : interactive ? interactiveSession : session }
         if let cached = cached() { return cached }
@@ -263,10 +316,22 @@ final class EmbeddedTailnet {
     func prepareForForeground() {
         // iOS can reclaim the SOCKS listener while suspended even if LocalAPI says Running.
         // A brief inactive scene does not mean that listener was reclaimed.
-        if node != nil {
+        if let existing = node {
             needsProxyCheck = true
+            if Self.startupStates.contains(state) {
+                ensureNodeUp(existing, attempt: generation)
+            }
             ensureWatchRunning(attempt: generation)
         }
+    }
+
+    func recordTransportSuccess() {
+        consecutiveTransportFailures = 0
+    }
+
+    func restartForRecovery() async {
+        guard !signingOut, !signedOut else { return }
+        await close()
     }
 
     func failedRequest(_ error: Error, session failedSession: URLSession) {
@@ -287,6 +352,11 @@ final class EmbeddedTailnet {
         if failedSession === desktopMediaSession { desktopMediaSession = nil }
         failedSession.finishTasksAndInvalidate()
         needsProxyCheck = true
+        consecutiveTransportFailures += 1
+        if consecutiveTransportFailures >= 6 {
+            consecutiveTransportFailures = 0
+            needsRestart = true
+        }
     }
 
     private func checkProxyIfNeeded() async {
@@ -308,8 +378,16 @@ final class EmbeddedTailnet {
                 request.cachePolicy = .reloadIgnoringLocalCacheData
                 request.setValue("Basic " + Data("tsnet:\(loopback.localAPIKey)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
                 request.setValue("localapi", forHTTPHeaderField: "Sec-Tailscale")
-                let (_, response) = try await probe.data(for: request)
+                let (data, response) = try await probe.data(for: request)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.cannotConnectToHost) }
+                if let self, self.generation == attempt,
+                   let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let backendState = status["BackendState"] as? String {
+                    self.state = backendState
+                    if Self.startupStates.contains(backendState) {
+                        self.ensureNodeUp(node, attempt: attempt)
+                    }
+                }
             } catch {
                 if self?.generation == attempt { self?.needsRestart = true }
             }
@@ -319,11 +397,21 @@ final class EmbeddedTailnet {
         if generation == attempt { proxyCheck = nil }
     }
 
+    private static func awaitCleanup(_ cleanup: Task<Void, Never>, timeout: Duration) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await cleanup.value }
+            group.addTask { try? await Task.sleep(for: timeout) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
     func close() async {
-        if let closing { await closing.value; return }
+        if let closing { await Self.awaitCleanup(closing, timeout: .seconds(5)); return }
         generation = UUID(); watch?.cancel(); watch = nil; up?.cancel(); up = nil
         pathMonitor?.cancel(); pathMonitor = nil; lastPathSignature = nil
         needsRestart = false; needsProxyCheck = false; proxyCheck = nil
+        consecutiveTransportFailures = 0; consecutivePeerMapTimeouts = 0
         invalidateCachedSessions(finishTasks: false)
         let pending = startup
         let old = node; node = nil; startup = nil
@@ -333,8 +421,8 @@ final class EmbeddedTailnet {
             else if let pending, let created = try? await pending.value { try? await created.close() }
         }
         closing = cleanup
-        await cleanup.value
-        closing = nil
+        await Self.awaitCleanup(cleanup, timeout: .seconds(5))
+        if closing == cleanup { closing = nil }
     }
 
     func logout() async throws {
