@@ -32,6 +32,7 @@ import XCTest
         await store.refresh(); await store.refresh()
         let requests = await wire.requests, subscriptions = await wire.subscriptions
         XCTAssertEqual(subscriptions.count, 1)
+        XCTAssertFalse(requests.contains { $0.url?.path == "/v1/capabilities" && $0.timeoutInterval == 5 })
         XCTAssertEqual(requests.filter { $0.url?.path == "/momo/v1/conversation/messages" && $0.httpMethod == "POST" }.count, 2)
         XCTAssertFalse(requests.contains { $0.url?.path.hasPrefix("/v1/runs/") == true })
         XCTAssertFalse(requests.contains { $0.url?.path == "/momo/v1/conversation/runs" })
@@ -261,6 +262,9 @@ import XCTest
         await wire.throttleOnce()
         store.foreground(); defer { store.background() }
         try await eventually { await wire.subscriptions.count == 1 }
+        try await eventually { store.connectionState == .retrying }
+        await store.retryConnection(ifNeeded: true)
+        await store.retryConnection()
         try await Task.sleep(for: .milliseconds(100))
         let early = await wire.subscriptions.count; XCTAssertEqual(early, 1)
         try await eventually { await wire.subscriptions.count == 2 }

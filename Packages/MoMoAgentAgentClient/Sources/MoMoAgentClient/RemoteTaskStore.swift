@@ -63,6 +63,7 @@ public final class RemoteTaskStore {
     @ObservationIgnored private var connectionFailures = 0
     @ObservationIgnored private var connectionConfirmation: UInt64 = 0
     @ObservationIgnored private var serverRetryNotBefore: Date?
+    private var serverIsThrottling: Bool { serverRetryNotBefore.map { now() < $0 } ?? false }
     @ObservationIgnored private var lifetime = UUID()
     @ObservationIgnored private var visibleReadSeq = 0
     public var acknowledgedReadSequence: Int { visibleReadSeq }
@@ -365,14 +366,18 @@ public final class RemoteTaskStore {
     public func foreground() {
         guard observing == nil, canContactServer else { return }
         if connectionState == .unavailable { connectionState = .retrying }
-        // Opportunistic only: sending never awaits this probe or its failure.
-        warming = Task { [client] in try? await client.warmSubmission() }
         nextConnectionAttempt = nil
         let id = UUID(); observationID = id
         observing = Task { [weak self] in
             // Upgrade older journals on entry. The durable shared inbox contract is
             // bound to the verified server identity, not a 60-second send preflight.
             await self?.discoverConversation(refreshContract: self?.conversation?.capabilities.messageIdempotency == nil || self?.conversation?.capabilities.conversationEvents == nil)
+            // The live subscription opens the interactive route. A separate short-lived
+            // preflight can time out and retire that same pool while the stream connects.
+            if let self, !Task.isCancelled, !self.serverIsThrottling, let conversation = self.conversation,
+               conversation.capabilities.conversationEvents != true {
+                self.warming = Task { [client = self.client] in try? await client.warmSubmission() }
+            }
             if self?.conversation?.capabilities.messageIdempotency == nil {
                 _ = try? await self?.submissionCapabilities()
             }
@@ -402,7 +407,7 @@ public final class RemoteTaskStore {
     }
 
     public func retryConnection(ifNeeded: Bool = false) async {
-        guard canContactServer else { return }
+        guard canContactServer, !serverIsThrottling else { return }
         // Path changes can arrive during the handshake or while the peer is sending.
         if ifNeeded, connectionState != .unavailable, let subscription, subscription.isRunning, !subscription.isBackingOff {
             await refresh(userInitiated: true)
@@ -416,7 +421,7 @@ public final class RemoteTaskStore {
     }
 
     public func refresh(userInitiated: Bool = false) async {
-        if let deadline = serverRetryNotBefore, now() < deadline { return }
+        if serverIsThrottling { return }
         if userInitiated, canContactServer {
             if connectionState == .unavailable {
                 connectionState = .retrying
@@ -935,7 +940,7 @@ public final class RemoteTaskStore {
 
     private func startConversationSubscription() {
         if subscription?.isRunning == false { subscription = nil }
-        guard subscription == nil, conversation?.capabilities.conversationEvents == true,
+        guard subscription == nil, !serverIsThrottling, conversation?.capabilities.conversationEvents == true,
               canContactServer, connectionState != .unavailable, let owner = observationID else { return }
         subscription = ConversationSubscription(client: client, cursor: { [weak self] in self?.eventCursor },
             snapshot: { [weak self] value in
