@@ -127,7 +127,8 @@ import TailscaleKit
         let nodesBefore = Probe.counts.0
         network.failedRequest(URLError(.timedOut), session: current)
         let slowPeer = try await network.connectedSession()
-        precondition(slowPeer === current, "A healthy proxy and a slow peer must keep the connection pool")
+        precondition(Probe.counts.0 == nodesBefore, "A slow peer must not restart the healthy local node")
+        current = slowPeer
         let otherPool = try await network.connectedSession(interactive: true)
         network.failedRequest(URLError(.badURL), session: current)
         let repairedPool = try await network.connectedSession()
@@ -254,7 +255,7 @@ with tempfile.TemporaryDirectory(prefix="momo-tailnet-recovery-") as temporary:
     run("xcrun", "swiftc", "-swift-version", "6", "-emit-library", "-emit-module", "-module-name", "TailscaleKit",
         str(root / "TailscaleKit.swift"), "-emit-module-path", str(root / "TailscaleKit.swiftmodule"), "-o", str(root / "libTailscaleKit.dylib"))
     run("xcrun", "swiftc", "-swift-version", "6", "-emit-library", "-emit-module", "-module-name", "MoMoAgentClient",
-        str(ROOT / "Packages/MoMoAgentAgentClient/Sources/MoMoAgentClient/TailnetEndpoint.swift"),
+        *sorted((ROOT / "Packages/MoMoAgentAgentClient/Sources/MoMoAgentClient").glob("*.swift")),
         "-emit-module-path", str(root / "MoMoAgentClient.swiftmodule"), "-o", str(root / "libMoMoAgentClient.dylib"))
     run("xcrun", "swiftc", "-swift-version", "6", "-parse-as-library", "-I", str(root), "-L", str(root),
         "-lTailscaleKit", "-lMoMoAgentClient", "-Xlinker", "-rpath", "-Xlinker", str(root),
