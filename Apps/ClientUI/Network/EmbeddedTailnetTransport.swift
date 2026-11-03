@@ -12,7 +12,7 @@ struct EmbeddedTailnetTransport: AgentTransport {
         await network.diagnostics.observePeer(endpoint.host)
         let desktop = url.path.hasPrefix("/desktop/")
         let media = desktop && ["frame", "frames"].contains(url.lastPathComponent)
-        let session = try await network.connectedSession(interactive: request.networkServiceType == .responsiveData,
+        let session = try await network.connectedSession(peer: endpoint.host, interactive: request.networkServiceType == .responsiveData,
                                                           desktopControl: desktop && !media, media: media)
         do {
             if url.path == "/desktop/v1/frames" {
