@@ -20,6 +20,7 @@ final class EmbeddedTailnet {
     @ObservationIgnored private let controlURL: String
     @ObservationIgnored let diagnostics: TailnetDiagnostics
     @ObservationIgnored private var startup: Task<TailscaleNode, Error>?
+    @ObservationIgnored private var mappedAddresses = Set<String>()
     @ObservationIgnored private var watch: Task<Void, Never>?
     @ObservationIgnored private var up: Task<Void, Never>?
     @ObservationIgnored private var session: URLSession?
@@ -117,6 +118,9 @@ final class EmbeddedTailnet {
             let data = try await node.statusJSON()
             guard attempt == generation else { return }
             let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            let peers = status["Peer"] as? [String: [String: Any]]
+            mappedAddresses = Set((peers ?? [:]).values.filter { $0["InNetworkMap"] as? Bool == true }
+                .flatMap { $0["TailscaleIPs"] as? [String] ?? [] })
             diagnostics.recordStatus(data)
             state = status["BackendState"] as? String ?? "starting"
             address = (status["TailscaleIPs"] as? [String] ?? []).first(where: TailnetEndpoint.isAddress)
@@ -168,7 +172,7 @@ final class EmbeddedTailnet {
         throw TailnetError.loginTimedOut
     }
 
-    func connectedSession(interactive: Bool = false, desktopControl: Bool = false, media: Bool = false) async throws -> URLSession {
+    func connectedSession(peer: String? = nil, interactive: Bool = false, desktopControl: Bool = false, media: Bool = false) async throws -> URLSession {
         try await start()
         ensureWatchRunning(attempt: generation)
         let attempt = generation
@@ -180,6 +184,17 @@ final class EmbeddedTailnet {
         guard state == "Running", let node else {
             if state == "NeedsLogin" { throw TailnetError.loginRequired }
             throw URLError(.notConnectedToInternet)
+        }
+        // Running describes the local node. Its first netmap can still omit the
+        // paired Mac. Dialing then can select a route outside the peer tunnel.
+        if let peer, !mappedAddresses.contains(peer) {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            while !mappedAddresses.contains(peer) {
+                guard attempt == generation else { throw CancellationError() }
+                guard state == "Running", ContinuousClock.now < deadline else { throw URLError(.notConnectedToInternet) }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            guard attempt == generation else { throw CancellationError() }
         }
         func cached() -> URLSession? { media ? desktopMediaSession : desktopControl ? desktopControlSession : interactive ? interactiveSession : session }
         if let cached = cached() { return cached }
@@ -312,7 +327,7 @@ final class EmbeddedTailnet {
         invalidateCachedSessions(finishTasks: false)
         let pending = startup
         let old = node; node = nil; startup = nil
-        state = "stopped"; authURL = nil; address = nil
+        state = "stopped"; authURL = nil; address = nil; mappedAddresses.removeAll()
         let cleanup = Task {
             if let old { try? await old.close() }
             else if let pending, let created = try? await pending.value { try? await created.close() }

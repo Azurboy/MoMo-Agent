@@ -26,7 +26,14 @@ import TailscaleKit
                 let (_, response) = try await session.data(from: url)
                 try check((response as? HTTPURLResponse)?.statusCode == 200, "Private HTTP failed")
             }
-            let original = try await client.connectedSession()
+            let original = try await client.connectedSession(peer: address)
+            let missingPeer = Task { try await client.connectedSession(peer: "100.127.255.254") }
+            try await Task.sleep(for: .milliseconds(300))
+            missingPeer.cancel()
+            do {
+                _ = try await missingPeer.value
+                throw Check.failed("Cold request obtained a session before its peer was mapped")
+            } catch is CancellationError {}
             try await read(original)
             let generation = client.generation
             let addressBefore = client.address
@@ -44,10 +51,13 @@ import TailscaleKit
                 }
                 try check(client.generation == generation, "Foreground restarted a healthy node")
             }
+            var current = original
             for error in [URLError(.timedOut), URLError(.networkConnectionLost), URLError(.cannotConnectToHost)] {
-                client.failedRequest(error, session: original)
+                client.failedRequest(error, session: current)
                 let session = try await client.connectedSession()
-                try check(session === original && client.generation == generation, "Peer failure restarted a healthy local proxy")
+                try check(client.generation == generation, "Peer failure restarted a healthy local proxy")
+                try check(session !== current, "Failed request retained the failed session")
+                current = session
                 try await read(session)
             }
 
@@ -67,7 +77,7 @@ import TailscaleKit
                 _ = try await client.connectedSession()
                 throw Check.failed("Logout was undone by a network request")
             } catch TailnetError.loginRequired { }
-            print("PASS: 40 concurrent foreground reads reuse the node/session; peer failures preserve it; dead proxy rebuilds with same address; stale failures ignored; logout stays logged out")
+            print("PASS: unmapped peer waits and cancels; 40 foreground reads reuse the node/session; peer failures replace only the failed session; dead proxy rebuilds with same address; stale failures ignored; logout stays logged out")
         } catch {
             await client.close(); try? await server.close()
             throw error
