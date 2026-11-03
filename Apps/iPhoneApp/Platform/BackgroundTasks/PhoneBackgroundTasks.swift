@@ -43,6 +43,7 @@ extension ReceivedAudioTranscription {
 final class PhoneBackgroundTasks {
     nonisolated static let processingID = (Bundle.main.bundleIdentifier ?? "com.momoagent.ios") + ".transcription.processing"
     nonisolated static let continuedPrefix = (Bundle.main.bundleIdentifier ?? "com.momoagent.ios") + ".transcription.continued."
+    nonisolated static let progressScale: Int64 = 10_000
     let policy: TranscriptionBackgroundPolicy
     var onFailure: ((String) -> Void)?
     var onMemoryWarning: (() -> Void)?
@@ -57,6 +58,9 @@ final class PhoneBackgroundTasks {
     private var grants: [String: TranscriptionTaskGrant] = [:]
     private var systemTasks: [String: BGTask] = [:]
     private var progressHighWaterMark: [String: Int64] = [:]
+    private var progressBaseAnchor: [String: Int64] = [:]
+    private var progressHeartbeats: [String: Task<Void, Never>] = [:]
+    private var latestSnapshot: TranscriptionSnapshot?
     private lazy var automatic = makeAutomaticSubmission()
     private lazy var continued = makeContinuedSubmission()
 
@@ -66,7 +70,10 @@ final class PhoneBackgroundTasks {
         self.prepare = prepare
     }
 
-    deinit { for observer in resourceObservers { observer.cancel() } }
+    deinit {
+        for observer in resourceObservers { observer.cancel() }
+        for heartbeat in progressHeartbeats.values { heartbeat.cancel() }
+    }
 
     static func allowsProcessing(lowPower: Bool, thermalState: ProcessInfo.ThermalState) -> Bool {
         processingConstraint(lowPower: lowPower, thermalState: thermalState) == nil
@@ -187,47 +194,113 @@ final class PhoneBackgroundTasks {
     /// Clears a pending continued request if the system scheduler silently dropped it before launch.
     @discardableResult
     func reconcilePendingContinuedBatch() async -> UUID? {
-        guard registrationSucceeded, let identifier = continued.pendingIdentifier, grants[identifier] == nil else {
+        guard registrationSucceeded, let identifier = continued.pendingIdentifier, grants[identifier] == nil,
+              let age = continued.pendingAge, age >= 15 else {
             return nil
         }
         let pending = await Task.detached(priority: .utility) {
             await BGTaskScheduler.shared.pendingTaskRequests().map(\.identifier)
         }.value
         guard !pending.contains(identifier), grants[identifier] == nil,
-              continued.pendingIdentifier == identifier else { return nil }
+              continued.pendingIdentifier == identifier,
+              (continued.pendingAge ?? 0) >= 15 else { return nil }
         guard let droppedBatchID = continued.cancelPending(identifier: identifier) else { return nil }
         onContinuedBatchFinished?(droppedBatchID, false)
         return droppedBatchID
     }
 
-    func update(_ snapshot: TranscriptionSnapshot) {
-        guard #available(iOS 26.0, *), let batch = snapshot.batch else { return }
-        for (identifier, grant) in grants {
-            let matchedBatchID = grant.execution?.batchExecution?.batchID ?? continued.activeBatchID(for: identifier)
-            guard matchedBatchID == batch.id,
-                  let task = systemTasks[identifier] as? BGContinuedProcessingTask else { continue }
-            let total = max(1_000, Int64((batch.totalDuration * 1_000).rounded()))
-            let preparedUnits = min(total, Int64(((batch.preparedDuration + batch.removedDuration) * 1_000).rounded()))
-            let completedUnits = min(total, Int64(((batch.completedDuration + batch.removedDuration) * 1_000).rounded()))
-            let weighted = (preparedUnits * 15 + completedUnits * 85) / 100
-            let done: Int64
-            if batch.state == .completed {
-                done = total
-            } else {
-                done = min(total - 1, max(progressHighWaterMark[identifier] ?? 10, weighted))
+    static func computeContinuedProgressUnits(batch: TranscriptionBatch,
+                                              activeWorkInFlight: Bool,
+                                              advanceHeartbeat: Bool,
+                                              previousHighWater: Int64,
+                                              previousBaseAnchor: Int64) -> (completedUnits: Int64, baseAnchor: Int64) {
+        let scale = Self.progressScale
+        if batch.state == .completed {
+            return (scale, scale)
+        }
+        let totalDuration = max(0.001, batch.totalDuration)
+        let preparedFraction = min(1.0, max(0.0, (batch.preparedDuration + batch.removedDuration) / totalDuration))
+        let completedFraction = min(1.0, max(0.0, (batch.completedDuration + batch.removedDuration) / totalDuration))
+        let baseUnits = min(scale - 50, max(100, Int64(((preparedFraction * 0.15 + completedFraction * 0.85) * Double(scale)).rounded())))
+        let baseAnchor = max(previousBaseAnchor, baseUnits)
+        var next = max(previousHighWater, baseUnits)
+        if advanceHeartbeat && activeWorkInFlight {
+            let remainingDuration = max(0.0, totalDuration - batch.completedDuration - batch.removedDuration)
+            let activeSliceSeconds = min(22.0, max(4.0, remainingDuration))
+            let spanUnits = max(150, Int64(((activeSliceSeconds / totalDuration) * 0.80 * Double(scale)).rounded()))
+            let ceiling = min(scale - 50, baseAnchor + spanUnits)
+            if next < ceiling {
+                let step = max(8, (ceiling - next) / 14)
+                next = min(ceiling, next + step)
             }
-            progressHighWaterMark[identifier] = done
-            task.progress.totalUnitCount = total
-            task.progress.completedUnitCount = done
+        }
+        return (min(scale - 1, next), baseAnchor)
+    }
+
+    func update(_ snapshot: TranscriptionSnapshot) {
+        latestSnapshot = snapshot
+        refreshAllContinuedProgress(advanceHeartbeat: false)
+    }
+
+    private func refreshAllContinuedProgress(advanceHeartbeat: Bool) {
+        guard #available(iOS 26.0, *) else { return }
+        for (identifier, grant) in grants {
+            guard let task = systemTasks[identifier] as? BGContinuedProcessingTask else { continue }
+            let matchedBatchID = grant.execution?.batchExecution?.batchID ?? continued.activeBatchID(for: identifier)
+            guard let snapshot = latestSnapshot, let batch = snapshot.batch, batch.id == matchedBatchID else {
+                if advanceHeartbeat {
+                    let current = progressHighWaterMark[identifier] ?? 100
+                    let bumped = min(250, current + 8)
+                    progressHighWaterMark[identifier] = bumped
+                    task.progress.totalUnitCount = Self.progressScale
+                    task.progress.completedUnitCount = bumped
+                }
+                continue
+            }
+            let activeInFlight = snapshot.nativeInFlight || snapshot.phase == .preparing || snapshot.phase == .transcribing
+            let previousHigh = progressHighWaterMark[identifier] ?? 100
+            let previousAnchor = progressBaseAnchor[identifier] ?? 100
+            let computed = Self.computeContinuedProgressUnits(
+                batch: batch,
+                activeWorkInFlight: activeInFlight,
+                advanceHeartbeat: advanceHeartbeat,
+                previousHighWater: previousHigh,
+                previousBaseAnchor: previousAnchor
+            )
+            progressHighWaterMark[identifier] = computed.completedUnits
+            progressBaseAnchor[identifier] = computed.baseAnchor
+            task.progress.totalUnitCount = Self.progressScale
+            task.progress.completedUnitCount = computed.completedUnits
             let processedSeconds = Int((batch.completedDuration + batch.removedDuration).rounded(.down))
             let totalSeconds = max(1, Int(batch.totalDuration.rounded(.up)))
             if snapshot.phase == .preparing && processedSeconds == 0 {
                 let preparedSeconds = min(totalSeconds, Int((batch.preparedDuration + batch.removedDuration).rounded(.down)))
                 task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "正在分析音频 \(preparedSeconds) / \(totalSeconds) 秒"))
+            } else if activeInFlight && processedSeconds < totalSeconds {
+                task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "正在转写 · 已完成 \(min(totalSeconds, processedSeconds)) / \(totalSeconds) 秒"))
             } else {
                 task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "已处理 \(min(totalSeconds, processedSeconds)) / \(totalSeconds) 秒"))
             }
         }
+    }
+
+    private func startProgressHeartbeat(identifier: String, holder: BackgroundCoordinatorHolder) {
+        progressHeartbeats[identifier]?.cancel()
+        progressHeartbeats[identifier] = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(1_500))
+                guard let self, !Task.isCancelled, self.grants[identifier] != nil else { return }
+                if let coordinator = await holder.coordinator {
+                    self.latestSnapshot = await coordinator.snapshot()
+                }
+                self.refreshAllContinuedProgress(advanceHeartbeat: true)
+            }
+        }
+    }
+
+    private func stopProgressHeartbeat(identifier: String) {
+        progressHeartbeats[identifier]?.cancel()
+        progressHeartbeats[identifier] = nil
     }
 
     private func receive(_ task: BGTask, continued: Bool) {
@@ -254,13 +327,19 @@ final class PhoneBackgroundTasks {
                 return
             }
             guard let pendingBatchID = self.continued.claim(identifier: id) else {
-                task.setTaskCompleted(success: false)
+                let wasExplicitlyCancelled = self.continued.wasCancelled(identifier: id)
+                if wasExplicitlyCancelled, let continuedTask = task as? BGContinuedProcessingTask {
+                    continuedTask.progress.totalUnitCount = Self.progressScale
+                    continuedTask.progress.completedUnitCount = Self.progressScale
+                }
+                task.setTaskCompleted(success: wasExplicitlyCancelled)
                 return
             }
             if let continuedTask = task as? BGContinuedProcessingTask {
-                continuedTask.progress.totalUnitCount = 1_000
-                continuedTask.progress.completedUnitCount = 10
-                progressHighWaterMark[id] = 10
+                continuedTask.progress.totalUnitCount = Self.progressScale
+                continuedTask.progress.completedUnitCount = 100
+                progressHighWaterMark[id] = 100
+                progressBaseAnchor[id] = 100
             }
             batchID = pendingBatchID
         } else {
@@ -287,11 +366,12 @@ final class PhoneBackgroundTasks {
             guard let coordinator = await holder.coordinator else { throw BackgroundTranscriptionError.runtimeUnavailable }
             try await coordinator.stop(execution: execution, reason: reason)
         }, completion: { [weak self] success, failure in
+            self?.stopProgressHeartbeat(identifier: id)
             let reason = self?.grants[id]?.endReason
             task.expirationHandler = nil
             let taskSucceeded = continued ? (failure == nil && (success || reason == .systemEndedUnknown || reason == .interrupted || reason == .userPaused)) : success
             if continued, taskSucceeded, #available(iOS 26.0, *), let continuedTask = task as? BGContinuedProcessingTask {
-                let total = max(1, continuedTask.progress.totalUnitCount)
+                let total = max(Self.progressScale, continuedTask.progress.totalUnitCount)
                 continuedTask.progress.totalUnitCount = total
                 continuedTask.progress.completedUnitCount = total
             }
@@ -299,6 +379,7 @@ final class PhoneBackgroundTasks {
             self?.grants[id] = nil
             self?.systemTasks[id] = nil
             self?.progressHighWaterMark[id] = nil
+            self?.progressBaseAnchor[id] = nil
             if self?.grants.isEmpty == true { self?.onSystemTasksFinished?() }
             if continued { self?.continued.complete(identifier: id) }
             if let batchID { self?.onContinuedBatchFinished?(batchID, success) }
@@ -309,6 +390,9 @@ final class PhoneBackgroundTasks {
         })
         grants[id] = grant
         systemTasks[id] = task
+        if continued {
+            startProgressHeartbeat(identifier: id, holder: holder)
+        }
         task.expirationHandler = { [weak grant] in
             Task { @MainActor in grant?.expire(reason: continued ? .systemEndedUnknown : .backgroundExpired) }
         }

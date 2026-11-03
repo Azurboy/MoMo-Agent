@@ -36,6 +36,7 @@ public final class SpeechEngine: @unchecked Sendable {
     private let selectedSegmentationModel: OSAllocatedUnfairLock<SpeakerSegmentationModel>
     private let enrolledSpeakers = OSAllocatedUnfairLock<[EnrolledSpeakerPrototype]>(initialState: [])
     private let foregroundPriority = OSAllocatedUnfairLock(initialState: true)
+    private let backgroundCPUPacer = BackgroundCPUPacer()
     private var vadContexts: [VADContinuation] = [] // Confined to analysisQueue; at most four epochs.
     private var idleVAD: (detector: SherpaVAD, threshold: Float)?
     private var dictationVAD: (detector: SherpaVAD, threshold: Float)? // Confined to dictationQueue.
@@ -177,8 +178,17 @@ public final class SpeechEngine: @unchecked Sendable {
         foregroundPriority.withLock { $0 = isForeground }
     }
 
+    /// Updates whether the app scene is visibly foregrounded; paces background CPU usage below XNU's fatal ceiling.
+    public func setSceneForeground(_ isForeground: Bool) {
+        backgroundCPUPacer.setSceneForeground(isForeground)
+    }
+
     private var effectiveCPUThreads: Int {
-        min(4, max(configuration.threads, ProcessInfo.processInfo.processorCount - 2))
+        #if os(iOS)
+        return max(1, min(2, configuration.threads))
+        #else
+        return min(4, max(configuration.threads, ProcessInfo.processInfo.processorCount - 2))
+        #endif
     }
 
     public static var speakerEmbeddingRevision: String { SpeakerRuntime.revision }
@@ -290,6 +300,17 @@ public final class SpeechEngine: @unchecked Sendable {
     }
 
     public func discardPreparedAudio(sessionID: UUID? = nil) { preparedAudio.discard(sessionID: sessionID) }
+
+    /// Releases cached audio buffers and idle VAD state on background transition while keeping ASR/speaker models warm.
+    public func trimBackgroundMemory() {
+        preparedAudio.discard()
+        analysisQueue.async { [self] in
+            idleVAD = nil
+        }
+        dictationQueue.async { [self] in
+            dictationVAD = nil
+        }
+    }
 
     /// Releases cached audio buffers and auxiliary ONNX runtimes under iOS memory pressure.
     public func releaseIdleResources(dropRecognizer: Bool = false) {
@@ -943,11 +964,18 @@ public final class SpeechEngine: @unchecked Sendable {
         return try await withTaskCancellationHandler {
             return try await withCheckedThrowingContinuation { continuation in
                 let executor = kind == .prepareDictation ? dictationQueue : kind == .prepare ? analysisQueue : queue
-                let isForeground = foregroundPriority.withLock { $0 }
-                let qos: DispatchQoS = (isForeground || kind == .prepareDictation || kind == .dictate) ? .userInitiated : .utility
+                let isDictation = kind == .prepareDictation || kind == .dictate
+                let isForeground = foregroundPriority.withLock { $0 } && backgroundCPUPacer.sceneForeground
+                let qos: DispatchQoS = (isForeground || isDictation) ? .userInitiated : .utility
+                let pacer = backgroundCPUPacer
                 executor.async(qos: qos) { [onDiagnostics] in
                     recorder.started()
+                    if !isDictation {
+                        attempt.installStepPoll { current in pacer.paceIfNeeded(attempt: current) }
+                    }
+                    defer { if !isDictation { attempt.installStepPoll(nil) } }
                     do {
+                        if !isDictation, attempt.pollCancellationOrPace() { throw SpeechError.cancelled }
                         try attempt.checkCancellation()
                         let result = try operation(recorder)
                         if checkAfterOperation { try attempt.checkCancellation() }
@@ -1226,12 +1254,20 @@ public final class SpeechEngine: @unchecked Sendable {
             try context.append(keepConverterStream ? available : block, at: targetStart)
             readThrough += Int64(block.count)
             var firstPass = true
+            var vadStepsSincePace = 0
             while true {
                 try attempt.checkCancellation()
                 let vadThrough = keepConverterStream ? readerPosition : base + readThrough
                 let caughtUp = firstPass && context.processed <= vadThrough
                 let advanced = caughtUp ? false : try context.step(through: vadThrough)
-                if advanced { recorder.value.vadModelFrames += 512 }
+                if advanced {
+                    recorder.value.vadModelFrames += 512
+                    vadStepsSincePace += 1
+                    if vadStepsSincePace >= 64 {
+                        vadStepsSincePace = 0
+                        if attempt.pollCancellationOrPace() { throw SpeechError.cancelled }
+                    }
+                }
                 guard advanced || caughtUp else { break }
                 firstPass = false
                 position = min(input.modelFrameCount, max(0, context.processed - base))

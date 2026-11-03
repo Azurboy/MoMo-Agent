@@ -19,7 +19,7 @@ struct SherpaRecognitionInput {
 private func speechAttemptIsCancelled(_ raw: UnsafeRawPointer?) -> Int32 {
     guard let raw else { return 0 }
     let attempt = Unmanaged<SpeechAttempt>.fromOpaque(raw).takeUnretainedValue()
-    return attempt.cancellationUptimeNanoseconds != nil ? 1 : 0
+    return attempt.pollCancellationOrPace() ? 1 : 0
 }
 
 /// Owns the only ASR runtime. All access, including teardown, stays on the recognition queue.
@@ -206,11 +206,13 @@ final class SherpaRuntime: @unchecked Sendable {
                 let started = DispatchTime.now().uptimeNanoseconds
                 let status = withExtendedLifetime(attempt) {
                     let context = UnsafeRawPointer(Unmanaged.passUnretained(attempt).toOpaque())
-                    return input.samples.withUnsafeBufferPointer { buffer in
-                        MoMoTranscribeFunASRNano(
-                            nanoRuntime, buffer.baseAddress, Int32(buffer.count),
-                            language, useITN, speechAttemptIsCancelled, context,
-                            &rawResult, &error, error.count)
+                    return withNativeCancelToken(attempt) { cancelToken in
+                        input.samples.withUnsafeBufferPointer { buffer in
+                            MoMoTranscribeFunASRNanoCancellable(
+                                nanoRuntime, buffer.baseAddress, Int32(buffer.count),
+                                language, useITN, speechAttemptIsCancelled, context,
+                                cancelToken, &rawResult, &error, error.count)
+                        }
                     }
                 }
                 recorder.nativeReturned(startedAt: started, returnedAt: DispatchTime.now().uptimeNanoseconds, attempt: attempt)

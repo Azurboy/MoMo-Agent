@@ -104,6 +104,8 @@ final class PhoneRuntime {
         }
         remoteAgent.onSummariesChanged = { [weak self] in self?.library.timeline.refreshCachedSummaries() }
         if let speech {
+            speech.setSceneForeground(isForeground)
+            speech.setForegroundPriority(isForeground)
             transcription = try TranscriptionCoordinator(archive: archive, speech: speech, onStateChanged: { [weak self] snapshot in
                 Task { @MainActor in
                     guard let self else { return }
@@ -216,12 +218,15 @@ final class PhoneRuntime {
             guard let self else { return }
             self.activeSystemTaskRunning = true
             self.transcriptionContinuation?.finish()
-            self.speech?.setForegroundPriority(self.isForeground || PhoneBackgroundTasks.resourcesAllowProcessing)
+            await self.transcription?.clearForegroundContinuation()
+            self.speech?.setSceneForeground(self.isForeground)
+            self.speech?.setForegroundPriority(self.isForeground)
             await self.receivedAudioTranscription?.handOffToSystemTask()
         }
         backgroundTasks?.onSystemTasksFinished = { [weak self] in
             guard let self else { return }
             self.activeSystemTaskRunning = false
+            self.speech?.setSceneForeground(self.isForeground)
             self.speech?.setForegroundPriority(self.isForeground)
             self.receivedAudioTranscription?.systemTaskFinished()
         }
@@ -353,6 +358,7 @@ final class PhoneRuntime {
 
     func foreground() async {
         isForeground = true
+        speech?.setSceneForeground(true)
         speech?.setForegroundPriority(true)
         remoteAgent.foreground()
         if foregrounding {
@@ -423,9 +429,12 @@ final class PhoneRuntime {
     func leavingForeground() {
         guard isForeground else { return }
         isForeground = false
+        speech?.setSceneForeground(false)
+        speech?.setForegroundPriority(false)
         pendingForegroundBatchFlush = false
         remoteAgent.leavingForeground()
-        if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing {
+        if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
+           !activeSystemTaskRunning, backgroundTasks?.hasActiveContinuedGrant != true {
             let snapshot = transcriptionSnapshot
             let activeWork = preparingTranscriptionContinuation
                 || requestedTranscriptionBatchID != nil
@@ -442,16 +451,22 @@ final class PhoneRuntime {
         // A queued background callback must not suspend a scene that became active again.
         guard !isForeground else { return }
         libraryPresentationDeferred = true
-        speech?.setForegroundPriority(
-            (activeSystemTaskRunning || transcriptionContinuation?.isActive == true || hasTranscriptionContinuation)
-                && PhoneBackgroundTasks.resourcesAllowProcessing
-        )
+        speech?.setSceneForeground(false)
+        speech?.setForegroundPriority(false)
+        speech?.trimBackgroundMemory()
+        if activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true {
+            transcriptionContinuation?.finish()
+        }
         remoteAgent.background()
         if transcriptionContinuation?.isActive != true && !hasTranscriptionContinuation {
             speechWarmup?.cancel()
         }
         playback.suspendWaveformPreparation()
-        await transcription?.suspendForSystem(continuingForeground: transcriptionContinuation?.isActive == true)
+        await transcription?.suspendForSystem(
+            continuingForeground: transcriptionContinuation?.isActive == true
+                && !activeSystemTaskRunning
+                && backgroundTasks?.hasActiveContinuedGrant != true
+        )
         if !isForeground, transcriptionContinuation?.isActive == true,
            await transcription?.finishForegroundContinuationIfIdle() == true {
             transcriptionContinuation?.finish()
@@ -665,9 +680,14 @@ final class PhoneRuntime {
             try await backgroundTasks.requestBatch(id: batch.id)
             speechFailure = nil
             await refreshBatches()
-            if isForeground, backgroundTasks.hasActiveContinuedGrant != true,
-               (await transcription.snapshot()).execution == nil {
-                let batchID = batch.id
+            let batchID = batch.id
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(350))
+                guard let self, self.isForeground,
+                      self.requestedTranscriptionBatchID == batchID,
+                      self.backgroundTasks?.hasActiveContinuedGrant != true,
+                      let transcription = self.transcription,
+                      (await transcription.snapshot()).execution == nil else { return }
                 _ = try? await transcription.startBatch(id: batchID, origin: .foreground) { [weak self] completion in
                     Task { @MainActor in
                         guard let self else { return }

@@ -134,6 +134,30 @@ final class ContinuedBackgroundSubmissionTests: XCTestCase {
         try await submission.request(batchID: UUID())
     }
 
+    func testPendingAgeAndExplicitCancellationTrackingAvoidFalseFailureOnLateDelivery() async throws {
+        var currentTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let harness = ContinuedSchedulerHarness()
+        let submission = ContinuedBackgroundSubmission(
+            prefix: PhoneBackgroundTasks.continuedPrefix,
+            register: { id in harness.registered.append(id); return true },
+            submit: { id in await MainActor.run { harness.submitted.append(id) } },
+            cancel: { id in harness.cancelled.append(id) },
+            failedAfterLaunch: { id in harness.failedAfterLaunch.append(id) },
+            now: { currentTime }
+        )
+        let batch = UUID()
+        try await submission.request(batchID: batch)
+        let identifier = try XCTUnwrap(harness.registered.first)
+        XCTAssertEqual(submission.pendingAge ?? -1, 0, accuracy: 0.001)
+        currentTime.addTimeInterval(16)
+        XCTAssertEqual(submission.pendingAge ?? -1, 16, accuracy: 0.001)
+        XCTAssertFalse(submission.wasCancelled(identifier: identifier))
+        XCTAssertTrue(submission.cancelPending(batchID: batch))
+        XCTAssertTrue(submission.wasCancelled(identifier: identifier))
+        XCTAssertFalse(submission.wasCancelled(identifier: identifier + ".unknown"))
+        XCTAssertNil(submission.pendingAge)
+    }
+
     private func checkLateReplyAfterCancellation(fails: Bool) async throws {
         let entered = expectation(description: "First submission awaiting callback")
         let gate = ContinuedSubmissionGate(entered: entered)

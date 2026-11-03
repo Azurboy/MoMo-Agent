@@ -1,4 +1,5 @@
 #include "MoMoSherpaBridge.h"
+#include "CancelToken.hpp"
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include <algorithm>
@@ -21,8 +22,11 @@ struct SpeakerCancelled : public std::exception {
   const char *what() const noexcept override { return "cancelled"; }
 };
 
-inline void CheckSpeakerCancel(MoMoCancelCallback cb, const void *ctx) {
-  if (cb && cb(ctx) != 0) throw SpeakerCancelled();
+inline void CheckSpeakerCancel(MoMoCancelCallback cb, const void *ctx,
+                               const MoMoCancelToken *token = nullptr) {
+  if ((token && token->IsCancelled()) || (cb && cb(ctx) != 0)) {
+    throw SpeakerCancelled();
+  }
 }
 
 inline float DotN(const float *a, const float *b, int dim) {
@@ -689,6 +693,7 @@ namespace {
 void RunSlidingPowersetSegmentation(
     MoMoSpeakerRuntime *runtime, const float *seg_samples, int32_t count,
     MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
     int total_frames, std::vector<int> &exclusive_labels,
     std::vector<int> &labels, int *out_overlap_frames = nullptr) {
   const int C = runtime->num_classes;
@@ -720,7 +725,7 @@ void RunSlidingPowersetSegmentation(
   }
 
   for (int win_idx = 0;; ++win_idx) {
-    CheckSpeakerCancel(is_cancelled, cancel_context);
+    CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
     const int win_start = win_idx * win_step;
     if (win_start >= count) break;
 
@@ -733,8 +738,12 @@ void RunSlidingPowersetSegmentation(
 
     auto input = Ort::Value::CreateTensor<float>(
         memory, padded.data(), padded.size(), shape, 3);
-    auto result = runtime->segmentation->Run(
-        Ort::RunOptions{nullptr}, inputs, &input, 1, outputs, 1);
+    std::vector<Ort::Value> result;
+    {
+      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+      result = runtime->segmentation->Run(
+          run_opts.get(), inputs, &input, 1, outputs, 1);
+    }
     auto dims = result[0].GetTensorTypeAndShapeInfo().GetShape();
     if (dims.size() != 3 || dims[0] != 1 || dims[2] != C || dims[1] < 1 ||
         dims[1] > 1600) {
@@ -1122,13 +1131,25 @@ int MoMoExtractCleanVoiceprint(
     MoMoCancelCallback is_cancelled, const void *cancel_context,
     float *out_embedding, int32_t embedding_capacity, float *out_clean_seconds,
     char *error, size_t error_capacity) {
+  return MoMoExtractCleanVoiceprintCancellable(
+      runtime, samples, count, is_cancelled, cancel_context, nullptr,
+      out_embedding, embedding_capacity, out_clean_seconds, error,
+      error_capacity);
+}
+
+int MoMoExtractCleanVoiceprintCancellable(
+    MoMoSpeakerRuntime *runtime, const float *samples, int32_t count,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
+    float *out_embedding, int32_t embedding_capacity, float *out_clean_seconds,
+    char *error, size_t error_capacity) {
   try {
     if (!runtime || !samples || !out_embedding ||
         embedding_capacity < runtime->embedding_dim || count < 0) {
       throw std::runtime_error("Invalid voiceprint extraction input");
     }
     if (out_clean_seconds) *out_clean_seconds = 0.0f;
-    CheckSpeakerCancel(is_cancelled, cancel_context);
+    CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
 
     // Require at least 0.80 s of audio; center-crop clips > 16 s.
     if (count < 12800) return 0;
@@ -1151,8 +1172,8 @@ int MoMoExtractCleanVoiceprint(
         LevelAudioForDiarization(slice, slice_count, leveled_scratch);
     std::vector<int> exclusive_labels, labels;
     RunSlidingPowersetSegmentation(runtime, seg_samples, slice_count,
-                                   is_cancelled, cancel_context, total_frames,
-                                   exclusive_labels, labels);
+                                   is_cancelled, cancel_context, cancel_token,
+                                   total_frames, exclusive_labels, labels);
 
     const int K = runtime->num_speakers;
     std::array<int, 5> excl_counts{};
@@ -1224,6 +1245,14 @@ int MoMoExtractCleanVoiceprint(
     return runtime->embedding_dim;
   } catch (const SpeakerCancelled &) {
     return -2;
+  } catch (const Ort::Exception &e) {
+    if ((cancel_token && cancel_token->IsCancelled()) ||
+        (is_cancelled && is_cancelled(cancel_context) != 0)) {
+      return -2;
+    }
+    if (error && error_capacity) {
+      std::snprintf(error, error_capacity, "%s", e.what());
+    }
   } catch (const std::exception &e) {
     if (error && error_capacity) {
       std::snprintf(error, error_capacity, "%s", e.what());
@@ -1252,13 +1281,27 @@ int MoMoAnalyzeSpeakersWithProfiles(
     MoMoCancelCallback is_cancelled, const void *cancel_context,
     MoMoSpeakerTurn *turns, int32_t capacity,
     char *error, size_t error_capacity) {
+  return MoMoAnalyzeSpeakersWithProfilesCancellable(
+      runtime, raw_samples, count, enrolled_embeddings, enrolled_person_ids,
+      enrolled_count, is_cancelled, cancel_context, nullptr, turns, capacity,
+      error, error_capacity);
+}
+
+int MoMoAnalyzeSpeakersWithProfilesCancellable(
+    MoMoSpeakerRuntime *runtime, const float *raw_samples, int32_t count,
+    const float *enrolled_embeddings, const int32_t *enrolled_person_ids,
+    int32_t enrolled_count,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
+    MoMoSpeakerTurn *turns, int32_t capacity,
+    char *error, size_t error_capacity) {
   try {
     if (!runtime || !raw_samples || !turns || count <= 0 || count > 640000 ||
         capacity < 1 || enrolled_count < 0 ||
         (enrolled_count > 0 && (!enrolled_embeddings || !enrolled_person_ids))) {
       throw std::runtime_error("Invalid speaker input");
     }
-    CheckSpeakerCancel(is_cancelled, cancel_context);
+    CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
 
     for (int32_t i = 0; i < count; ++i) {
       if (!std::isfinite(raw_samples[i])) {
@@ -1284,7 +1327,7 @@ int MoMoAnalyzeSpeakersWithProfiles(
     std::vector<int> exclusive_labels, labels;
     int overlap_frames = 0;
     RunSlidingPowersetSegmentation(runtime, seg_samples, count, is_cancelled,
-                                   cancel_context, total_frames,
+                                   cancel_context, cancel_token, total_frames,
                                    exclusive_labels, labels, &overlap_frames);
 
     // Active-speech gap rescue: if an additional quiet speaker spoke in a
@@ -2393,6 +2436,14 @@ int MoMoAnalyzeSpeakersWithProfiles(
     return written;
   } catch (const SpeakerCancelled &) {
     return -2;
+  } catch (const Ort::Exception &e) {
+    if ((cancel_token && cancel_token->IsCancelled()) ||
+        (is_cancelled && is_cancelled(cancel_context) != 0)) {
+      return -2;
+    }
+    if (error && error_capacity) {
+      std::snprintf(error, error_capacity, "%s", e.what());
+    }
   } catch (const std::exception &e) {
     if (error && error_capacity) {
       std::snprintf(error, error_capacity, "%s", e.what());

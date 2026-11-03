@@ -67,3 +67,58 @@ import MoMoContracts
     #expect(preDecode.value.cancellationToNativeReturnSeconds == nil)
     #expect(preDecode.finished(outcome: .cancelled, attempt: attempt).outcome == .cancelled)
 }
+
+@Test func nativeCancelTokenSerializesConcurrentCancelAndRetirement() {
+    for _ in 0..<32 {
+        let attempt = SpeechAttempt()
+        let entered = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            entered.wait()
+            attempt.cancel()
+            finished.signal()
+        }
+        let code = withNativeCancelToken(attempt) { token in
+            #expect(token != nil)
+            entered.signal()
+            Thread.sleep(forTimeInterval: 0.002)
+            return attempt.cancellationUptimeNanoseconds != nil ? -2 : 0
+        }
+        finished.wait()
+        attempt.cancel()
+        #expect(code == -2 || code == 0)
+        #expect(attempt.cancellationUptimeNanoseconds != nil)
+    }
+}
+
+@Test func backgroundCPUPacerWakesImmediatelyOnForegroundOrCancel() async {
+    let fgPacer = BackgroundCPUPacer(initiallyForeground: true, maxCapacity: 1.0, initialBackgroundBurst: -0.5, refillRate: 0.01)
+    let attempt = SpeechAttempt()
+    #expect(!fgPacer.paceIfNeeded(attempt: attempt))
+
+    // Force negative initial burst so background pacing enters condition wait, then wake via foreground transition.
+    let bgPacer = BackgroundCPUPacer(initiallyForeground: false, maxCapacity: 1.0, initialBackgroundBurst: -5.0, refillRate: 0.01)
+    let started = ContinuousClock.now
+    let wakeTask = Task.detached {
+        try? await Task.sleep(for: .milliseconds(15))
+        bgPacer.setSceneForeground(true)
+    }
+    let cancelledOnWake = bgPacer.paceIfNeeded(attempt: attempt)
+    await wakeTask.value
+    #expect(!cancelledOnWake)
+    #expect(bgPacer.sceneForeground)
+    #expect(started.duration(to: ContinuousClock.now) < .milliseconds(500))
+
+    // Also verify cancellation wakes a sleeping background pacer immediately.
+    let cancelPacer = BackgroundCPUPacer(initiallyForeground: false, maxCapacity: 1.0, initialBackgroundBurst: -5.0, refillRate: 0.01)
+    let cancelAttempt = SpeechAttempt()
+    let cancelStart = ContinuousClock.now
+    let cancelWake = Task.detached {
+        try? await Task.sleep(for: .milliseconds(15))
+        cancelAttempt.cancel()
+    }
+    let cancelled = cancelPacer.paceIfNeeded(attempt: cancelAttempt)
+    await cancelWake.value
+    #expect(cancelled)
+    #expect(cancelStart.duration(to: ContinuousClock.now) < .milliseconds(500))
+}

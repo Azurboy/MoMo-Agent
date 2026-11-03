@@ -15,6 +15,11 @@ int MoMoDecodeOfflineStreams(const SherpaOnnxOfflineRecognizer *recognizer,
     const SherpaOnnxOfflineStream **streams, int32_t count, char *error, size_t capacity);
 typedef int (*MoMoCancelCallback)(const void *context);
 
+typedef struct MoMoCancelToken MoMoCancelToken;
+MoMoCancelToken *MoMoCreateCancelToken(void);
+void MoMoTriggerCancelToken(MoMoCancelToken *token);
+void MoMoDestroyCancelToken(MoMoCancelToken *token);
+
 typedef struct MoMoFunASRNanoRuntime MoMoFunASRNanoRuntime;
 typedef struct {
   char *text;
@@ -31,6 +36,12 @@ int MoMoTranscribeFunASRNano(
     MoMoFunASRNanoRuntime *runtime, const float *samples, int32_t sample_count,
     const char *language, int32_t use_itn,
     MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoFunASRNanoResult **out_result, char *error, size_t error_capacity);
+int MoMoTranscribeFunASRNanoCancellable(
+    MoMoFunASRNanoRuntime *runtime, const float *samples, int32_t sample_count,
+    const char *language, int32_t use_itn,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
     MoMoFunASRNanoResult **out_result, char *error, size_t error_capacity);
 void MoMoDestroyFunASRNanoResult(MoMoFunASRNanoResult *result);
 char *MoMoCleanFunASRText(const char *raw_text);
@@ -62,12 +73,26 @@ int MoMoAnalyzeSpeakersWithProfiles(
     MoMoCancelCallback is_cancelled, const void *cancel_context,
     MoMoSpeakerTurn *turns, int32_t capacity,
     char *error, size_t error_capacity);
+int MoMoAnalyzeSpeakersWithProfilesCancellable(
+    MoMoSpeakerRuntime *runtime, const float *samples, int32_t count,
+    const float *enrolled_embeddings, const int32_t *enrolled_person_ids,
+    int32_t enrolled_count,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
+    MoMoSpeakerTurn *turns, int32_t capacity,
+    char *error, size_t error_capacity);
 // Extracts a verified single-speaker voiceprint from a confirmed audio slice.
 // Returns embedding_dim (> 0) if pure single-speaker speech (>= 0.80 s) is found,
 // 0 if multi-speaker / impure / too short, -2 if cancelled, -1 on error.
 int MoMoExtractCleanVoiceprint(
     MoMoSpeakerRuntime *runtime, const float *samples, int32_t count,
     MoMoCancelCallback is_cancelled, const void *cancel_context,
+    float *out_embedding, int32_t embedding_capacity, float *out_clean_seconds,
+    char *error, size_t error_capacity);
+int MoMoExtractCleanVoiceprintCancellable(
+    MoMoSpeakerRuntime *runtime, const float *samples, int32_t count,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
     float *out_embedding, int32_t embedding_capacity, float *out_clean_seconds,
     char *error, size_t error_capacity);
 #ifdef __cplusplus

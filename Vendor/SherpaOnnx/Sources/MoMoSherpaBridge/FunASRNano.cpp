@@ -1,4 +1,5 @@
 #include "MoMoSherpaBridge.h"
+#include "CancelToken.hpp"
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include <algorithm>
@@ -28,8 +29,9 @@ struct CancelledError : public std::exception {
   const char *what() const noexcept override { return "cancelled"; }
 };
 
-inline void CheckCancel(MoMoCancelCallback cb, const void *ctx) {
-  if (cb && cb(ctx) != 0) {
+inline void CheckCancel(MoMoCancelCallback cb, const void *ctx,
+                        const MoMoCancelToken *token = nullptr) {
+  if ((token && token->IsCancelled()) || (cb && cb(ctx) != 0)) {
     throw CancelledError();
   }
 }
@@ -1472,12 +1474,23 @@ int MoMoTranscribeFunASRNano(
     const char *language, int32_t use_itn,
     MoMoCancelCallback is_cancelled, const void *cancel_context,
     MoMoFunASRNanoResult **out_result, char *error, size_t error_capacity) {
+  return MoMoTranscribeFunASRNanoCancellable(
+      runtime, samples, sample_count, language, use_itn, is_cancelled,
+      cancel_context, nullptr, out_result, error, error_capacity);
+}
+
+int MoMoTranscribeFunASRNanoCancellable(
+    MoMoFunASRNanoRuntime *runtime, const float *samples, int32_t sample_count,
+    const char *language, int32_t use_itn,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
+    MoMoFunASRNanoResult **out_result, char *error, size_t error_capacity) {
   try {
     if (!runtime || !samples || sample_count <= 0 || !out_result) {
       throw std::runtime_error("Invalid FunASR-Nano transcription input");
     }
     *out_result = nullptr;
-    CheckCancel(is_cancelled, cancel_context);
+    CheckCancel(is_cancelled, cancel_context, cancel_token);
 
     for (int32_t i = 0; i < sample_count; ++i) {
       if (!std::isfinite(samples[i])) {
@@ -1507,7 +1520,7 @@ int MoMoTranscribeFunASRNano(
     if (is_constant) return make_empty_result();
 
     std::lock_guard<std::mutex> lock(runtime->mutex);
-    CheckCancel(is_cancelled, cancel_context);
+    CheckCancel(is_cancelled, cancel_context, cancel_token);
 
     int32_t t_lfr = 0;
     std::vector<float> lfr = runtime->frontend.ComputeCenteredLfr(
@@ -1515,7 +1528,7 @@ int MoMoTranscribeFunASRNano(
         runtime->lfr_window_shift, &t_lfr);
     if (t_lfr <= 0 || lfr.empty()) return make_empty_result();
 
-    CheckCancel(is_cancelled, cancel_context);
+    CheckCancel(is_cancelled, cancel_context, cancel_token);
 
     // 1. Run SAN-M Encoder + 2-layer Bidirectional Transformer Adaptor on ORT CPU.
     const int64_t feat_dim =
@@ -1539,14 +1552,18 @@ int MoMoTranscribeFunASRNano(
           enc_in_shape.size());
     }
 
-    auto enc_outputs = runtime->encoder_sess->Run(
-        Ort::RunOptions{nullptr}, runtime->enc_in_ptrs.data(), &enc_input, 1,
-        runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
+    std::vector<Ort::Value> enc_outputs;
+    {
+      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+      enc_outputs = runtime->encoder_sess->Run(
+          run_opts.get(), runtime->enc_in_ptrs.data(), &enc_input, 1,
+          runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
+    }
     if (enc_outputs.empty() || !enc_outputs[0].IsTensor()) {
       throw std::runtime_error("Empty encoder_adaptor output");
     }
 
-    CheckCancel(is_cancelled, cancel_context);
+    CheckCancel(is_cancelled, cancel_context, cancel_token);
 
     auto enc_info = enc_outputs[0].GetTensorTypeAndShapeInfo();
     auto enc_shape = enc_info.GetShape();
@@ -1606,9 +1623,13 @@ int MoMoTranscribeFunASRNano(
     Ort::Value src_ids_tensor = Ort::Value::CreateTensor<int64_t>(
         runtime->cpu_mem, source_ids.data(), source_ids.size(),
         src_shape.data(), src_shape.size());
-    auto emb_outputs = runtime->embedding_sess->Run(
-        Ort::RunOptions{nullptr}, runtime->emb_in_ptrs.data(), &src_ids_tensor,
-        1, runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+    std::vector<Ort::Value> emb_outputs;
+    {
+      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+      emb_outputs = runtime->embedding_sess->Run(
+          run_opts.get(), runtime->emb_in_ptrs.data(), &src_ids_tensor, 1,
+          runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+    }
     if (emb_outputs.empty() || !emb_outputs[0].IsTensor()) {
       throw std::runtime_error("Empty embedding output");
     }
@@ -1732,7 +1753,7 @@ int MoMoTranscribeFunASRNano(
 
     for (int32_t step = 0; step < max_new_tokens; ++step) {
       if (valid_len >= runtime->max_total_len) break;
-      CheckCancel(is_cancelled, cancel_context);
+      CheckCancel(is_cancelled, cancel_context, cancel_token);
 
       if (step == 0) {
         std::array<int64_t, 3> emb_shape{1, static_cast<int64_t>(context_len),
@@ -1761,7 +1782,10 @@ int MoMoTranscribeFunASRNano(
         for (size_t i = 0; i < runtime->llm_out_ptrs.size(); ++i) {
           binding.BindOutput(runtime->llm_out_ptrs[i], runtime->cpu_mem);
         }
-        runtime->llm_sess->Run(Ort::RunOptions{nullptr}, binding);
+        {
+          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+          runtime->llm_sess->Run(run_opts.get(), binding);
+        }
         auto outs = binding.GetOutputValues();
         if (outs.size() != runtime->llm_out_ptrs.size()) {
           throw std::runtime_error("Incomplete LLM prefill outputs");
@@ -1798,9 +1822,13 @@ int MoMoTranscribeFunASRNano(
         std::array<int64_t, 2> one_shape{1, 1};
         Ort::Value one_id = Ort::Value::CreateTensor<int64_t>(
             runtime->cpu_mem, &last_id, 1, one_shape.data(), one_shape.size());
-        auto next_emb_out = runtime->embedding_sess->Run(
-            Ort::RunOptions{nullptr}, runtime->emb_in_ptrs.data(), &one_id, 1,
-            runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+        std::vector<Ort::Value> next_emb_out;
+        {
+          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+          next_emb_out = runtime->embedding_sess->Run(
+              run_opts.get(), runtime->emb_in_ptrs.data(), &one_id, 1,
+              runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+        }
         if (next_emb_out.empty() || !next_emb_out[0].IsTensor()) {
           throw std::runtime_error("Empty decode embedding output");
         }
@@ -1849,7 +1877,10 @@ int MoMoTranscribeFunASRNano(
         for (size_t i = 0; i < kv_delta_tensors.size(); ++i) {
           binding.BindOutput(runtime->llm_out_ptrs[1 + i], kv_delta_tensors[i]);
         }
-        runtime->llm_sess->Run(Ort::RunOptions{nullptr}, binding);
+        {
+          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
+          runtime->llm_sess->Run(run_opts.get(), binding);
+        }
 
         std::memcpy(step_logits.data(), runtime->decode_logits.data(),
                     step_logits.size() * sizeof(float));
@@ -1926,7 +1957,7 @@ int MoMoTranscribeFunASRNano(
         std::min<size_t>(static_cast<size_t>(runtime->max_total_len),
                          static_cast<size_t>(valid_len) + 1);
 
-    CheckCancel(is_cancelled, cancel_context);
+    CheckCancel(is_cancelled, cancel_context, cancel_token);
 
     const std::string text =
         CleanFunASRText(runtime->tokenizer->Decode(generated_ids));
@@ -1942,6 +1973,12 @@ int MoMoTranscribeFunASRNano(
     return 1;
   } catch (const CancelledError &) {
     return -2;
+  } catch (const Ort::Exception &e) {
+    if ((cancel_token && cancel_token->IsCancelled()) ||
+        (is_cancelled && is_cancelled(cancel_context) != 0)) {
+      return -2;
+    }
+    SaveError(error, error_capacity, e.what());
   } catch (const std::exception &e) {
     SaveError(error, error_capacity, e.what());
   } catch (...) {

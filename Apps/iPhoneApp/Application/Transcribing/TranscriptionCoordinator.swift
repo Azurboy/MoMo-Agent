@@ -321,6 +321,10 @@ public actor TranscriptionCoordinator {
         requestWork()
     }
 
+    public func clearForegroundContinuation() {
+        foregroundContinuationAllowed = false
+    }
+
     /// Releases a finite scene continuation only after all admitted work has drained.
     public func finishForegroundContinuationIfIdle() -> Bool {
         guard systemSuspended, foregroundContinuationAllowed, worker == nil,
@@ -407,7 +411,9 @@ public actor TranscriptionCoordinator {
                     onFinished(TranscriptionExecutionCompletion(execution: handle, reason: .completed, failureCode: nil))
                     return handle
                 }
-                if currentBatch.state == .paused {
+                if currentBatch.state == .running, managed == nil, let orphanExecution = currentBatch.execution {
+                    _ = try? await archive.finishTranscriptionBatch(execution: orphanExecution, reason: .interrupted)
+                } else if currentBatch.state == .paused {
                     _ = try? await archive.resumeTranscriptionBatch(id: id)
                 }
             }

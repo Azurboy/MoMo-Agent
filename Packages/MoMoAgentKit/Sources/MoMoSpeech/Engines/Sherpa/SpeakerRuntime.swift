@@ -5,7 +5,7 @@ import MoMoSherpaBridge
 private func speakerAttemptIsCancelled(_ raw: UnsafeRawPointer?) -> Int32 {
     guard let raw else { return 0 }
     let attempt = Unmanaged<SpeechAttempt>.fromOpaque(raw).takeUnretainedValue()
-    return attempt.cancellationUptimeNanoseconds != nil ? 1 : 0
+    return attempt.pollCancellationOrPace() ? 1 : 0
 }
 
 /// Queue-confined 3D-Speaker ERes2NetV2 (192-d) + configurable DiariZen / PyAnnote Community-1 segmentation on ORT CPU.
@@ -75,16 +75,18 @@ final class SpeakerRuntime: @unchecked Sendable {
             var error = [CChar](repeating: 0, count: 2048)
             let written = withExtendedLifetime(attempt) {
                 let context = UnsafeRawPointer(Unmanaged.passUnretained(attempt).toOpaque())
-                return samples.withUnsafeBufferPointer { buffer in
-                    enrolledVectors.withUnsafeBufferPointer { vecBuf in
-                        enrolledPersonIDs.withUnsafeBufferPointer { idBuf in
-                            MoMoAnalyzeSpeakersWithProfiles(
-                                handle, buffer.baseAddress! + start, Int32(count),
-                                enrolledCount > 0 ? vecBuf.baseAddress : nil,
-                                enrolledCount > 0 ? idBuf.baseAddress : nil,
-                                enrolledCount,
-                                speakerAttemptIsCancelled, context,
-                                &turns, Int32(turns.count), &error, error.count)
+                return withNativeCancelToken(attempt) { cancelToken in
+                    samples.withUnsafeBufferPointer { buffer in
+                        enrolledVectors.withUnsafeBufferPointer { vecBuf in
+                            enrolledPersonIDs.withUnsafeBufferPointer { idBuf in
+                                MoMoAnalyzeSpeakersWithProfilesCancellable(
+                                    handle, buffer.baseAddress! + start, Int32(count),
+                                    enrolledCount > 0 ? vecBuf.baseAddress : nil,
+                                    enrolledCount > 0 ? idBuf.baseAddress : nil,
+                                    enrolledCount,
+                                    speakerAttemptIsCancelled, context, cancelToken,
+                                    &turns, Int32(turns.count), &error, error.count)
+                            }
                         }
                     }
                 }
@@ -122,12 +124,14 @@ final class SpeakerRuntime: @unchecked Sendable {
         var error = [CChar](repeating: 0, count: 2048)
         let rc = withExtendedLifetime(attempt) {
             let context = UnsafeRawPointer(Unmanaged.passUnretained(attempt).toOpaque())
-            return samples.withUnsafeBufferPointer { buffer in
-                MoMoExtractCleanVoiceprint(
-                    handle, buffer.baseAddress!, Int32(samples.count),
-                    speakerAttemptIsCancelled, context,
-                    &outEmbedding, Int32(outEmbedding.count), &outCleanSeconds,
-                    &error, error.count)
+            return withNativeCancelToken(attempt) { cancelToken in
+                samples.withUnsafeBufferPointer { buffer in
+                    MoMoExtractCleanVoiceprintCancellable(
+                        handle, buffer.baseAddress!, Int32(samples.count),
+                        speakerAttemptIsCancelled, context, cancelToken,
+                        &outEmbedding, Int32(outEmbedding.count), &outCleanSeconds,
+                        &error, error.count)
+                }
             }
         }
         if rc == -2 { throw SpeechError.cancelled }

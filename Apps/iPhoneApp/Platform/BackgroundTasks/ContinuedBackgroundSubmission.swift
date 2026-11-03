@@ -6,6 +6,7 @@ final class ContinuedBackgroundSubmission {
     private struct Request {
         let identifier: String
         let batchID: UUID
+        let requestedAt: Date
     }
     private enum State {
         case pending(Request), active(Request)
@@ -19,23 +20,27 @@ final class ContinuedBackgroundSubmission {
     private let submit: @Sendable (String) async throws -> Void
     private let cancel: @MainActor (String) -> Void
     private let failedAfterLaunch: @MainActor (String) -> Void
+    private let now: @MainActor () -> Date
     private var state: State?
+    private var cancelledIdentifiers: [String] = []
 
     init(prefix: String, register: @escaping @MainActor (String) -> Bool,
          submit: @escaping @Sendable (String) async throws -> Void,
          cancel: @escaping @MainActor (String) -> Void,
-         failedAfterLaunch: @escaping @MainActor (String) -> Void) {
+         failedAfterLaunch: @escaping @MainActor (String) -> Void,
+         now: @escaping @MainActor () -> Date = Date.init) {
         self.prefix = prefix
         self.register = register
         self.submit = submit
         self.cancel = cancel
         self.failedAfterLaunch = failedAfterLaunch
+        self.now = now
     }
 
     func request(batchID: UUID) async throws {
         guard state == nil else { throw BackgroundTranscriptionError.alreadyRequested }
         // There is no public unregister API. Never reuse an identifier: registering it twice kills the app.
-        let request = Request(identifier: prefix + UUID().uuidString, batchID: batchID)
+        let request = Request(identifier: prefix + UUID().uuidString, batchID: batchID, requestedAt: now())
         state = .pending(request)
         guard register(request.identifier) else {
             state = nil
@@ -76,9 +81,26 @@ final class ContinuedBackgroundSubmission {
         return request.identifier
     }
 
+    var pendingAge: TimeInterval? {
+        guard case .pending(let request) = state else { return nil }
+        return max(0, now().timeIntervalSince(request.requestedAt))
+    }
+
     var hasActiveGrant: Bool {
         if case .active = state { return true }
         return false
+    }
+
+    func wasCancelled(identifier: String) -> Bool {
+        cancelledIdentifiers.contains(identifier)
+    }
+
+    private func recordCancelled(_ identifier: String) {
+        guard !cancelledIdentifiers.contains(identifier) else { return }
+        cancelledIdentifiers.append(identifier)
+        if cancelledIdentifiers.count > 32 {
+            cancelledIdentifiers.removeFirst(cancelledIdentifiers.count - 32)
+        }
     }
 
     func complete(identifier: String) {
@@ -90,6 +112,7 @@ final class ContinuedBackgroundSubmission {
     func cancelPending(batchID: UUID) -> Bool {
         guard case .pending(let request) = state, request.batchID == batchID else { return false }
         state = nil
+        recordCancelled(request.identifier)
         cancel(request.identifier)
         return true
     }
@@ -99,6 +122,7 @@ final class ContinuedBackgroundSubmission {
         guard case .pending(let request) = state,
               identifier == nil || identifier == request.identifier else { return nil }
         state = nil
+        recordCancelled(request.identifier)
         cancel(request.identifier)
         return request.batchID
     }

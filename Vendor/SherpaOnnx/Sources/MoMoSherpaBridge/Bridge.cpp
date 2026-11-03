@@ -1,6 +1,20 @@
 #include "MoMoSherpaBridge.h"
+#include "CancelToken.hpp"
 #include <cstdio>
 #include <exception>
+#include <new>
+
+MoMoCancelToken *MoMoCreateCancelToken(void) {
+  return new (std::nothrow) MoMoCancelToken();
+}
+
+void MoMoTriggerCancelToken(MoMoCancelToken *token) {
+  if (token) token->Cancel();
+}
+
+void MoMoDestroyCancelToken(MoMoCancelToken *token) {
+  delete token;
+}
 
 namespace {
 void save_error(char *buffer, size_t capacity, const char *text) {

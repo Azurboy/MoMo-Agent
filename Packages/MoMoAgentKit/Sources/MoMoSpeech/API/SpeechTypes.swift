@@ -151,10 +151,12 @@ public enum SpeechExecutionEvent: Sendable {
 /// Cancellation invalidates queued work immediately; a synchronous native decode may finish first.
 public final class SpeechAttempt: @unchecked Sendable {
     typealias CancellationHandler = @Sendable () -> Void
+    typealias StepPollHandler = @Sendable (SpeechAttempt) -> Bool
     public let id: UUID
     private let lock = NSLock()
     private var cancelledAt: UInt64?
     private var cancellationHandlers: [UUID: CancellationHandler] = [:]
+    private var stepPoll: StepPollHandler?
     public init(id: UUID = UUID()) { self.id = id }
     public func cancel() {
         let handlers: [CancellationHandler] = lock.withLock {
@@ -177,6 +179,12 @@ public final class SpeechAttempt: @unchecked Sendable {
         return id
     }
     func removeCancellationObserver(_ id: UUID) { _ = lock.withLock { cancellationHandlers.removeValue(forKey: id) } }
+    func installStepPoll(_ handler: StepPollHandler?) { lock.withLock { stepPoll = handler } }
+    func pollCancellationOrPace() -> Bool {
+        let (cancelled, poll) = lock.withLock { (cancelledAt != nil, stepPoll) }
+        if cancelled { return true }
+        return poll?(self) ?? false
+    }
     var cancellationUptimeNanoseconds: UInt64? { lock.withLock { cancelledAt } }
     public func checkCancellation() throws {
         if cancellationUptimeNanoseconds != nil { throw SpeechError.cancelled }

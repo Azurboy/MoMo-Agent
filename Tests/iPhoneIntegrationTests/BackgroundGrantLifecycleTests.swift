@@ -211,6 +211,87 @@ final class BackgroundGrantLifecycleTests: XCTestCase {
         XCTAssertEqual(results[0].1, "archive_cancel_barrier_failed")
     }
 
+    func testContinuedProgressNeverRegressesAndAdvancesDuringLongWindow() throws {
+        let sessionID = UUID(), epochID = UUID()
+        let totalFrames: Int64 = 300 * 16_000
+        struct BatchWire: Encodable {
+            let id: UUID
+            let configurationFingerprint: String
+            let state: TranscriptionBatchState
+            let endReason: TranscriptionBatchEndReason?
+            let execution: TranscriptionBatchExecution?
+            let windowIDs: [String]
+            let coverage: [TranscriptionBatchCoverage]
+        }
+        func makeBatch(state: TranscriptionBatchState = .running,
+                       preparedSeconds: Int64,
+                       completedSeconds: Int64) throws -> TranscriptionBatch {
+            let frozen = [try FrameRange(start: 0, count: totalFrames)]
+            let prepared = preparedSeconds > 0 ? [try FrameRange(start: 0, count: preparedSeconds * 16_000)] : []
+            let completed = completedSeconds > 0 ? [try FrameRange(start: 0, count: completedSeconds * 16_000)] : []
+            let wire = BatchWire(
+                id: UUID(),
+                configurationFingerprint: String(repeating: "a", count: 64),
+                state: state,
+                endReason: nil,
+                execution: nil,
+                windowIDs: ["w1", "w2"],
+                coverage: [
+                    TranscriptionBatchCoverage(
+                        sessionID: sessionID,
+                        epochID: epochID,
+                        timebaseHz: 16_000,
+                        frozen: frozen,
+                        noSpeech: [],
+                        prepared: prepared,
+                        completed: completed,
+                        removed: []
+                    )
+                ]
+            )
+            let data = try JSONEncoder().encode(wire)
+            return try JSONDecoder().decode(TranscriptionBatch.self, from: data)
+        }
+
+        // Initial 1% (100 / 10_000) must not regress even on a 300-second batch with 0 completed seconds.
+        var highWater: Int64 = 100
+        var anchor: Int64 = 100
+        let initial = PhoneBackgroundTasks.computeContinuedProgressUnits(
+            batch: try makeBatch(preparedSeconds: 0, completedSeconds: 0),
+            activeWorkInFlight: true,
+            advanceHeartbeat: false,
+            previousHighWater: highWater,
+            previousBaseAnchor: anchor
+        )
+        XCTAssertGreaterThanOrEqual(initial.completedUnits, 100)
+        highWater = initial.completedUnits
+        anchor = initial.baseAnchor
+
+        // Heartbeats during a 30-second window must monotonically advance without stalling or reaching 100%.
+        for _ in 0..<15 {
+            let step = PhoneBackgroundTasks.computeContinuedProgressUnits(
+                batch: try makeBatch(preparedSeconds: 60, completedSeconds: 0),
+                activeWorkInFlight: true,
+                advanceHeartbeat: true,
+                previousHighWater: highWater,
+                previousBaseAnchor: anchor
+            )
+            XCTAssertGreaterThan(step.completedUnits, highWater)
+            XCTAssertLessThan(step.completedUnits, PhoneBackgroundTasks.progressScale)
+            highWater = step.completedUnits
+            anchor = step.baseAnchor
+        }
+
+        let finished = PhoneBackgroundTasks.computeContinuedProgressUnits(
+            batch: try makeBatch(state: .completed, preparedSeconds: 300, completedSeconds: 300),
+            activeWorkInFlight: false,
+            advanceHeartbeat: false,
+            previousHighWater: highWater,
+            previousBaseAnchor: anchor
+        )
+        XCTAssertEqual(finished.completedUnits, PhoneBackgroundTasks.progressScale)
+    }
+
     private enum TestFailure: Error { case stopFailed }
 }
 
