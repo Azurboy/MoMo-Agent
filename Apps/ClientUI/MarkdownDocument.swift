@@ -16,6 +16,18 @@ struct MarkdownDocument {
 
     let blocks: [Block]
 
+    static func plainTextPreview(_ markdown: String, limit: Int = 256) -> String {
+        let plain: String
+        if let document = try? MarkdownDocument(markdown), !document.blocks.isEmpty {
+            plain = document.blocks.map(\.plainText).joined(separator: "  ")
+        } else {
+            plain = markdown
+        }
+        return String(plain.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(limit))
+    }
+
     init(_ markdown: String) throws {
         let attributed = try AttributedString(markdown: markdown,
             options: .init(interpretedSyntax: .full, failurePolicy: .throwError))
@@ -51,7 +63,7 @@ struct MarkdownDocument {
                case .listItem(let ordinal) = item.kind {
                 marker = ordered ? "\(ordinal)." : "•"
             }
-            result.append(Block(id: components.first?.identity ?? 0,
+            result.append(Block(id: components.first?.identity ?? -(result.count + 1),
                 text: AttributedString(attributed[range]), headingLevel: heading,
                 listDepth: listDepth, listMarker: marker, isQuote: quote, isCode: code))
         }

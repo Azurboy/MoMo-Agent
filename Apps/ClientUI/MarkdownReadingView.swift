@@ -9,9 +9,12 @@ struct MarkdownReadingView: View, Equatable {
         VStack(alignment: .leading, spacing: 0) {
             switch document {
             case .success(let document):
+                let firstID = document.blocks.first?.id
+                let lastID = document.blocks.last?.id
                 ForEach(document.blocks) { block in
                     MarkdownBlockView(block: block,
-                        isFirst: block.id == document.blocks.first?.id,
+                        isFirst: block.id == firstID,
+                        isLast: block.id == lastID,
                         accessibilityID: "\(accessibilityID).block.\(block.id)")
                 }
             case .failure:
@@ -32,6 +35,7 @@ struct MarkdownReadingView: View, Equatable {
 private struct MarkdownBlockView: View {
     let block: MarkdownDocument.Block
     let isFirst: Bool
+    let isLast: Bool
     let accessibilityID: String
     @ScaledMetric(relativeTo: .body) private var indent = 20.0
     @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 16.0
@@ -61,7 +65,7 @@ private struct MarkdownBlockView: View {
             }
         }
         .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing : 0)
-        .padding(.bottom, block.headingLevel != nil ? headingSpacing : (block.listDepth > 0 ? listSpacing : paragraphSpacing))
+        .padding(.bottom, isLast ? 0 : (block.headingLevel != nil ? headingSpacing : (block.listDepth > 0 ? listSpacing : paragraphSpacing)))
     }
 
     private var textStyle: PhoneTextStyle {

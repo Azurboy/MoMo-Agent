@@ -262,3 +262,89 @@ private func linkEnvelope() throws -> ManifestEnvelope {
     registry.completeAll()
     #expect(nextCount == 1 && registry.isEmpty)
 }
+
+@Test func scanFileBatchAdvancesPastUnacknowledgedHeadRetriesWithoutStarvingNewChunks() async throws {
+    struct Item {
+        let sequence: Int64
+        let envelope: ManifestEnvelope
+    }
+    let items = try (1...48).map { Item(sequence: Int64($0), envelope: try linkEnvelope()) }
+    var state = LinkSubmissionState()
+    state.update(activation: .activated, isReachable: false)
+    var now: TimeInterval = 100
+    var cursor: Int64 = 0
+
+    // Upload the first 32 chunks without receipts (e.g. companion update staged on iPhone).
+    for _ in 0..<8 {
+        let outcome = try #require(await scanFileBatch(
+            after: cursor, maximumScanned: 32,
+            hasDueRetries: { state.hasDueFileRetries(now: now) },
+            sequenceOf: \.sequence,
+            loadPage: { after in Array(items.filter { $0.sequence > after }.prefix(4)) },
+            submit: { item in try state.reserve(item.envelope, now: now) }
+        ))
+        cursor = outcome.cursor
+        for item in items where state.hasRetryableFiles == false || item.sequence <= cursor {
+            _ = state.didFinish(chunkID: item.envelope.manifest.chunkID, now: now)
+        }
+        now += 1
+    }
+    #expect(cursor == 32)
+    // Advance past the 120s receipt wait so chunks 1..32 constantly report due retries.
+    now = 300
+    #expect(state.hasDueFileRetries(now: now))
+
+    var newlySubmitted: [Int64] = []
+    for _ in 0..<4 {
+        var batchSubmitted: [Item] = []
+        let outcome = try #require(await scanFileBatch(
+            after: cursor, maximumScanned: 32,
+            hasDueRetries: { state.hasDueFileRetries(now: now) },
+            sequenceOf: \.sequence,
+            loadPage: { after in Array(items.filter { $0.sequence > after }.prefix(4)) },
+            submit: { item in
+                let result = try state.reserve(item.envelope, now: now)
+                if result == .submitted { batchSubmitted.append(item) }
+                return result
+            }
+        ))
+        cursor = outcome.cursor
+        newlySubmitted.append(contentsOf: batchSubmitted.map(\.sequence))
+        for item in batchSubmitted {
+            state.didFinish(chunkID: item.envelope.manifest.chunkID, now: now)
+        }
+    }
+    #expect(newlySubmitted == Array(33...48))
+
+    // Once the tail (48) has been reached, the next pass wraps around to 0 to service due retries.
+    var wrappedSubmitted: [Int64] = []
+    let wrappedOutcome = try #require(await scanFileBatch(
+        after: cursor, maximumScanned: 32,
+        hasDueRetries: { state.hasDueFileRetries(now: now) },
+        sequenceOf: \.sequence,
+        loadPage: { after in Array(items.filter { $0.sequence > after }.prefix(4)) },
+        submit: { item in
+            let result = try state.reserve(item.envelope, now: now)
+            if result == .submitted { wrappedSubmitted.append(item.sequence) }
+            return result
+        }
+    ))
+    #expect(wrappedOutcome.wrapped)
+    #expect(wrappedSubmitted == [1, 2, 3, 4])
+}
+
+@Test func controlReplyMetadataRoundTripsAndPreservesBackwardCompatibility() throws {
+    let ackOnly = try LinkWireFormat.controlReplyMetadata(preserved: true)
+    #expect(ackOnly["control_preserved"] as? Bool == true)
+    #expect(try LinkWireFormat.controlReplyMessage(ackOnly) == nil)
+
+    let identity = ControlMessage.receiverIdentity(ReceiverIdentity(
+        messageID: UUID(), receiverDeviceID: UUID(), libraryInstanceID: UUID()))
+    let withReply = try LinkWireFormat.controlReplyMetadata(preserved: true, reply: identity)
+    #expect(withReply["control_preserved"] as? Bool == true)
+    #expect(try LinkWireFormat.controlReplyMessage(withReply) == identity)
+
+    let rejected = try LinkWireFormat.controlReplyMetadata(preserved: false, reply: identity)
+    #expect(rejected["control_preserved"] as? Bool == false)
+    #expect(try LinkWireFormat.controlReplyMessage(rejected) == nil)
+}

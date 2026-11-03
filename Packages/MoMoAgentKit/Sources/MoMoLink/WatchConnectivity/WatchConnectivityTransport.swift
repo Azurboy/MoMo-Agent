@@ -58,6 +58,7 @@ private struct FileQueueDiagnostic: Encodable {
     nonisolated let preserveControl: @Sendable (ControlMessage) throws -> Void
     nonisolated let receiveAudioBlock: (@Sendable (AudioBlock) async throws -> AudioBlockReply)?
     private nonisolated let statusReplyProvider: (@Sendable (Bool) async throws -> StatusSnapshot)?
+    private nonisolated let controlReplyProvider: (@Sendable (ControlMessage) async throws -> ControlMessage?)?
     var audioBlockTask: Task<Void, Never>?
     var audioBlockChunkID: UUID?
     var resumableAudioBlockChunkID: UUID?
@@ -77,6 +78,7 @@ private struct FileQueueDiagnostic: Encodable {
                 event: @escaping @Sendable (LinkEvent) -> Void, diagnosticsURL: URL? = nil,
                 receiveAudioBlock: (@Sendable (AudioBlock) async throws -> AudioBlockReply)? = nil,
                 statusReplyProvider: (@Sendable (Bool) async throws -> StatusSnapshot)? = nil,
+                controlReplyProvider: (@Sendable (ControlMessage) async throws -> ControlMessage?)? = nil,
                 controlScopeID: UUID? = nil) throws {
         guard WCSession.isSupported() else { throw LinkError.unsupported }
         self.session = .default
@@ -85,6 +87,7 @@ private struct FileQueueDiagnostic: Encodable {
         self.event = event
         self.receiveAudioBlock = receiveAudioBlock
         self.statusReplyProvider = statusReplyProvider
+        self.controlReplyProvider = controlReplyProvider
         self.diagnosticsURL = diagnosticsURL
         self.controlDiagnosticsURL = diagnosticsURL?.deletingLastPathComponent().appendingPathComponent("control-transfer-diagnostic.json")
         self.attemptsURL = diagnosticsURL?.deletingLastPathComponent().appendingPathComponent("file-transfer-attempts.json")
@@ -332,7 +335,7 @@ private struct FileQueueDiagnostic: Encodable {
                         guard gate.install(continuation) else { return }
                         gate.startDeadline(failure: ControlTransferReplyFailure.localDeadline)
                         self.session.sendMessage(metadata, replyHandler: { @Sendable [weak self, session = self.session] reply in
-                            let preserved = reply["control_preserved"] as? Bool == true
+                            let preserved = self?.ingestInteractiveControlReply(reply) ?? (reply["control_preserved"] as? Bool == true)
                             let observation = Self.controlObservation(session)
                             if !gate.finish(.success(ControlTransferReply(preserved: preserved, observation: observation))), preserved {
                                 // A late persisted-Inbox reply still proves custody without finishing a newer attempt.
@@ -696,8 +699,45 @@ private struct FileQueueDiagnostic: Encodable {
             receiveAudioBlockData(data, replyHandler: replyHandler)
             return
         }
+        if message["control"] != nil, let controlReplyProvider {
+            let incoming: ControlMessage
+            do {
+                incoming = try LinkWireFormat.controlMessage(message)
+                try preserveControl(incoming)
+                event(.controlPreserved)
+            } catch {
+                event(.failed(TransportFailure(error)))
+                replyHandler(["control_preserved": false])
+                return
+            }
+            let reply = LinkReplyHandler(replyHandler)
+            Task {
+                do {
+                    let response = try await controlReplyProvider(incoming)
+                    reply.send(try LinkWireFormat.controlReplyMetadata(preserved: true, reply: response))
+                } catch {
+                    reply.send(["control_preserved": true])
+                    event(.failed(TransportFailure(error)))
+                }
+            }
+            return
+        }
         let preserved = receiveInteractive(message)
         replyHandler(["control_preserved": preserved])
+    }
+
+    @discardableResult
+    public nonisolated func ingestInteractiveControlReply(_ reply: [String: Any]) -> Bool {
+        guard reply["control_preserved"] as? Bool == true else { return false }
+        do {
+            if let response = try LinkWireFormat.controlReplyMessage(reply) {
+                try preserveControl(response)
+                event(.controlPreserved)
+            }
+        } catch {
+            event(.failed(TransportFailure(error)))
+        }
+        return true
     }
 
     private nonisolated func receivePeerStatusReply(_ metadata: [String: Any]) {
