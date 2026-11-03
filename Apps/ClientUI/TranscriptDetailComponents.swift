@@ -80,11 +80,12 @@ struct TimelineSummaryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("总结", systemImage: "text.alignleft").phoneText(.menu).fontWeight(.semibold)
-            Text(text).phoneText(.body).lineSpacing(4).textSelection(.enabled)
+            MarkdownReadingView(markdown: text, accessibilityID: "timeline.summary.content").equatable()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
         .background(MoMoPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("timeline.summary")
     }
 }

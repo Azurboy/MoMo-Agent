@@ -195,4 +195,29 @@ final class MarkdownReadingTests: XCTestCase {
         do { try await archive.validateSources([resolved]); XCTFail("Deleted sources must not open") }
         catch ArchiveError.sessionDeleted { }
     }
+
+    func testTimelineSummaryRendersMarkdownAndPreviewStripsSyntax() throws {
+        let summary = """
+        本周对齐了产品首发节奏。
+
+        ### 核心结论
+
+        - 确认 **周五下午** 完成联调
+        - 跟进手表的跨版本无感同步
+        """
+        let preview = MarkdownDocument.plainTextPreview(summary)
+        XCTAssertEqual(preview, "本周对齐了产品首发节奏。  核心结论  确认 周五下午 完成联调  跟进手表的跨版本无感同步")
+        XCTAssertFalse(preview.contains("###"))
+        XCTAssertFalse(preview.contains("**"))
+
+        let renderer = ImageRenderer(
+            content: TimelineSummaryView(text: summary)
+                .frame(width: 350)
+                .padding(16)
+                .background(.white)
+                .environment(\.dynamicTypeSize, .large)
+        )
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 80)
+    }
 }

@@ -132,7 +132,7 @@ struct DesktopSources: View {
                         Button { selectedID = item.id } label: {
                             ClientTranscriptRow(
                                 time: timeLabel(item),
-                                preview: item.summary ?? item.preview ?? "",
+                                preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
                                 status: nil,
                                 connected: item.id != visible.last?.id,
                                 isFinal: true

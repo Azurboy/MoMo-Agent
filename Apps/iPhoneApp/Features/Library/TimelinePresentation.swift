@@ -138,7 +138,10 @@ enum TimelinePresentation {
     }
 
     static func preview(_ window: TimelineWindow, summary: String?) -> String {
-        if window.canSummarize, let summary { return summary }
+        if window.canSummarize, let summary {
+            let preview = MarkdownDocument.plainTextPreview(summary)
+            if !preview.isEmpty { return preview }
+        }
         var text = ""
         for paragraph in window.paragraphs where paragraph.hasReadableText {
             if !text.isEmpty { text += "  " }
