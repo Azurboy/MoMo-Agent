@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
+import { SettingsSchema, assessmentOutcome, directionAllowed, settledDirection, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
+import { mandateInstructions } from '../src/executor/dsh.ts'
 import type { MandateBasis } from '../src/core/index.ts'
 import { migrateSettings } from '../src/app/migration.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -299,6 +300,70 @@ describe('assessment outcomes', () => {
     expect(settingsPolicy(auto, scope).admitsInferred(['unknown'])).toBe(false)
     expect(settingsPolicy(auto, scope).admitsInferred([])).toBe(false)
     expect(settingsPolicy(settings('observe'), scope).admitsInferred([enabled])).toBe(false)
+  })
+  it('admits exploratory directions only on rules marked exploratory, while keeping settled-direction gates for standard rules', () => {
+    const dual = (mode: 'auto' | 'observe') => SettingsSchema.parse({
+      eval: { mode },
+      policy: {
+        rules: [
+          { id: 'research', name: 'Research & synthesis', enabled: true, exploratory: true, instruction: 'Synthesize options in workspace.' },
+          { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix concrete copy typos.' },
+        ],
+      },
+    })
+    const openDirection = {
+      implementation_requested: false,
+      target_basis: 'exploratory',
+      requires_design_decision: true,
+      evidence: 'Discussed startup positioning and asked to compare options.',
+    }
+    expect(settledDirection(openDirection)).toBe(false)
+    expect(directionAllowed(openDirection)).toBe(true)
+    expect(directionAllowed({ ...openDirection, target_basis: 'undetermined' })).toBe(false)
+
+    // Standard non-exploratory rule alone still rejects open/exploratory direction with directionUnsettled.
+    const onlyCopy = {
+      decision: 'accept' as const,
+      direction: openDirection,
+      title: 'Fix typo',
+      scope: 'repo',
+      reason: 'copy',
+      intent_evidence: 'quote',
+      worktree_name: 'fix-typo',
+      rule_assessments: [
+        { rule_id: 'research', matched: false, reason: 'not research' },
+        { rule_id: 'copy', matched: true, reason: 'copy' },
+      ],
+    }
+    expect(assessmentOutcome(onlyCopy, dual('auto'), 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'directionUnsettled' } })
+
+    // Exploratory rule accepts grounded exploratory direction in auto mode (and records would_accept in observe mode),
+    // filtering out any non-exploratory rule from the admitted mandate when direction is not settled.
+    const bothMatched = {
+      ...onlyCopy,
+      title: '创业方向调研与对比',
+      worktree_name: 'startup-options-brief',
+      scope: 'workspace brief',
+      rule_assessments: [
+        { rule_id: 'research', matched: true, reason: 'substantive startup synthesis' },
+        { rule_id: 'copy', matched: true, reason: 'incidental' },
+      ],
+    }
+    expect(assessmentOutcome(bothMatched, dual('auto'), 'inferred')).toMatchObject({
+      kind: 'accept',
+      rules: ['research'],
+      name: 'startup-options-brief',
+    })
+    expect(assessmentOutcome(bothMatched, dual('observe'), 'inferred')).toMatchObject({
+      kind: 'ignore',
+      reason: { code: 'observed' },
+      audit: { would_accept: true },
+    })
+
+    // Worker mandate instructions relax repo-only product-decision drop rules for exploratory tickets only.
+    const rules = dual('auto').policy.rules
+    expect(mandateInstructions({ strength: 'inferred', basis: { rules: ['research'] } }, rules)).toContain('exploratory proactive authorization')
+    expect(mandateInstructions({ strength: 'inferred', basis: { rules: ['copy'] } }, rules)).toContain('small change internal to one module')
   })
 })
 

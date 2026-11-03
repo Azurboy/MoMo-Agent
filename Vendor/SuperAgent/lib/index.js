@@ -1946,20 +1946,26 @@ const AdmissionDirectionSchema = z.object({
 	target_basis: z.enum([
 		"specified",
 		"existing-standard",
+		"exploratory",
 		"undetermined"
 	]),
 	requires_design_decision: z.boolean(),
 	evidence: z.string().trim().min(1).max(700)
 }).strict();
 /** Check whether an assessment established implementation intent and a settled target without open design decisions. */
+function settledDirection(value) {
+	const result = AdmissionDirectionSchema.safeParse(value);
+	return result.success && result.data.implementation_requested && (result.data.target_basis === "specified" || result.data.target_basis === "existing-standard") && !result.data.requires_design_decision;
+}
+/** Check whether an assessment established an admissible direction (settled implementation, or a grounded exploratory target). */
 function directionAllowed(value) {
 	const result = AdmissionDirectionSchema.safeParse(value);
-	return result.success && result.data.implementation_requested && result.data.target_basis !== "undetermined" && !result.data.requires_design_decision;
+	return result.success && result.data.target_basis !== "undetermined";
 }
 /**
 * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
-* Acceptance requires a settled direction, at least one matched enabled rule, and `intent_evidence`, and accepts an
-* inferred candidate only in `auto` mode (otherwise recording it as `would_accept`).
+* Standard rules require `settledDirection`; rules marked `exploratory: true` also accept grounded exploratory targets
+* (`target_basis !== 'undetermined'`, even when product/design choices remain open or no direct code edit was requested).
 * @throws when `rule_assessments` does not cover every enabled rule exactly once, or an accept omits `intent_evidence`.
 */
 function assessmentOutcome(assessment, settings, strength) {
@@ -1993,6 +1999,14 @@ function assessmentOutcome(assessment, settings, strength) {
 		audit,
 		reason: { code: "noRuleMatched" }
 	};
+	const settled = settledDirection(assessment.direction);
+	const exploratoryIds = new Set(enabled.filter((rule) => rule.exploratory).map((rule) => rule.id));
+	const admitted = settled ? matches : matches.filter((item) => exploratoryIds.has(item.rule_id));
+	if (!admitted.length) return {
+		kind: "ignore",
+		audit,
+		reason: { code: "directionUnsettled" }
+	};
 	if (!assessment.intent_evidence) throw new Error("Acceptance requires intent_evidence");
 	const { title, scope, worktree_name: name } = assessment;
 	if (strength === "inferred" && settings.eval.mode !== "auto") {
@@ -2020,7 +2034,7 @@ function assessmentOutcome(assessment, settings, strength) {
 		scope,
 		reason: assessment.reason,
 		...assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {},
-		rules: matches.map((match) => match.rule_id),
+		rules: admitted.map((match) => match.rule_id),
 		audit,
 		...name ? { name } : {}
 	};
@@ -2041,6 +2055,7 @@ const RuleSchema = z.object({
 	id: RuleIdSchema,
 	name: z.string().trim().min(1).max(LIMITS.ruleName),
 	enabled: z.boolean(),
+	exploratory: z.boolean().optional(),
 	instruction: z.string().trim().min(1).max(LIMITS.ruleInstruction)
 }).strict();
 const RoleModelSchema = z.object({
@@ -5209,10 +5224,13 @@ const ticketWorktreeName = (name, id) => `${WorktreeNameSchema.parse(name)}-${id
 const sourceTrigger = (host, ticket) => host.store.triggers.get(ticket.origin.triggerId);
 /**
 * Returns additional system-prompt mandate instructions for a worker beyond the request: for work accepted proactively under
-* rules (`strength === 'inferred'`), restricts authorization to small internal changes within the rule scope; returns `''` for explicit requests.
+* rules (`strength === 'inferred'`), restricts non-exploratory rules to small internal changes and grants exploratory rules
+* workspace-scoped synthesis without repository mutation or unsolicited questions; returns `''` for explicit requests.
 */
-function mandateInstructions(mandate) {
-	return mandate.strength === "inferred" ? "This ticket has limited proactive authorization. Independently verify that it is a small change internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product decisions or clarification, stop and report dropped; do not expand scope." : "";
+function mandateInstructions(mandate, rules) {
+	if (mandate.strength !== "inferred") return "";
+	const matched = mandate.basis?.rules ?? [];
+	return !!rules && matched.length > 0 && matched.some((id) => rules.some((rule) => rule.id === id && rule.exploratory)) ? "This ticket has exploratory proactive authorization within the matched rule scope. Synthesize grounded research, option trade-offs, or workspace deliverables without mutating existing user repositories or asking unsolicited clarification; if investigation finds no substantive value beyond the conversation, stop and report dropped." : "This ticket has limited proactive authorization. Independently verify that it is a small change internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product decisions or clarification, stop and report dropped; do not expand scope.";
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 function ticketExecution(ticket, outcome, settings, stateDir) {
@@ -9450,7 +9468,7 @@ var Sessions = class {
 				const version = this.promptFor(agent, context.signal !== void 0);
 				const current = ticket && host.store.tickets.get(ticket.id);
 				const composed = host.prompts.compose(version.config, master ? "orchestrator" : "worker", current ? host.environment(current) : void 0);
-				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ""}`;
+				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : ""}`;
 			},
 			...master ? { complete: true } : {}
 		}));

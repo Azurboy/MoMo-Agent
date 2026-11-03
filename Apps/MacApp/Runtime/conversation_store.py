@@ -2,13 +2,231 @@
 
 Hermes SessionDB remains the only execution authority and memory store.
 """
+import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import time
+import uuid
 from aiohttp import web
 from conversation_events import ConversationEvents
+
+_DELIVERABLE_DOC_TYPES = {
+    '.html': 'text/html',
+    '.htm': 'text/html',
+    '.md': 'text/markdown',
+    '.markdown': 'text/markdown',
+    '.csv': 'text/csv',
+    '.json': 'application/json',
+    '.txt': 'text/plain',
+}
+_DELIVERABLE_IMAGE_TYPES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+}
+_AUTO_SCAN_EXTENSIONS = ('.html', '.htm', '.md', '.markdown', '.csv', '.png', '.jpg', '.jpeg')
+_IGNORED_FILENAMES = frozenset({
+    'memory.md', 'user.md', 'package.json', 'pnpm-lock.yaml', 'package-lock.json',
+    'tsconfig.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml',
+})
+_IGNORED_DIRNAMES = frozenset({'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'attachments'})
+_ABS_PATH_PATTERN = re.compile(
+    r"""(?P<path>(?:\$DSH_SUPERAGENT_MOMO_WORKSPACE|/(?:Users|private|var|tmp|Volumes))/[^\s`"'<>()\[\]{}，。；：！？）》】]+)"""
+)
+_REL_FILE_PATTERN = re.compile(
+    r"""(?<![A-Za-z0-9_/:.-])(?P<rel>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_\u4e00-\u9fff.-]+\.(?:html?|md|markdown|csv|json|txt|png|jpe?g))""",
+    re.IGNORECASE,
+)
+
+
+def _strip_path_punctuation(raw: str) -> str:
+    return raw.strip().rstrip(".,;:!?)>]}\"'`，。；：！？）》】")
+
+
+def collect_deliverable_attachments(
+    text: str | None,
+    *,
+    allowed_roots: list[Path] | tuple[Path, ...],
+    extra_dirs: list[Path] | tuple[Path, ...] = (),
+    source_key: str = "",
+    max_items: int = 4,
+    max_text_bytes: int = 512_000,
+    max_image_bytes: int = 1_048_576,
+) -> list[dict] | None:
+    """Resolve sandboxed workspace deliverable files (.html, .md, etc.) into AgentAttachment payloads."""
+    resolved_roots: list[Path] = []
+    for root in allowed_roots:
+        try:
+            r = Path(root).expanduser().resolve()
+        except OSError:
+            continue
+        if r.is_dir() and r not in resolved_roots:
+            resolved_roots.append(r)
+    if not resolved_roots or max_items <= 0:
+        return None
+
+    workspace_root = resolved_roots[0]
+    resolved_extra_dirs: list[Path] = []
+    for d in extra_dirs:
+        try:
+            rd = Path(d).expanduser().resolve()
+        except OSError:
+            continue
+        if rd.is_dir() and any(rd.is_relative_to(r) for r in resolved_roots) and rd not in resolved_extra_dirs:
+            resolved_extra_dirs.append(rd)
+
+    def _is_allowed_file(candidate: Path, *, allow_aux_doc: bool) -> Path | None:
+        try:
+            rp = candidate.expanduser().resolve()
+        except OSError:
+            return None
+        if not rp.is_file():
+            return None
+        matched_root = next((r for r in resolved_roots if rp.is_relative_to(r)), None)
+        if matched_root is None:
+            return None
+        rel_parts = rp.relative_to(matched_root).parts
+        if any(part.startswith('.') or part.lower() in _IGNORED_DIRNAMES for part in rel_parts[:-1]):
+            return None
+        if rp.name.startswith('.') or rp.name.lower() in _IGNORED_FILENAMES:
+            return None
+        ext = rp.suffix.lower()
+        if ext in _DELIVERABLE_IMAGE_TYPES:
+            return rp
+        if ext in _DELIVERABLE_DOC_TYPES:
+            if not allow_aux_doc and ext not in _AUTO_SCAN_EXTENSIONS:
+                return None
+            return rp
+        return None
+
+    ordered_files: list[Path] = []
+    seen_paths: set[Path] = set()
+
+    def _add(p: Path | None) -> None:
+        if p is not None and p not in seen_paths:
+            seen_paths.add(p)
+            ordered_files.append(p)
+
+    body = text or ""
+    if body:
+        for m in _ABS_PATH_PATTERN.finditer(body):
+            raw_p = _strip_path_punctuation(m.group("path"))
+            if raw_p.startswith("$DSH_SUPERAGENT_MOMO_WORKSPACE"):
+                sub = raw_p[len("$DSH_SUPERAGENT_MOMO_WORKSPACE") :].lstrip("/")
+                cand = workspace_root / sub if sub else workspace_root
+            else:
+                cand = Path(raw_p)
+            _add(_is_allowed_file(cand, allow_aux_doc=True))
+
+        search_bases = [*resolved_extra_dirs, *resolved_roots]
+        for m in _REL_FILE_PATTERN.finditer(body):
+            rel = _strip_path_punctuation(m.group("rel")).lstrip("/")
+            if not rel or ".." in Path(rel).parts:
+                continue
+            for base in search_bases:
+                found = _is_allowed_file(base / rel, allow_aux_doc=True)
+                if found is not None:
+                    _add(found)
+                    break
+
+    # Scan ticket-specific directories (depth <= 2) for generated .html / .md deliverables.
+    extra_candidates: list[tuple[int, float, Path]] = []
+    ext_priority = {'.html': 0, '.htm': 0, '.md': 1, '.markdown': 1, '.csv': 2, '.png': 3, '.jpg': 3, '.jpeg': 3}
+    for ed in resolved_extra_dirs:
+        try:
+            entries = [ed, *[child for child in ed.iterdir() if child.is_dir() and not child.name.startswith('.') and child.name.lower() not in _IGNORED_DIRNAMES]]
+        except OSError:
+            continue
+        for folder in entries:
+            try:
+                children = list(folder.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                rp = _is_allowed_file(child, allow_aux_doc=False)
+                if rp is None or rp in seen_paths:
+                    continue
+                try:
+                    mtime = rp.stat().st_mtime
+                except OSError:
+                    continue
+                extra_candidates.append((ext_priority.get(rp.suffix.lower(), 9), -mtime, rp))
+
+    extra_candidates.sort(key=lambda item: (item[0], item[1]))
+    for _, _, rp in extra_candidates:
+        _add(rp)
+
+    if not ordered_files:
+        return None
+
+    attachments: list[dict] = []
+    total_text_bytes = 0
+    for rp in ordered_files:
+        if len(attachments) >= max_items:
+            break
+        try:
+            st = rp.stat()
+        except OSError:
+            continue
+        if st.st_size <= 0:
+            continue
+        ext = rp.suffix.lower()
+        att_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"momo-deliverable:{source_key}:{rp}:{st.st_mtime_ns}:{st.st_size}",
+            )
+        )
+        if ext in _DELIVERABLE_DOC_TYPES:
+            if st.st_size > max_text_bytes or total_text_bytes + st.st_size > max_text_bytes * 2:
+                continue
+            try:
+                raw_bytes = rp.read_bytes()
+            except OSError:
+                continue
+            decoded = raw_bytes.decode("utf-8", errors="replace")
+            if not decoded.strip():
+                continue
+            encoded_bytes = len(decoded.encode("utf-8"))
+            if encoded_bytes > max_text_bytes:
+                continue
+            total_text_bytes += encoded_bytes
+            attachments.append(
+                {
+                    "id": att_id,
+                    "name": rp.name,
+                    "kind": "document",
+                    "media_type": _DELIVERABLE_DOC_TYPES[ext],
+                    "byte_count": encoded_bytes,
+                    "text": decoded,
+                }
+            )
+        elif ext in _DELIVERABLE_IMAGE_TYPES:
+            if st.st_size > max_image_bytes:
+                continue
+            try:
+                raw_bytes = rp.read_bytes()
+            except OSError:
+                continue
+            if not raw_bytes:
+                continue
+            b64 = base64.b64encode(raw_bytes).decode("ascii")
+            item = {
+                "id": att_id,
+                "name": rp.name,
+                "kind": "image",
+                "media_type": _DELIVERABLE_IMAGE_TYPES[ext],
+                "byte_count": len(raw_bytes),
+                "data": b64,
+            }
+            if len(raw_bytes) <= 64_000:
+                item["preview"] = b64
+            attachments.append(item)
+
+    return attachments or None
 
 class ProductStore:
     # Inputs survive restarts and are never pruned. Keep this minimum guarantee
@@ -127,13 +345,19 @@ class ProductStore:
         data = [self._format_message(row) for row in rows]
         return dict(data=data, next_cursor=(data[0 if before is not None else -1]['seq'] if data else cursor), has_more=more)
 
-    def append_assistant(self, key, content, created, run_id=None):
+    def append_assistant(self, key, content, created, run_id=None, attachments=None):
+        attachments_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         with self.db:
-            found = self.db.execute('SELECT id FROM messages WHERE source_key=?', (key,)).fetchone()
-            if found: return found[0]
+            found = self.db.execute('SELECT id, attachments_json FROM messages WHERE source_key=?', (key,)).fetchone()
+            if found:
+                if attachments_json and not found['attachments_json']:
+                    self.db.execute('UPDATE messages SET attachments_json=? WHERE id=?', (attachments_json, found['id']))
+                return found['id']
             identifier = 'assistant-' + hashlib.sha256(key.encode()).hexdigest()[:32]
-            self.db.execute('INSERT INTO messages(id,role,content,created_at,run_id,source_key) VALUES(?,?,?,?,?,?)',
-                            (identifier, 'assistant', content, created, run_id, key))
+            self.db.execute(
+                'INSERT INTO messages(id,role,content,created_at,run_id,source_key,attachments_json) VALUES(?,?,?,?,?,?,?)',
+                (identifier, 'assistant', content, created, run_id, key, attachments_json),
+            )
             self.message_event(identifier)
         return identifier
 
@@ -146,24 +370,31 @@ class ProductStore:
                 (identifier, role, content, created, run_id, key, session))
             self.message_event(identifier)
 
-    def project_assistant(self, admission, ordinal, content, created, run_id):
+    def project_assistant(self, admission, ordinal, content, created, run_id, attachments=None):
         # Interim callbacks and native persisted messages have independent ordinals.
         # Never let the first acknowledgement consume the final answer's identity.
         key = f'native-turn:{admission}:{ordinal}'
+        attachments_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
         with self.db:
-            found = self.db.execute('SELECT id FROM messages WHERE source_key=?', (key,)).fetchone()
-            if found: return found['id']
-            previous = self.db.execute('SELECT id,content FROM messages WHERE source_key=?',
+            found = self.db.execute('SELECT id, attachments_json FROM messages WHERE source_key=?', (key,)).fetchone()
+            if found:
+                if attachments_json and not found['attachments_json']:
+                    self.db.execute('UPDATE messages SET attachments_json=? WHERE id=?', (attachments_json, found['id']))
+                return found['id']
+            previous = self.db.execute('SELECT id,content,attachments_json FROM messages WHERE source_key=?',
                                        (f'turn:{admission}:{ordinal}',)).fetchone()
             if previous is None or previous['content'] != content:
-                previous = self.db.execute("SELECT id,content FROM messages WHERE source_key LIKE ? AND run_id=? AND content=? ORDER BY seq LIMIT 1",
+                previous = self.db.execute("SELECT id,content,attachments_json FROM messages WHERE source_key LIKE ? AND run_id=? AND content=? ORDER BY seq LIMIT 1",
                                            (f'interim:{admission}:%', run_id, content)).fetchone()
             if previous is not None and previous['content'] == content:
                 # Preserve already-rendered IDs and cursor positions when upgrading or
                 # when Hermes persists an interim callback as a native assistant row.
-                self.db.execute('UPDATE messages SET source_key=? WHERE id=?', (key, previous['id']))
+                if attachments_json and not previous['attachments_json']:
+                    self.db.execute('UPDATE messages SET source_key=?, attachments_json=? WHERE id=?', (key, attachments_json, previous['id']))
+                else:
+                    self.db.execute('UPDATE messages SET source_key=? WHERE id=?', (key, previous['id']))
                 return previous['id']
-        return self.append_assistant(key, content, created, run_id)
+        return self.append_assistant(key, content, created, run_id, attachments=attachments)
 
     def message_event(self, identifier):
         message = self.db.execute('SELECT * FROM messages WHERE id=?', (identifier,)).fetchone()

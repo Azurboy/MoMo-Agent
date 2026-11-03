@@ -325,6 +325,7 @@ const TEXT = {
   intentNo: ['未明确', 'not established'],
   'targetBasis.specified': ['已明确目标', 'specified'],
   'targetBasis.existing-standard': ['既有规范／已验证正确状态', 'existing standard or verified correct state'],
+  'targetBasis.exploratory': ['探索调研／方案推演', 'exploratory research or option synthesis'],
   'targetBasis.undetermined': ['目标未定', 'undetermined'],
   designNeeded: ['仍需产品／视觉设计决策', 'a product or design decision remains'],
   designNotNeeded: ['无需新增设计决策', 'no new design decision'],

@@ -8,10 +8,20 @@ Hermes Agent and DeepSeek SuperAgent share the exact same ContextStore
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
+from html import unescape
+from html.parser import HTMLParser
+import ipaddress
 import json
+import os
 from pathlib import Path
+import re
+import socket
 import sys
 import time
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+import urllib.request
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Context"))
@@ -179,8 +189,229 @@ def _cmd_conversation(data: Path, args: argparse.Namespace) -> dict:
         conn.close()
 
 
+class _ReadableHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower in ("script", "style", "noscript", "svg", "template"):
+            self._skip_depth += 1
+        elif lower == "title":
+            self._in_title = True
+        elif self._skip_depth == 0 and lower in ("p", "div", "section", "article", "li", "h1", "h2", "h3", "h4", "br", "tr"):
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if lower in ("script", "style", "noscript", "svg", "template") and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif lower == "title":
+            self._in_title = False
+        elif self._skip_depth == 0 and lower in ("p", "div", "section", "article", "li", "h1", "h2", "h3", "h4", "tr"):
+            self.chunks.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title_parts.append(data)
+        if self._skip_depth == 0:
+            self.chunks.append(data)
+
+
+def _is_public_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname.strip().lower()
+    if host in ("localhost", "ip6-localhost") or host.endswith(".local"):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False
+    return True
+
+
+def _stdlib_duckduckgo_search(query: str, limit: int) -> dict:
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        html = resp.read(512_000).decode("utf-8", errors="replace")
+    items: list[dict] = []
+    pattern = re.compile(
+        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    snippet_pattern = re.compile(
+        r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>|<div[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    snippets = [
+        unescape(re.sub(r"<[^>]+>", "", m.group(1) or m.group(2) or "")).strip()
+        for m in snippet_pattern.finditer(html)
+    ]
+    for idx, match in enumerate(pattern.finditer(html)):
+        raw_href, raw_title = match.group(1), match.group(2)
+        href = unescape(raw_href).strip()
+        if "uddg=" in href:
+            qs = parse_qs(urlparse(href).query)
+            if qs.get("uddg"):
+                href = unquote(qs["uddg"][0])
+        title = unescape(re.sub(r"<[^>]+>", "", raw_title)).strip()
+        if not href.startswith(("http://", "https://")) or not title:
+            continue
+        items.append(
+            {
+                "position": len(items) + 1,
+                "title": title,
+                "url": href,
+                "description": snippets[idx] if idx < len(snippets) else "",
+            }
+        )
+        if len(items) >= limit:
+            break
+    return {"success": bool(items), "data": {"web": items}, **({} if items else {"error": "No web results returned"})}
+
+
+def _stdlib_fetch_extract(urls: list[str], char_limit: int) -> dict:
+    results: list[dict] = []
+    for url in urls:
+        clean_url = str(url or "").strip()
+        if not _is_public_http_url(clean_url):
+            results.append({"url": clean_url, "title": "", "content": "", "error": "Blocked or invalid URL"})
+            continue
+        try:
+            req = urllib.request.Request(
+                clean_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9,*/*;q=0.5",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                raw = resp.read(1_500_000).decode("utf-8", errors="replace")
+            if "html" in ctype or "<html" in raw[:1000].lower():
+                parser = _ReadableHTMLParser()
+                parser.feed(raw)
+                title = " ".join("".join(parser.title_parts).split()).strip()
+                lines = [" ".join(line.split()) for line in "".join(parser.chunks).splitlines()]
+                content = "\n".join(line for line in lines if line).strip()
+            else:
+                title = ""
+                content = raw.strip()
+            if char_limit > 0 and len(content) > char_limit:
+                content = content[:char_limit] + "\n...[truncated]"
+            results.append({"url": clean_url, "title": title, "content": content, "error": None if content else "Empty page content"})
+        except Exception as exc:
+            results.append({"url": clean_url, "title": "", "content": "", "error": str(exc)})
+    return {"results": results}
+
+
+def _configure_hermes_env(data: Path) -> None:
+    default_agent_hermes = Path.home() / "Library/Application Support/MoMoAgent/Agent/hermes"
+    if (data / "hermes").is_dir() or not default_agent_hermes.is_dir():
+        os.environ.setdefault("HERMES_HOME", str(data / "hermes"))
+    else:
+        os.environ.setdefault("HERMES_HOME", str(default_agent_hermes))
+
+
+def _cmd_web_search(data: Path, args: argparse.Namespace) -> dict:
+    limit = max(1, min(int(args.limit), 20))
+    _configure_hermes_env(data)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            from tools import web_tools
+
+            web_tools._ensure_web_plugins_loaded()
+            orig_get = web_tools._get_search_backend
+            backend = orig_get()
+            # openai-native is a server-side Responses API tool and cannot execute standalone in CLI subprocesses.
+            if backend == "openai-native":
+                fallback_backend = (
+                    web_tools._keyless_backend()
+                    or ("ddgs" if web_tools._ddgs_package_importable() else None)
+                )
+                if fallback_backend:
+                    web_tools._get_search_backend = lambda: fallback_backend
+            try:
+                raw_json = web_tools.web_search_tool(args.query, limit=limit)
+            finally:
+                web_tools._get_search_backend = orig_get
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, dict) and parsed.get("success") and parsed.get("data", {}).get("web"):
+            return parsed
+    except Exception:
+        parsed = None
+
+    with contextlib.suppress(Exception):
+        fallback = _stdlib_duckduckgo_search(args.query, limit)
+        if fallback.get("success"):
+            return fallback
+    return parsed if isinstance(parsed, dict) else {"success": False, "error": "Web search unavailable"}
+
+
+def _cmd_web_extract(data: Path, args: argparse.Namespace) -> dict:
+    urls = [str(u).strip() for u in (args.urls or ()) if str(u).strip()][:8]
+    char_limit = max(1000, min(int(args.char_limit), 60_000))
+    _configure_hermes_env(data)
+    parsed: dict | None = None
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            from agent.web_search_registry import get_provider as _wsp_get_provider
+            from tools import web_tools
+
+            web_tools._ensure_web_plugins_loaded()
+            orig_get = web_tools._get_extract_backend
+            pin = web_tools._configured_backend("extract_backend") or web_tools._configured_backend("backend")
+            if not pin:
+                cand = orig_get()
+                prov = _wsp_get_provider(cand) if cand else None
+                if prov is None or not prov.supports_extract():
+                    keyless = web_tools._keyless_backend()
+                    if keyless:
+                        web_tools._get_extract_backend = lambda: keyless
+            try:
+                raw_json = asyncio.run(web_tools.web_extract_tool(urls, char_limit=char_limit))
+            finally:
+                web_tools._get_extract_backend = orig_get
+        loaded = json.loads(raw_json)
+        if isinstance(loaded, dict):
+            parsed = loaded
+            entries = loaded.get("results")
+            if isinstance(entries, list) and entries and any(bool(e.get("content")) and not e.get("error") for e in entries if isinstance(e, dict)):
+                return loaded
+    except Exception:
+        parsed = None
+
+    with contextlib.suppress(Exception):
+        fallback = _stdlib_fetch_extract(urls, char_limit)
+        if any(bool(e.get("content")) for e in fallback.get("results", ())):
+            return fallback
+    return parsed if isinstance(parsed, dict) else {"success": False, "error": "Web extract unavailable"}
+
+
 def main() -> int:
-    import os
     default_data = Path(os.environ["MOMO_DATA_DIR"]) if os.environ.get("MOMO_DATA_DIR") else None
     parser = argparse.ArgumentParser(description="MoMo personal context & memory CLI")
     parser.add_argument("--data-dir", type=Path, default=default_data, required=default_data is None)
@@ -229,6 +460,14 @@ def main() -> int:
     conv = sub.add_parser("conversation", help="Read recent MoMo chat history")
     conv.add_argument("--limit", type=int, default=20)
 
+    wsearch = sub.add_parser("web-search", help="Search the public web via configured or keyless Hermes backends")
+    wsearch.add_argument("query")
+    wsearch.add_argument("--limit", type=int, default=5)
+
+    wextract = sub.add_parser("web-extract", help="Extract clean readable text from public web URLs")
+    wextract.add_argument("urls", nargs="+")
+    wextract.add_argument("--char-limit", type=int, default=15000)
+
     args = parser.parse_args()
     data = args.data_dir.expanduser().resolve()
     handlers = {
@@ -242,6 +481,8 @@ def main() -> int:
         "remember": _cmd_remember,
         "forget": _cmd_forget,
         "conversation": _cmd_conversation,
+        "web-search": _cmd_web_search,
+        "web-extract": _cmd_web_extract,
     }
     try:
         output = handlers[args.command](data, args)

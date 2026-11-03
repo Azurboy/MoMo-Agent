@@ -28,6 +28,11 @@
       "file": "src/app/tools/momo-computer.ts, src/app/tools/executor.ts",
       "reason": "Expose built-in agent-desktop snapshot and ref-action tools to MoMo worker sessions through the authenticated native desktop bridge; bind calls to live ticket assignments and preserve human takeover.",
       "validation": "tests/momo-computer.spec.ts and Tests/AgentRuntime/test_agent_desktop.py"
+    },
+    {
+      "file": "src/policy.ts, src/executor/dsh.ts, src/app/sessions.ts, src/client/locales.ts",
+      "reason": "Support general Personal Agent dual-track proactive admission: rules marked `exploratory: true` may accept grounded exploratory research, option trade-off synthesis, and workspace deliverables (`target_basis: 'exploratory'`) without prematurely mutating user repositories, while non-exploratory rules preserve strict settled-direction enforcement.",
+      "validation": "tests/policy.spec.ts, tests/locales.spec.ts, tests/model-surface.spec.ts, and Tests/AgentRuntime/test_superagent_runtime.py"
     }
   ]
 }

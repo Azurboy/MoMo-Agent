@@ -13,7 +13,7 @@ import time
 import uuid
 
 from aiohttp import web
-from conversation_store import ProductStore
+from conversation_store import ProductStore, collect_deliverable_attachments
 from personal_work import WorkRouting, conflict
 from personal_computer import ComputerGate
 from push_notifications import PushOutbox, load_provider
@@ -275,7 +275,7 @@ class PersonalAgent(WorkRouting, ComputerGate):
                     raise ValueError('Invalid document attachment')
                 encoded_len = len(text.encode())
                 total_text += encoded_len
-                if encoded_len > 48_000 or total_text > 48_000:
+                if encoded_len > 256_000 or total_text > 256_000:
                     raise ValueError('Document attachment text too large')
                 normalized['text'] = text
             result.append(normalized)
@@ -629,7 +629,13 @@ class PersonalAgent(WorkRouting, ComputerGate):
                 if row.get('role') != 'assistant' or row.get('display_kind') == 'hidden' or admission not in eligible: continue
                 text = row.get('content')
                 if not isinstance(text, str) or not text.strip(): continue
-                self.store.project_assistant(admission, ordinal, text, row.get('timestamp') or time.time(), eligible[admission])
+                data_dir = getattr(self, 'data', None)
+                deliverables = collect_deliverable_attachments(
+                    text,
+                    allowed_roots=[Path(data_dir) / 'workspace'] if data_dir else [],
+                    source_key=f'native-turn:{admission}:{ordinal}',
+                ) if data_dir else []
+                self.store.project_assistant(admission, ordinal, text, row.get('timestamp') or time.time(), eligible[admission], attachments=deliverables)
                 ordinal += 1
             if len(rows) < 100: break
             offset += len(rows)
@@ -810,7 +816,13 @@ class PersonalAgent(WorkRouting, ComputerGate):
                         turn = [] if start is None else native[start + 1:]
                         boundary = next((i for i, m in enumerate(turn) if m.get('role') == 'user' and m.get('platform_message_id')), len(turn))
                         answer = next((m for m in reversed(turn[:boundary]) if m.get('role') == 'assistant' and isinstance(m.get('content'), str) and m['content'].strip()), None)
-                        reported = None if answer is None else self.store.append_assistant(f"turn:{row['admission_id']}:{sum(1 for m in turn[:boundary] if m.get('role') == 'assistant' and isinstance(m.get('content'), str) and m['content'].strip()) - 1}", answer['content'], answer.get('timestamp') or time.time(), row['request_id'])
+                        turn_key = None if answer is None else f"turn:{row['admission_id']}:{sum(1 for m in turn[:boundary] if m.get('role') == 'assistant' and isinstance(m.get('content'), str) and m['content'].strip()) - 1}"
+                        deliverables = None if answer is None else collect_deliverable_attachments(
+                            answer['content'],
+                            allowed_roots=[self.data / 'workspace'],
+                            source_key=turn_key or '',
+                        )
+                        reported = None if answer is None else self.store.append_assistant(turn_key, answer['content'], answer.get('timestamp') or time.time(), row['request_id'], attachments=deliverables)
                         state = 'reported' if reported else 'admitted'
                     else: state, reported = 'failed', None
                 else: continue

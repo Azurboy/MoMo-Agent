@@ -34,7 +34,7 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
-from conversation_store import ProductStore
+from conversation_store import ProductStore, collect_deliverable_attachments
 from superagent_computer import SuperAgentComputer
 from push_notifications import PushOutbox, load_provider
 from runtime_engine import PROACTIVE_MODES, read_engine_config, write_engine_config
@@ -255,18 +255,18 @@ class BridgeStore:
         return items, str(int(rows[-1]["seq"])), polled_runs
 
     def coalesce_unpolled_transcripts(self, *, max_chars: int = 2400) -> int:
-        """Merge backlogged micro-chunk transcript triggers for the same source_id while preserving monotonic seq."""
+        """Merge backlogged micro-chunk transcript triggers for the same (source_id, thread_id) while preserving monotonic seq."""
         rows = self.db.execute(
-            """SELECT seq, source_id, title, text
+            """SELECT seq, thread_id, source_id, title, text
                FROM triggers
                WHERE polled_at IS NULL AND kind='transcripts' AND source_id IS NOT NULL
                ORDER BY seq ASC"""
         ).fetchall()
         if len(rows) <= 1:
             return 0
-        by_source: dict[str, list[sqlite3.Row]] = {}
+        by_group: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for row in rows:
-            by_source.setdefault(str(row["source_id"]), []).append(row)
+            by_group.setdefault((str(row["source_id"]), str(row["thread_id"] or "")), []).append(row)
 
         def _split_header_and_body(raw_text: str) -> tuple[str, str]:
             lines = raw_text.strip().splitlines()
@@ -274,7 +274,12 @@ class BridgeStore:
             idx = 0
             while idx < len(lines):
                 stripped = lines[idx].strip()
-                if stripped.startswith("[MoMo 同步录音转写 |") or stripped.startswith("[⚠️"):
+                if (
+                    stripped.startswith("[MoMo 同步录音转写 |")
+                    or stripped.startswith("[⚠️")
+                    or stripped.startswith("[日期参考：")
+                    or stripped.startswith("[近期相关工单：")
+                ):
                     hdr.append(stripped)
                     idx += 1
                 else:
@@ -283,7 +288,7 @@ class BridgeStore:
 
         to_delete: list[int] = []
         to_update: list[tuple[str, int]] = []
-        for sid, group in by_source.items():
+        for (sid, _), group in by_group.items():
             if len(group) <= 1:
                 continue
             bucket_rows: list[sqlite3.Row] = []
@@ -334,6 +339,7 @@ class SuperAgentGateway:
     TRANSCRIPT_MIN_LIVE_CHARS = 120
     TRANSCRIPT_PASSAGE_CHARS = 600
     TRANSCRIPT_MAX_DEFER_SECONDS = 75.0
+    TRANSCRIPT_SESSION_GAP_SECONDS = 900.0
 
     def __init__(
         self,
@@ -964,6 +970,71 @@ class SuperAgentGateway:
                     self._trigger_wakeup.set()
             await asyncio.sleep(1.5)
 
+    def _recent_proactive_ticket_summaries(
+        self,
+        *,
+        source_id: str | None = None,
+        now: float | None = None,
+        max_items: int = 8,
+    ) -> list[dict]:
+        ref_now = now if now is not None else time.time()
+        items: list[dict] = []
+        for t in self._cached_tickets:
+            if not isinstance(t, dict) or not t.get("id"):
+                continue
+            tid = str(t["id"])
+            ended_info = t.get("ended")
+            ended_outcome = (
+                str(ended_info.get("outcome") or "")
+                if isinstance(ended_info, dict)
+                else str(ended_info or "")
+            )
+            t_state = str(t.get("state") or "")
+            is_ended = bool(ended_info) or t_state in (
+                "ended",
+                "completed",
+                "merged",
+                "dropped",
+                "stopped",
+                "canceled",
+                "cancelled",
+            )
+            status_label = (ended_outcome or t_state or "ended") if is_ended else "open"
+            updated_at = (
+                self._iso_to_epoch(t.get("updatedAt"))
+                or (self._iso_to_epoch(ended_info.get("at")) if isinstance(ended_info, dict) else None)
+                or self._iso_to_epoch(t.get("createdAt"))
+            )
+            threads = self._thread_keys(t.get("threads"))
+            mandate = t.get("mandate") if isinstance(t.get("mandate"), dict) else {}
+            basis = mandate.get("basis") if isinstance(mandate.get("basis"), dict) else {}
+            basis_scope = basis.get("scope") if isinstance(basis.get("scope"), dict) else {}
+            ticket_sid = str(basis_scope.get("sourceId") or "").strip()
+            if not ticket_sid:
+                for th in threads:
+                    clean_th = th.removeprefix("momo:")
+                    if clean_th.startswith("transcript:"):
+                        ticket_sid = re.split(r":[ws]\d+", clean_th.partition(":")[2], maxsplit=1)[0]
+                        if ticket_sid:
+                            break
+            same_source = bool(source_id and ticket_sid == source_id)
+            recent_enough = not is_ended or (updated_at is not None and (ref_now - updated_at) <= 12 * 3600)
+            if not same_source and not recent_enough:
+                continue
+            scope_txt = str(mandate.get("scope") or t.get("summary") or "").strip()[:140]
+            items.append(
+                {
+                    "id": tid,
+                    "title": str(t.get("title") or tid)[:80],
+                    "status": status_label,
+                    "same_source": same_source,
+                    **({"scope": scope_txt} if scope_txt else {}),
+                }
+            )
+            if len(items) >= max_items:
+                break
+        return items
+
     def ingest_context_sources(self, *, settle_seconds: float = 0.0) -> list[str]:
         """Scan ContextStore for newly arrived or extended voice transcripts and enqueue coherent proactive triggers."""
         mode = read_engine_config(self.data)["proactive_mode"]
@@ -1007,8 +1078,7 @@ class SuperAgentGateway:
                     default=prev_last_ts,
                 )
                 if watermark is None:
-                    first_new_idx = 0
-                    new_spans = list(spans)
+                    indexed_new = [(idx, s) for idx, s in enumerate(spans)]
                 else:
                     indexed_new = [
                         (idx, s)
@@ -1023,8 +1093,7 @@ class SuperAgentGateway:
                                 (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
                             )
                         continue
-                    first_new_idx = indexed_new[0][0]
-                    new_spans = [s for _, s in indexed_new]
+                new_spans = [s for _, s in indexed_new]
 
                 transcript_lines = []
                 for span in new_spans:
@@ -1032,8 +1101,8 @@ class SuperAgentGateway:
                     dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
                     speaker = f"{span['speaker']}: " if span.get("speaker") else ""
                     transcript_lines.append(f"[{dt_str}] {speaker}{span.get('text', '')}")
-                body = "\n".join(transcript_lines).strip()
-                if not body:
+                full_new_body = "\n".join(transcript_lines).strip()
+                if not full_new_body:
                     with self.bridge.db:
                         self.bridge.db.execute(
                             "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
@@ -1050,96 +1119,153 @@ class SuperAgentGateway:
                     quiet_elapsed = max(0.0, now - float(src["updated"]))
                     defer_elapsed = max(0.0, now - float(watermark["updated_at"])) if watermark else quiet_elapsed
                     needs_more_settle = quiet_elapsed < settle_seconds or (
-                        len(body) < self.TRANSCRIPT_MIN_LIVE_CHARS and quiet_elapsed < 45.0
+                        len(full_new_body) < self.TRANSCRIPT_MIN_LIVE_CHARS and quiet_elapsed < 45.0
                     )
                     if (
                         needs_more_settle
-                        and len(body) < self.TRANSCRIPT_PASSAGE_CHARS
+                        and len(full_new_body) < self.TRANSCRIPT_PASSAGE_CHARS
                         and defer_elapsed < self.TRANSCRIPT_MAX_DEFER_SECONDS
                     ):
                         # Hold watermark while streaming ASR spans are actively arriving mid-thought.
                         continue
-                context_prefix = ""
-                if first_new_idx > 0:
-                    prior_spans = spans[max(0, first_new_idx - 6) : first_new_idx]
-                    prior_lines = []
-                    for pspan in prior_spans:
-                        pts = float(pspan.get("recorded_at") or now)
-                        pdt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pts))
-                        pspeaker = f"{pspan['speaker']}: " if pspan.get("speaker") else ""
-                        ptxt = str(pspan.get("text") or "").strip()
-                        if ptxt:
-                            prior_lines.append(f"[{pdt_str}] {pspeaker}{ptxt}")
-                    if prior_lines:
-                        prior_joined = "\n".join(prior_lines)[-520:]
-                        context_prefix = f"[近期前文参考]\n{prior_joined}\n[本次新增转写]\n"
+
+                # Compute deterministic conversation segments across spans by natural silence gap (>15 min)
+                # so a continuous 20-40 min discussion stays on one thread while multi-hour gaps split cleanly.
+                seg_by_idx: list[int] = []
+                cur_seg = 0
+                prev_seg_ts = 0.0
+                for span_item in spans:
+                    st_ts = float(span_item.get("recorded_at") or 0.0) if isinstance(span_item, dict) else 0.0
+                    if prev_seg_ts > 0.0 and st_ts > 0.0 and (st_ts - prev_seg_ts) > self.TRANSCRIPT_SESSION_GAP_SECONDS:
+                        cur_seg += 1
+                    seg_by_idx.append(cur_seg)
+                    if st_ts > 0.0:
+                        prev_seg_ts = max(prev_seg_ts, st_ts)
+
+                segment_groups: list[tuple[int, int, list[dict]]] = []
+                for idx, span_item in indexed_new:
+                    s_id = seg_by_idx[idx]
+                    if segment_groups and segment_groups[-1][0] == s_id:
+                        segment_groups[-1][2].append(span_item)
+                    else:
+                        segment_groups.append((s_id, idx, [span_item]))
+
                 with self.bridge.db:
                     self.bridge.db.execute(
                         "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
                         (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
                     )
-                earliest_new_ts = min((float(s.get("recorded_at") or now) for s in new_spans), default=now)
-                latest_span_ts = max((float(s.get("recorded_at") or now) for s in new_spans), default=now)
-                rec_start_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(earliest_new_ts))
-                rec_end_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_span_ts))
-                rec_time_label = rec_start_str if rec_start_str[:16] == rec_end_str[:16] else f"{rec_start_str} ~ {rec_end_str}"
-                now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-                rec_day = time.strftime("%Y-%m-%d", time.localtime(latest_span_ts))
-                today_day = time.strftime("%Y-%m-%d", time.localtime(now))
-                lag_seconds = max(0.0, now - latest_span_ts)
-                date_anchor_note = ""
-                if rec_day != today_day or lag_seconds >= 6 * 3600:
-                    lag_hours = lag_seconds / 3600.0
-                    sync_status = (
-                        f"跨日补同步（滞后 {lag_hours:.1f} 小时，录制于 {rec_day}）"
-                        if rec_day != today_day
-                        else f"延迟补同步（滞后 {lag_hours:.1f} 小时）"
-                    )
-                    date_anchor_note = (
-                        f"[日期参考：本段录音记录于 {rec_end_str}，当前时间为 {now_str}。"
-                        f"录音中的“今天/明天/今晚”等相对时间请以 {rec_day} 为基准换算实际日期，"
-                        f"结合事项本身的时效性与后续上下文自然判断是否仍需跟进。]\n"
-                    )
-                else:
-                    sync_status = "实时同步" if lag_seconds < 600 else f"当日补同步（滞后 {int(lag_seconds // 60)} 分钟）"
 
-                win_bucket = int(latest_span_ts // 300)
-                base_thread = f"transcript:{sid}:w{win_bucket}"
                 ended_threads = {
                     th_s
                     for t in self._cached_tickets
                     if isinstance(t, dict) and (t.get("ended") or t.get("state") == "ended")
                     for th_s in self._thread_keys(t.get("threads"))
                 }
-                candidate_thread = base_thread
-                suffix_idx = 1
-                while f"momo:{candidate_thread}" in ended_threads:
-                    suffix_idx += 1
-                    candidate_thread = f"{base_thread}:r{suffix_idx}"
+                recent_tickets = self._recent_proactive_ticket_summaries(source_id=sid, now=now, max_items=6)
+                recent_ticket_note = ""
+                if recent_tickets:
+                    formatted_tickets = "；".join(
+                        f"{rt['id']}《{rt['title']}》[{rt['status']}{',同录音' if rt.get('same_source') else ''}]"
+                        for rt in recent_tickets
+                    )
+                    recent_ticket_note = (
+                        f"[近期相关工单：{formatted_tickets}。"
+                        f"若本段仅是对上述已建单/已结案事项的延续或重复讨论且无新增独立诉求，请勿重复建单。]\n"
+                    )
 
                 title = payload.get("title") or sid
-                event_id = f"transcript:{sid}:{rev[:24]}"
-                trigger_id = f"momo:{event_id}"
-                text = (
-                    f"[MoMo 同步录音转写 | source_id={sid} | 标题={title} | 录音时间={rec_time_label} | 当前时间={now_str} | 同步状态={sync_status}]\n"
-                    f"{date_anchor_note}{context_prefix}{body}"
-                )
-                self.bridge.enqueue_trigger(
-                    trigger_id=trigger_id,
-                    kind="transcripts",
-                    thread_id=candidate_thread,
-                    message_id=event_id,
-                    source_id=sid,
-                    title=title,
-                    actor_id="owner",
-                    actor_name="User (Voice Transcript)",
-                    addressed=False,
-                    human=True,
-                    observed=True,
-                    text=text,
-                    at_iso=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_span_ts)),
-                )
-                emitted.append(trigger_id)
+                now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                today_day = time.strftime("%Y-%m-%d", time.localtime(now))
+
+                for seg_idx, seg_first_idx, seg_spans in segment_groups:
+                    seg_lines = []
+                    for span in seg_spans:
+                        ts = float(span.get("recorded_at") or now)
+                        dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                        speaker = f"{span['speaker']}: " if span.get("speaker") else ""
+                        txt_val = str(span.get("text") or "").strip()
+                        if txt_val:
+                            seg_lines.append(f"[{dt_str}] {speaker}{txt_val}")
+                    body = "\n".join(seg_lines).strip()
+                    if not body:
+                        continue
+
+                    context_prefix = ""
+                    if seg_first_idx > 0:
+                        prior_lines = []
+                        for pidx in range(max(0, seg_first_idx - 6), seg_first_idx):
+                            if seg_by_idx[pidx] != seg_idx:
+                                continue
+                            pspan = spans[pidx]
+                            pts = float(pspan.get("recorded_at") or now)
+                            pdt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pts))
+                            pspeaker = f"{pspan['speaker']}: " if pspan.get("speaker") else ""
+                            ptxt = str(pspan.get("text") or "").strip()
+                            if ptxt:
+                                prior_lines.append(f"[{pdt_str}] {pspeaker}{ptxt}")
+                        if prior_lines:
+                            prior_joined = "\n".join(prior_lines)[-520:]
+                            context_prefix = f"[近期前文参考]\n{prior_joined}\n[本次新增转写]\n"
+
+                    earliest_new_ts = min((float(s.get("recorded_at") or now) for s in seg_spans), default=now)
+                    latest_span_ts = max((float(s.get("recorded_at") or now) for s in seg_spans), default=now)
+                    rec_start_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(earliest_new_ts))
+                    rec_end_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_span_ts))
+                    rec_time_label = (
+                        rec_start_str if rec_start_str[:16] == rec_end_str[:16] else f"{rec_start_str} ~ {rec_end_str}"
+                    )
+                    rec_day = time.strftime("%Y-%m-%d", time.localtime(latest_span_ts))
+                    lag_seconds = max(0.0, now - latest_span_ts)
+                    date_anchor_note = ""
+                    if rec_day != today_day or lag_seconds >= 6 * 3600:
+                        lag_hours = lag_seconds / 3600.0
+                        sync_status = (
+                            f"跨日补同步（滞后 {lag_hours:.1f} 小时，录制于 {rec_day}）"
+                            if rec_day != today_day
+                            else f"延迟补同步（滞后 {lag_hours:.1f} 小时）"
+                        )
+                        date_anchor_note = (
+                            f"[日期参考：本段录音记录于 {rec_end_str}，当前时间为 {now_str}。"
+                            f"录音中的“今天/明天/今晚”等相对时间请以 {rec_day} 为基准换算实际日期，"
+                            f"结合事项本身的时效性与后续上下文自然判断是否仍需跟进。]\n"
+                        )
+                    else:
+                        sync_status = "实时同步" if lag_seconds < 600 else f"当日补同步（滞后 {int(lag_seconds // 60)} 分钟）"
+
+                    base_thread = f"transcript:{sid}:s{seg_idx}"
+                    candidate_thread = base_thread
+                    suffix_idx = 1
+                    while f"momo:{candidate_thread}" in ended_threads:
+                        suffix_idx += 1
+                        candidate_thread = f"{base_thread}:r{suffix_idx}"
+
+                    event_id = (
+                        f"transcript:{sid}:{rev[:24]}"
+                        if len(segment_groups) == 1
+                        else f"transcript:{sid}:{rev[:24]}:s{seg_idx}"
+                    )
+                    trigger_id = f"momo:{event_id}"
+                    text = (
+                        f"[MoMo 同步录音转写 | source_id={sid} | 标题={title} | 录音时间={rec_time_label} | 当前时间={now_str} | 同步状态={sync_status}]\n"
+                        f"{date_anchor_note}{recent_ticket_note}{context_prefix}{body}"
+                    )
+                    self.bridge.enqueue_trigger(
+                        trigger_id=trigger_id,
+                        kind="transcripts",
+                        thread_id=candidate_thread,
+                        message_id=event_id,
+                        source_id=sid,
+                        title=title,
+                        actor_id="owner",
+                        actor_name="User (Voice Transcript)",
+                        addressed=False,
+                        human=True,
+                        observed=True,
+                        text=text,
+                        at_iso=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_span_ts)),
+                    )
+                    emitted.append(trigger_id)
         finally:
             cstore.close()
         return emitted
@@ -1532,7 +1658,7 @@ class SuperAgentGateway:
                     raise ValueError("Invalid document attachment")
                 encoded_len = len(text.encode())
                 total_text += encoded_len
-                if encoded_len > 48_000 or total_text > 48_000:
+                if encoded_len > 256_000 or total_text > 256_000:
                     raise ValueError("Document attachment text too large")
                 normalized["text"] = text
             result.append(normalized)
@@ -1614,7 +1740,12 @@ class SuperAgentGateway:
             s = line.strip()
             if not s:
                 continue
-            if s.startswith("[MoMo 同步录音转写 |") or s.startswith("[⚠️") or s.startswith("[日期参考："):
+            if (
+                s.startswith("[MoMo 同步录音转写 |")
+                or s.startswith("[⚠️")
+                or s.startswith("[日期参考：")
+                or s.startswith("[近期相关工单：")
+            ):
                 continue
             if s == "[近期前文参考]":
                 in_prior = True
@@ -1632,6 +1763,7 @@ class SuperAgentGateway:
                     and not s.startswith("[MoMo 同步录音转写 |")
                     and not s.startswith("[⚠️")
                     and not s.startswith("[日期参考：")
+                    and not s.startswith("[近期相关工单：")
                     and s not in ("[近期前文参考]", "[本次新增转写]")
                 ):
                     kept.append(s)
@@ -1694,7 +1826,7 @@ class SuperAgentGateway:
             for th in threads:
                 clean_th = th.removeprefix("momo:")
                 if clean_th.startswith("transcript:"):
-                    raw_sid = clean_th.partition(":")[2].split(":w", 1)[0]
+                    raw_sid = re.split(r":[ws]\d+", clean_th.partition(":")[2], maxsplit=1)[0]
                     if raw_sid:
                         source_id = raw_sid
                         break
@@ -2225,6 +2357,13 @@ class SuperAgentGateway:
                 tid, is_active=is_active
             )
             workspace_path = str(detail_ticket.get("directory") or session_cwd or "").strip() or None
+            deliverables = self._collect_ticket_attachments(
+                ticket_id=tid,
+                ticket=detail_ticket,
+                text=summary,
+                extra_cwd=session_cwd,
+                source_key=f"work-detail:{tid}",
+            )
 
             status_labels = {
                 "queued": "排队等待执行",
@@ -2261,6 +2400,7 @@ class SuperAgentGateway:
                 "step_count": step_count,
                 "todos": todos,
                 "activities": activities,
+                "attachments": deliverables or [],
             }
 
         # Fallback: chat_run without an allocated Worker ticket yet
@@ -2274,9 +2414,10 @@ class SuperAgentGateway:
             if trow:
                 trig_preview = self._clean_trigger_excerpt(str(trow["text"]))
         msg_row = self.store.db.execute(
-            "SELECT content FROM messages WHERE run_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",
+            "SELECT * FROM messages WHERE run_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",
             (run_row["run_id"],),
         ).fetchone()
+        msg_attachments = self.store._format_message(msg_row).get("attachments", []) if msg_row else []
         st = proj["status"]
         return {
             "id": str(run_row["work_id"]),
@@ -2303,6 +2444,7 @@ class SuperAgentGateway:
             "step_count": 0,
             "todos": [],
             "activities": [],
+            "attachments": msg_attachments,
         }
 
     def run_page(self, after: int = 0, limit: int = 100, *, include_work: bool = True) -> dict:
@@ -2748,11 +2890,18 @@ class SuperAgentGateway:
             limit = 20
         if thread_id.startswith("transcript:") or source_id:
             raw_tid = thread_id.partition(":")[2]
-            sid = source_id or raw_tid.split(":w", 1)[0]
+            sid = source_id or re.split(r":[ws]\d+", raw_tid, maxsplit=1)[0]
             messages, next_cursor = self._transcript_thread_messages(
                 sid, message_id=message_id, cursor=cursor, limit=limit
             )
-            payload: dict = {"messages": messages, "body": {"source_id": sid}}
+            recent_tickets = self._recent_proactive_ticket_summaries(source_id=sid, max_items=8)
+            payload: dict = {
+                "messages": messages,
+                "body": {
+                    "source_id": sid,
+                    **({"recent_tickets": recent_tickets} if recent_tickets else {}),
+                },
+            }
             if next_cursor:
                 payload["next"] = next_cursor
             return web.json_response(payload)
@@ -2891,6 +3040,63 @@ class SuperAgentGateway:
         finally:
             cstore.close()
 
+    def _collect_ticket_attachments(
+        self,
+        *,
+        ticket_id: str | None,
+        ticket: dict | None = None,
+        text: str | None = None,
+        extra_cwd: str | None = None,
+        source_key: str = "",
+    ) -> list[dict] | None:
+        workspace_root = self.data / "workspace"
+        work_root = self.dsh_work_dir
+        allowed_roots = [workspace_root, work_root]
+        extra_dirs: list[Path] = []
+        t_obj = ticket
+        if t_obj is None and ticket_id:
+            t_obj = next(
+                (t for t in self._cached_tickets if isinstance(t, dict) and str(t.get("id")) == ticket_id),
+                None,
+            )
+            if t_obj is None and self.dsh_ready:
+                with suppress(Exception):
+                    fetched = dsh_api_request(
+                        self.dsh_port,
+                        "GET",
+                        f"/orchestrator/api/tickets/{quote(ticket_id, safe='')}",
+                        timeout=2.5,
+                    )
+                    if isinstance(fetched, dict) and fetched.get("id"):
+                        t_obj = fetched
+        if isinstance(t_obj, dict):
+            t_name = str(t_obj.get("name") or "").strip()
+            t_dir = str(t_obj.get("directory") or "").strip()
+            if t_name and "/" not in t_name and ".." not in t_name:
+                extra_dirs.append(workspace_root / t_name)
+                extra_dirs.append(work_root / t_name)
+            if t_dir:
+                extra_dirs.append(Path(t_dir))
+        if extra_cwd:
+            extra_dirs.append(Path(extra_cwd))
+        if ticket_id and "/" not in ticket_id and ".." not in ticket_id:
+            suffix = ticket_id[:12]
+            for root in (workspace_root, work_root):
+                if root.is_dir():
+                    with suppress(OSError):
+                        for child in root.iterdir():
+                            if child.is_dir() and (child.name == ticket_id or child.name.endswith(f"-{suffix}")):
+                                extra_dirs.append(child)
+        combined_text = text or ""
+        if isinstance(t_obj, dict) and t_obj.get("summary"):
+            combined_text = f"{combined_text}\n{t_obj['summary']}".strip()
+        return collect_deliverable_attachments(
+            combined_text,
+            allowed_roots=allowed_roots,
+            extra_dirs=extra_dirs,
+            source_key=source_key,
+        )
+
     async def handle_internal_outbound(self, request: web.Request) -> web.Response:
         if refused := self._check_bridge_secret(request):
             return refused
@@ -2980,7 +3186,18 @@ class SuperAgentGateway:
                     ),
                 )
 
-        msg_id = self.store.append_assistant(f"superagent:{out_id}", text, now, run_id=run_id)
+        deliverables = self._collect_ticket_attachments(
+            ticket_id=ticket_id,
+            text=text,
+            source_key=f"superagent:{out_id}",
+        )
+        msg_id = self.store.append_assistant(
+            f"superagent:{out_id}",
+            text,
+            now,
+            run_id=run_id,
+            attachments=deliverables,
+        )
         msg_row = self.store.db.execute("SELECT * FROM messages WHERE id=?", (msg_id,)).fetchone()
         with self.bridge.db:
             self.bridge.db.execute(

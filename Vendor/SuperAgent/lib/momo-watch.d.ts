@@ -1,5 +1,5 @@
 import { U as Trigger, l as OutboundMessage } from "./intake-BntR4bhz.js";
-import { _ as SourceRegistry, i as SourceContext, n as SourceKind, r as ThreadContext, t as ChannelLink } from "./kind-Cdy2ConM.js";
+import { _ as SourceRegistry, i as SourceContext, n as SourceKind, r as ThreadContext, t as ChannelLink } from "./kind-CBntL-Jz.js";
 import { Context } from "@deepseek-ai/cordis";
 import { z } from "zod";
 //#region src/sources/momo.d.ts
@@ -18,12 +18,12 @@ declare const MomoConfigSchema: z.ZodObject<{
   readPageSize: z.ZodDefault<z.ZodNumber>;
   chat: z.ZodDefault<z.ZodBoolean>;
   transcripts: z.ZodDefault<z.ZodEnum<{
-    none: "none";
     all: "all";
+    none: "none";
   }>>;
   lifeSignals: z.ZodDefault<z.ZodEnum<{
-    none: "none";
     all: "all";
+    none: "none";
   }>>;
 }, z.core.$strict>;
 type MomoConfig = z.infer<typeof MomoConfigSchema>;

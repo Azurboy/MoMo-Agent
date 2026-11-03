@@ -17,15 +17,22 @@ export const RuleAssessmentSchema = RuleMatchSchema.extend({ matched: z.boolean(
 export type RuleAssessment = z.infer<typeof RuleAssessmentSchema>
 export const AdmissionDirectionSchema = z.object({
   implementation_requested: z.boolean(),
-  target_basis: z.enum(['specified', 'existing-standard', 'undetermined']),
+  target_basis: z.enum(['specified', 'existing-standard', 'exploratory', 'undetermined']),
   requires_design_decision: z.boolean(),
   evidence: z.string().trim().min(1).max(700),
 }).strict()
 export type AdmissionDirection = z.infer<typeof AdmissionDirectionSchema>
 /** Check whether an assessment established implementation intent and a settled target without open design decisions. */
+export function settledDirection(value: unknown): value is AdmissionDirection {
+  const result = AdmissionDirectionSchema.safeParse(value)
+  return result.success && result.data.implementation_requested
+    && (result.data.target_basis === 'specified' || result.data.target_basis === 'existing-standard')
+    && !result.data.requires_design_decision
+}
+/** Check whether an assessment established an admissible direction (settled implementation, or a grounded exploratory target). */
 export function directionAllowed(value: unknown): value is AdmissionDirection {
   const result = AdmissionDirectionSchema.safeParse(value)
-  return result.success && result.data.implementation_requested && result.data.target_basis !== 'undetermined' && !result.data.requires_design_decision
+  return result.success && result.data.target_basis !== 'undetermined'
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
@@ -33,8 +40,8 @@ export interface Assessment {
 }
 /**
  * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
- * Acceptance requires a settled direction, at least one matched enabled rule, and `intent_evidence`, and accepts an
- * inferred candidate only in `auto` mode (otherwise recording it as `would_accept`).
+ * Standard rules require `settledDirection`; rules marked `exploratory: true` also accept grounded exploratory targets
+ * (`target_basis !== 'undetermined'`, even when product/design choices remain open or no direct code edit was requested).
  * @throws when `rule_assessments` does not cover every enabled rule exactly once, or an accept omits `intent_evidence`.
  */
 export function assessmentOutcome(assessment: Assessment, settings: Pick<Settings, 'policy' | 'eval'>, strength: Strength): AssessmentOutcome {
@@ -50,6 +57,10 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (assessment.decision !== 'accept') return { kind: assessment.decision, reason: assessment.reason, audit }
   if (!directionAllowed(assessment.direction)) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
+  const settled = settledDirection(assessment.direction)
+  const exploratoryIds = new Set(enabled.filter(rule => rule.exploratory).map(rule => rule.id))
+  const admitted = settled ? matches : matches.filter(item => exploratoryIds.has(item.rule_id))
+  if (!admitted.length) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
   const { title, scope, worktree_name: name } = assessment
   if (strength === 'inferred' && settings.eval.mode !== 'auto') {
@@ -57,7 +68,7 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
   return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
-    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
+    rules: admitted.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
 }
 const DEFAULT_RULES = [
   { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
@@ -65,7 +76,7 @@ const DEFAULT_RULES = [
 ]
 /** An assessment rule; its instruction may also specify PR reviewers and whether to wait for their approval. */
 export const RuleSchema = z.object({ id: RuleIdSchema, name: z.string().trim().min(1).max(LIMITS.ruleName), enabled: z.boolean(),
-  instruction: z.string().trim().min(1).max(LIMITS.ruleInstruction) }).strict()
+  exploratory: z.boolean().optional(), instruction: z.string().trim().min(1).max(LIMITS.ruleInstruction) }).strict()
 export type Rule = z.infer<typeof RuleSchema>
 export const RoleModelSchema = z.object({ provider: z.string().trim().min(1), model: z.string().trim().min(1), reasoningEffort: z.string().trim().min(1).optional() }).strict()
 export type RoleModel = z.infer<typeof RoleModelSchema>

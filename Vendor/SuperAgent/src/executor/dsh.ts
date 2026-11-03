@@ -86,12 +86,21 @@ export const sourceTrigger = (host: { store: Pick<Store, 'triggers'> }, ticket: 
 
 /**
  * Returns additional system-prompt mandate instructions for a worker beyond the request: for work accepted proactively under
- * rules (`strength === 'inferred'`), restricts authorization to small internal changes within the rule scope; returns `''` for explicit requests.
+ * rules (`strength === 'inferred'`), restricts non-exploratory rules to small internal changes and grants exploratory rules
+ * workspace-scoped synthesis without repository mutation or unsolicited questions; returns `''` for explicit requests.
  */
-export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string {
-  return mandate.strength === 'inferred' ? 'This ticket has limited proactive authorization. Independently verify that it is a small change '
-    + 'internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product '
-    + 'decisions or clarification, stop and report dropped; do not expand scope.' : ''
+export function mandateInstructions(
+  mandate: Pick<Mandate, 'strength'> & { basis?: Partial<Pick<Mandate['basis'], 'rules'>> },
+  rules?: readonly { id: string; exploratory?: boolean | undefined }[],
+): string {
+  if (mandate.strength !== 'inferred') return ''
+  const matched = mandate.basis?.rules ?? []
+  const exploratory = !!rules && matched.length > 0 && matched.some(id => rules.some(rule => rule.id === id && rule.exploratory))
+  return exploratory
+    ? 'This ticket has exploratory proactive authorization within the matched rule scope. Synthesize grounded research, option trade-offs, or workspace deliverables without mutating existing user repositories or asking unsolicited clarification; if investigation finds no substantive value beyond the conversation, stop and report dropped.'
+    : 'This ticket has limited proactive authorization. Independently verify that it is a small change '
+      + 'internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product '
+      + 'decisions or clarification, stop and report dropped; do not expand scope.'
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,

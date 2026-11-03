@@ -84,6 +84,7 @@ declare const SettingsSchema: z.ZodObject<{
       id: z.ZodString;
       name: z.ZodString;
       enabled: z.ZodBoolean;
+      exploratory: z.ZodOptional<z.ZodBoolean>;
       instruction: z.ZodString;
     }, z.core.$strict>>>;
     sources: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -154,6 +155,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -199,6 +201,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -256,6 +259,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -308,6 +312,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -356,6 +361,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -417,6 +423,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;
@@ -463,6 +470,7 @@ declare class SourceRegistry implements SourceScope {
         name: string;
         enabled: boolean;
         instruction: string;
+        exploratory?: boolean | undefined;
       }[];
       sources: Record<string, {
         [x: string]: unknown;

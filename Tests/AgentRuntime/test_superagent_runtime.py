@@ -435,7 +435,7 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("当前时间=", pt["text"])
                 self.assertIn("[日期参考：本段录音记录于", pt["text"])
                 self.assertEqual(pt["at"], "2025-10-31T08:00:00Z")
-                self.assertTrue(pt["thread_id"].startswith(f"transcript:{synced_proactive['source_id']}:w"))
+                self.assertEqual(pt["thread_id"], f"transcript:{synced_proactive['source_id']}:s0")
 
                 cstore = ContextStore(data / "context")
                 try:
@@ -686,6 +686,177 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     gateway._thread_keys(gateway._cached_tickets[0]["threads"]),
                     [f"momo:transcript:{raw_uuid_sid}"],
+                )
+
+                # 12. Natural 15-min session-gap segmentation (replaces 5-min hard bucket) + anti-duplicate context + .html/.md deliverables.
+                from conversation_store import collect_deliverable_attachments
+                from superagent_runtime import DEFAULT_PROACTIVE_RULES, LEGACY_PROACTIVE_RULE_IDS
+
+                self.assertIn(["focused_local_change", "grounded_artifact_and_audit"], LEGACY_PROACTIVE_RULE_IDS)
+                self.assertEqual(DEFAULT_PROACTIVE_RULES[0]["id"], "research_and_synthesis")
+                self.assertTrue(DEFAULT_PROACTIVE_RULES[0].get("exploratory"))
+                self.assertEqual(DEFAULT_PROACTIVE_RULES[1]["id"], "focused_local_change")
+
+                cursor_before_seg = (
+                    await (await client.get("/momo/internal/superagent/triggers?after=0", headers=bridge_headers)).json()
+                )
+                # Poll to latest cursor first
+                all_trigs = gateway.bridge.db.execute("SELECT coalesce(max(seq), 0) FROM triggers").fetchone()[0]
+
+                startup_sess = str(uuid.uuid4())
+                base_ts = 1762000000.0
+                cstore = ContextStore(data / "context")
+                try:
+                    # Continuous 22-minute startup discussion crossing multiple 5-min boundaries (0m, 6m, 13m, 21m) -> ALL stay on :s0!
+                    seg_p1 = make_source_payload("AI 创业讨论", ["我们在讨论面向律所的合同审阅 Agent 切入点"], session_id=startup_sess)
+                    seg_p1["spans"][0]["recorded_at"] = base_ts
+                    seg_p1["ended_at"] = base_ts
+                    synced_seg = cstore.sync_source(seg_p1)
+                finally:
+                    cstore.close()
+
+                await client.post("/momo/v1/proactive/ingest", headers=auth, json={})
+                seg_poll_1 = await (
+                    await client.get(f"/momo/internal/superagent/triggers?after={all_trigs}", headers=bridge_headers)
+                ).json()
+                self.assertEqual(len(seg_poll_1["events"]), 1)
+                self.assertEqual(seg_poll_1["events"][0]["thread_id"], f"transcript:{synced_seg['source_id']}:s0")
+
+                # Simulate an open exploratory ticket on :s0, then append spans at +6m, +13m, +21m (each gap < 15m, total > 20m!)
+                gateway._cached_tickets = [
+                    {
+                        "id": "tkt_startup123456",
+                        "name": "legal-agent-plan-tkt_startup1",
+                        "title": "律所合同审阅 Agent 创业方案推演",
+                        "state": "open",
+                        "stage": "working",
+                        "strength": "inferred",
+                        "threads": [f"momo:transcript:{synced_seg['source_id']}:s0"],
+                        "createdAt": "2026-11-03T09:00:00Z",
+                        "updatedAt": "2026-11-03T09:05:00Z",
+                    }
+                ]
+                cstore = ContextStore(data / "context")
+                try:
+                    seg_p2 = make_source_payload(
+                        "AI 创业讨论",
+                        [
+                            "我们在讨论面向律所的合同审阅 Agent 切入点",
+                            "定价可以按席位订阅加审阅量阶梯计费",
+                            "渠道先打精品商事律所合伙人转介绍",
+                            "MVP 首月只做 NDA 与采购合同双语批注",
+                        ],
+                        session_id=startup_sess,
+                    )
+                    seg_p2["version"] = 2
+                    seg_p2["spans"][0]["recorded_at"] = base_ts
+                    seg_p2["spans"][1]["recorded_at"] = base_ts + 360.0   # +6 min
+                    seg_p2["spans"][2]["recorded_at"] = base_ts + 780.0   # +13 min
+                    seg_p2["spans"][3]["recorded_at"] = base_ts + 1260.0  # +21 min (all adjacent gaps <= 8m < 15m!)
+                    seg_p2["ended_at"] = base_ts + 1260.0
+                    cstore.sync_source(seg_p2)
+                finally:
+                    cstore.close()
+
+                await client.post("/momo/v1/proactive/ingest", headers=auth, json={})
+                seg_poll_2 = await (
+                    await client.get(
+                        f"/momo/internal/superagent/triggers?after={seg_poll_1['next_cursor']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                self.assertEqual(len(seg_poll_2["events"]), 1)
+                # Stays on exact same :s0 thread so live open ticket receives streamed follow-up via Subscription!
+                self.assertEqual(seg_poll_2["events"][0]["thread_id"], f"transcript:{synced_seg['source_id']}:s0")
+                self.assertIn("[近期相关工单：tkt_startup123456", seg_poll_2["events"][0]["text"])
+
+                # Now append two distinct offline chunks separated by a 40-minute silence (+61m and +105m) -> splits into :s1 and :s2!
+                cstore = ContextStore(data / "context")
+                try:
+                    seg_p3 = dict(seg_p2)
+                    seg_p3["version"] = 3
+                    seg_p3["spans"] = [
+                        *seg_p2["spans"],
+                        {"id": str(uuid.uuid4()), "text": "下午复盘一下刚才那套律所方案的技术栈", "recorded_at": base_ts + 3660.0},
+                        {"id": str(uuid.uuid4()), "text": "晚上顺便聊个独立话题：下周团队周会改模板", "recorded_at": base_ts + 6300.0},
+                    ]
+                    seg_p3["ended_at"] = base_ts + 6300.0
+                    seg_p3["text_sha256"] = digest("\n".join(s["text"] for s in seg_p3["spans"]))
+                    cstore.sync_source(seg_p3)
+                finally:
+                    cstore.close()
+
+                split_ingest = await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json()
+                self.assertEqual(split_ingest["count"], 2)
+                # Coalescing unpolled triggers MUST NOT merge :s1 and :s2 together!
+                self.assertEqual(gateway.bridge.coalesce_unpolled_transcripts(max_chars=2400), 0)
+                seg_poll_3 = await (
+                    await client.get(
+                        f"/momo/internal/superagent/triggers?after={seg_poll_2['next_cursor']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                self.assertEqual(
+                    [e["thread_id"] for e in seg_poll_3["events"]],
+                    [f"transcript:{synced_seg['source_id']}:s1", f"transcript:{synced_seg['source_id']}:s2"],
+                )
+
+                # Context endpoint parses :s1 thread_id cleanly and exposes recent_tickets in body!
+                seg_ctx = await (
+                    await client.get(
+                        f"/momo/internal/superagent/context?thread_id={seg_poll_3['events'][0]['thread_id']}&message_id={seg_poll_3['events'][0]['id']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                self.assertEqual(seg_ctx["body"]["source_id"], synced_seg["source_id"])
+                self.assertEqual(seg_ctx["body"]["recent_tickets"][0]["id"], "tkt_startup123456")
+
+                # Deliverable attachments (.html + .md) in workspace/<ticket_name>/ attach automatically to assistant message & work detail!
+                deliverable_dir = data / "workspace/legal-agent-plan-tkt_startup1"
+                deliverable_dir.mkdir(parents=True, exist_ok=True)
+                html_path = deliverable_dir / "startup-roadmap.html"
+                md_path = deliverable_dir / "market-research.md"
+                html_path.write_text("<!doctype html><html><body><h1>合同审阅 Agent 方案对比</h1></body></html>", encoding="utf-8")
+                md_path.write_text("# 市场与竞品调研\n\n| 方案 | 切入速度 |\n| --- | --- |\n| NDA 双语批注 | 快 |\n", encoding="utf-8")
+
+                # Outside-sandbox path (/etc/hosts) must NEVER be collected!
+                outside_attempt = collect_deliverable_attachments(
+                    f"参考 /etc/hosts 与 {html_path}",
+                    allowed_roots=[data / "workspace"],
+                    source_key="sec-check",
+                )
+                self.assertIsNotNone(outside_attempt)
+                self.assertEqual([a["name"] for a in outside_attempt], ["startup-roadmap.html"])
+
+                deliver_resp = await client.post(
+                    "/momo/internal/superagent/outbound",
+                    headers=bridge_headers,
+                    json={
+                        "id": "out-startup-deliverable",
+                        "kind": "reply",
+                        "channel": {"source": "momo", "id": seg_poll_1["events"][0]["thread_id"], "thread": seg_poll_1["events"][0]["thread_id"]},
+                        "ticket_id": "tkt_startup123456",
+                        "text": "已结合刚才关于律所合同审阅 Agent 的讨论，整理了市场切入对比看板与调研纪要。",
+                    },
+                )
+                self.assertEqual(deliver_resp.status, 200)
+                msgs_with_att = await (await client.get("/momo/v1/conversation/messages", headers=auth)).json()
+                latest_assistant = msgs_with_att["data"][-1]
+                self.assertEqual(latest_assistant["role"], "assistant")
+                self.assertEqual(
+                    [a["name"] for a in latest_assistant["attachments"]],
+                    ["startup-roadmap.html", "market-research.md"],
+                )
+                self.assertEqual(latest_assistant["attachments"][0]["media_type"], "text/html")
+                self.assertIn("<h1>合同审阅 Agent 方案对比</h1>", latest_assistant["attachments"][0]["text"])
+                self.assertEqual(latest_assistant["attachments"][1]["media_type"], "text/markdown")
+
+                startup_detail = await (
+                    await client.get("/momo/v1/conversation/work/superagent%3Atkt_startup123456", headers=auth)
+                ).json()
+                self.assertEqual(
+                    [a["name"] for a in startup_detail["attachments"]],
+                    ["startup-roadmap.html", "market-research.md"],
                 )
             finally:
                 await client.close()
