@@ -777,6 +777,46 @@ class SuperAgentGateway:
                         await asyncio.to_thread(self._stop_dsh_process)
             await asyncio.sleep(1.0)
 
+    @staticmethod
+    def _thread_keys(raw_threads: object) -> list[str]:
+        if not isinstance(raw_threads, list):
+            return []
+        keys: list[str] = []
+        for item in raw_threads:
+            if isinstance(item, dict):
+                k = str(item.get("key") or item.get("id") or "").strip()
+                if k:
+                    keys.append(k)
+            elif isinstance(item, str) and item.strip():
+                keys.append(item.strip())
+        return keys
+
+    @staticmethod
+    def _format_dsh_reason(raw_reason: object) -> str | None:
+        if isinstance(raw_reason, str):
+            return raw_reason.strip() or None
+        if not isinstance(raw_reason, list):
+            return None
+        parts: list[str] = []
+        code_labels = {
+            "explicitRouted": "编排器显式路由派发",
+            "proactiveAccepted": "主动规则命中派发",
+        }
+        for item in raw_reason:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                vals = item.get("values")
+                if isinstance(vals, dict):
+                    txt = str(vals.get("text") or vals.get("note") or "").strip()
+                    if txt:
+                        parts.append(txt)
+                        continue
+                code = str(item.get("code") or "").strip()
+                if code in code_labels:
+                    parts.append(code_labels[code])
+        return "；".join(parts) if parts else None
+
     def _unsubscribe_ended_transcript_threads(self, tickets: list[dict]) -> None:
         """Drop ended tickets' subscriptions to transcript threads so subsequent recording chunks never force-reopen ended tickets."""
         if not self.dsh_ready:
@@ -795,8 +835,7 @@ class SuperAgentGateway:
                 "canceled",
                 "cancelled",
             )
-            for th in t.get("threads") or ():
-                th_s = str(th)
+            for th_s in self._thread_keys(t.get("threads")):
                 if not th_s.startswith("momo:transcript:"):
                     continue
                 if is_ended:
@@ -842,9 +881,14 @@ class SuperAgentGateway:
 
         decisions_by_trigger: dict[str, dict] = {}
         for dec in decisions:
-            for trig in dec.get("triggerIds", ()):
-                decisions_by_trigger[trig] = dec
-            if dec.get("triggerId"):
+            if not isinstance(dec, dict):
+                continue
+            raw_trigs = dec.get("triggerIds")
+            if isinstance(raw_trigs, list):
+                for trig in raw_trigs:
+                    if isinstance(trig, str) and trig:
+                        decisions_by_trigger[trig] = dec
+            if isinstance(dec.get("triggerId"), str) and dec["triggerId"]:
                 decisions_by_trigger[dec["triggerId"]] = dec
         tickets_by_id = {t["id"]: t for t in tickets if isinstance(t, dict) and t.get("id")}
 
@@ -1062,10 +1106,10 @@ class SuperAgentGateway:
                 win_bucket = int(latest_span_ts // 300)
                 base_thread = f"transcript:{sid}:w{win_bucket}"
                 ended_threads = {
-                    str(th)
+                    th_s
                     for t in self._cached_tickets
                     if isinstance(t, dict) and (t.get("ended") or t.get("state") == "ended")
-                    for th in (t.get("threads") or ())
+                    for th_s in self._thread_keys(t.get("threads"))
                 }
                 candidate_thread = base_thread
                 suffix_idx = 1
@@ -1592,27 +1636,38 @@ class SuperAgentGateway:
         self, ticket: dict, *, linked_run: sqlite3.Row | None = None
     ) -> tuple[str, str, str | None, str | None, float | None, str | None]:
         tid = str(ticket.get("id") or "")
-        threads = [str(th) for th in (ticket.get("threads") or ()) if th]
+        threads = self._thread_keys(ticket.get("threads"))
         mandate = ticket.get("mandate") if isinstance(ticket.get("mandate"), dict) else {}
         basis = mandate.get("basis") if isinstance(mandate.get("basis"), dict) else {}
-        if basis.get("thread"):
-            threads.append(str(basis["thread"]))
+        if isinstance(basis.get("thread"), str) and basis["thread"].strip():
+            threads.append(basis["thread"].strip())
+        basis_scope = basis.get("scope") if isinstance(basis.get("scope"), dict) else {}
+        if isinstance(basis_scope.get("threadId"), str) and basis_scope["threadId"].strip():
+            threads.append(basis_scope["threadId"].strip())
 
         trigger_ids: list[str] = []
-        if basis.get("triggerId"):
-            trigger_ids.append(str(basis["triggerId"]))
+        if isinstance(basis.get("triggerId"), str) and basis["triggerId"].strip():
+            trigger_ids.append(basis["triggerId"].strip())
+        if isinstance(basis_scope.get("messageId"), str) and basis_scope["messageId"].strip():
+            trigger_ids.append(basis_scope["messageId"].strip())
         dec = ticket.get("decision") if isinstance(ticket.get("decision"), dict) else None
         if dec is None and tid:
             dec = next((d for d in self._cached_decisions if isinstance(d, dict) and d.get("ticketId") == tid), None)
         if isinstance(dec, dict):
-            for trig_id in dec.get("triggerIds") or ():
-                if trig_id:
-                    trigger_ids.append(str(trig_id))
-            if dec.get("triggerId"):
-                trigger_ids.append(str(dec["triggerId"]))
-        for inp in ticket.get("inputs") or ():
-            if isinstance(inp, dict) and inp.get("triggerId"):
-                trigger_ids.append(str(inp["triggerId"]))
+            if isinstance(dec.get("thread"), str) and dec["thread"].strip():
+                threads.append(dec["thread"].strip())
+            raw_dec_trigs = dec.get("triggerIds")
+            if isinstance(raw_dec_trigs, list):
+                for trig_id in raw_dec_trigs:
+                    if isinstance(trig_id, str) and trig_id.strip():
+                        trigger_ids.append(trig_id.strip())
+            if isinstance(dec.get("triggerId"), str) and dec["triggerId"].strip():
+                trigger_ids.append(dec["triggerId"].strip())
+        raw_inputs = ticket.get("inputs")
+        if isinstance(raw_inputs, list):
+            for inp in reversed(raw_inputs):
+                if isinstance(inp, dict) and isinstance(inp.get("triggerId"), str) and inp["triggerId"].strip():
+                    trigger_ids.append(inp["triggerId"].strip())
         if linked_run and linked_run["trigger_id"]:
             trigger_ids.append(str(linked_run["trigger_id"]))
 
@@ -1627,6 +1682,8 @@ class SuperAgentGateway:
                 break
 
         source_id: str | None = str(trig_row["source_id"]) if trig_row and trig_row["source_id"] else None
+        if not source_id and isinstance(basis_scope.get("sourceId"), str) and basis_scope["sourceId"].strip():
+            source_id = basis_scope["sourceId"].strip()
         if not source_id:
             for th in threads:
                 clean_th = th.removeprefix("momo:")
@@ -1639,10 +1696,12 @@ class SuperAgentGateway:
         is_transcript = (
             bool(source_id)
             or (trig_row is not None and trig_row["kind"] == "transcripts")
+            or basis_scope.get("stream") == "transcripts"
             or any(th.removeprefix("momo:").startswith("transcript:") for th in threads)
         )
         is_signal = (
             (trig_row is not None and trig_row["kind"] == "life_signals")
+            or basis_scope.get("stream") == "life_signals"
             or any(th.removeprefix("momo:").startswith("signal:") for th in threads)
         )
         if is_transcript:
@@ -1656,21 +1715,39 @@ class SuperAgentGateway:
 
         src_title, src_rec_at = self._lookup_source_meta(source_id) if source_id else (None, None)
         trig_title = str(trig_row["title"]).strip() if trig_row and trig_row["title"] else None
+        if trig_title and source_id and trig_title == source_id:
+            trig_title = None
         source_title = src_title or trig_title
-        source_recorded_at = src_rec_at
-        if source_recorded_at is None and trig_row and trig_row["kind"] == "transcripts":
-            # Parse explicit [YYYY-MM-DD HH:MM:SS] from trigger body if present, else fallback to at_iso.
-            txt = str(trig_row["text"] or "")
-            m = re.search(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", txt)
-            if m:
-                with suppress(ValueError):
-                    source_recorded_at = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
-            if source_recorded_at is None:
-                source_recorded_at = self._iso_to_epoch(trig_row["at_iso"])
 
-        raw_preview = str(trig_row["text"]) if trig_row and trig_row["text"] else (
-            str(dec.get("preview")) if isinstance(dec, dict) and dec.get("preview") else None
-        )
+        source_recorded_at: float | None = None
+        if trig_row and trig_row["kind"] == "transcripts":
+            txt = str(trig_row["text"] or "")
+            full_matches = re.findall(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", txt)
+            if full_matches:
+                with suppress(ValueError):
+                    source_recorded_at = time.mktime(time.strptime(full_matches[-1], "%Y-%m-%d %H:%M:%S"))
+            elif src_rec_at is not None:
+                hms_matches = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", txt)
+                if hms_matches:
+                    base_day = datetime.fromtimestamp(src_rec_at).strftime("%Y-%m-%d")
+                    with suppress(ValueError):
+                        source_recorded_at = time.mktime(
+                            time.strptime(f"{base_day} {hms_matches[-1]}", "%Y-%m-%d %H:%M:%S")
+                        )
+        if source_recorded_at is None:
+            source_recorded_at = src_rec_at
+        if source_recorded_at is None and trig_row and trig_row["kind"] == "transcripts":
+            source_recorded_at = self._iso_to_epoch(trig_row["at_iso"])
+
+        raw_preview: str | None = None
+        if trig_row and trig_row["text"]:
+            raw_preview = str(trig_row["text"])
+        elif isinstance(dec, dict):
+            direction = dec.get("direction")
+            if isinstance(direction, dict) and isinstance(direction.get("evidence"), str) and direction["evidence"].strip():
+                raw_preview = direction["evidence"].strip()
+            elif isinstance(dec.get("preview"), str) and dec["preview"].strip():
+                raw_preview = dec["preview"].strip()
         trigger_preview = self._clean_trigger_excerpt(raw_preview)
         return origin_kind, origin_label, source_id, source_title, source_recorded_at, trigger_preview
 
@@ -2077,17 +2154,35 @@ class SuperAgentGateway:
 
             mandate = detail_ticket.get("mandate") if isinstance(detail_ticket.get("mandate"), dict) else {}
             decision = detail_ticket.get("decision") if isinstance(detail_ticket.get("decision"), dict) else {}
-            scope = str(mandate.get("scope") or decision.get("reason") or "").strip() or None
+            raw_mandate_scope = mandate.get("scope")
+            scope = raw_mandate_scope.strip() if isinstance(raw_mandate_scope, str) and raw_mandate_scope.strip() else None
+            if not scope:
+                inputs_list = detail_ticket.get("inputs")
+                if isinstance(inputs_list, list):
+                    for inp in reversed(inputs_list):
+                        if isinstance(inp, dict) and isinstance(inp.get("note"), str) and inp["note"].strip():
+                            scope = inp["note"].strip()
+                            break
+            if not scope and isinstance(decision.get("direction"), dict):
+                ev = decision["direction"].get("evidence")
+                if isinstance(ev, str) and ev.strip():
+                    scope = ev.strip()
+            if not scope:
+                scope = self._format_dsh_reason(decision.get("reason"))
+
             matched_rules: list[str] = []
-            for r in decision.get("rules") or ():
-                if isinstance(r, dict) and r.get("matched"):
-                    rname = str(r.get("name") or r.get("id") or "").strip()
-                    if rname and rname not in matched_rules:
-                        matched_rules.append(rname)
+            raw_rules = decision.get("rules")
+            if isinstance(raw_rules, list):
+                for r in raw_rules:
+                    if isinstance(r, dict) and r.get("matched"):
+                        rname = str(r.get("name") or r.get("id") or "").strip()
+                        if rname and rname not in matched_rules:
+                            matched_rules.append(rname)
 
             summary = str(detail_ticket.get("summary") or "").strip() or None
-            if not summary:
-                for assign in reversed(detail_ticket.get("assignments") or ()):
+            raw_assignments = detail_ticket.get("assignments")
+            if not summary and isinstance(raw_assignments, list):
+                for assign in reversed(raw_assignments):
                     if isinstance(assign, dict) and isinstance(assign.get("report"), dict):
                         rep_sum = str(assign["report"].get("summary") or "").strip()
                         if rep_sum:

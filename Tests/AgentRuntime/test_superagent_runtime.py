@@ -605,6 +605,86 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("momo-cli recordings", detail["activities"][0]["detail"])
                 self.assertEqual(detail["activities"][1]["kind"], "subagent")
                 self.assertEqual(detail["activities"][1]["status"], "running")
+
+                # 11. Real dsh TicketList (int counts + dict threads) & explicit-routed TicketDetail schema.
+                raw_uuid_sid = f"dev-uuid/{uuid.uuid4()}"
+                gateway.bridge.enqueue_trigger(
+                    trigger_id=f"momo:transcript:{raw_uuid_sid}:0:1:abc",
+                    kind="transcripts",
+                    thread_id=f"transcript:{raw_uuid_sid}",
+                    message_id=f"transcript:{raw_uuid_sid}:0:1:abc",
+                    source_id=raw_uuid_sid,
+                    title=raw_uuid_sid,
+                    addressed=False,
+                    observed=True,
+                    text=f"[MoMo 同步录音转写 | source_id={raw_uuid_sid}]\n[2026-10-30 16:40:04] 按主分支官网整理设计参数",
+                )
+                gateway._cached_tickets = [
+                    {
+                        "id": "t-real-dsh-explicit",
+                        "title": "按当前主分支官网提取设计参数",
+                        "state": "ended",
+                        "stage": "ended",
+                        "strength": "explicit",
+                        "ended": {"at": "2026-11-03T04:27:01.996Z", "by": "executor", "outcome": "dropped"},
+                        "assignments": 59,
+                        "inputs": 155,
+                        "undelivered": 0,
+                        "threads": [
+                            {
+                                "key": f"momo:transcript:{raw_uuid_sid}",
+                                "source": "momo",
+                                "title": raw_uuid_sid,
+                                "facts": {},
+                            }
+                        ],
+                        "mandate": {
+                            "strength": "explicit",
+                            "basis": {
+                                "source": "momo",
+                                "scope": {
+                                    "stream": "transcripts",
+                                    "messageId": f"transcript:{raw_uuid_sid}:0:1:abc",
+                                    "threadId": f"transcript:{raw_uuid_sid}",
+                                    "sourceId": raw_uuid_sid,
+                                    "title": raw_uuid_sid,
+                                },
+                            },
+                        },
+                        "decision": {
+                            "kind": "accept",
+                            "outcome": "accept",
+                            "reason": [{"code": "explicitRouted"}],
+                            "triggerIds": [f"momo:transcript:{raw_uuid_sid}:0:1:abc"],
+                            "thread": f"momo:transcript:{raw_uuid_sid}",
+                            "rules": [],
+                        },
+                        "createdAt": "2026-11-02T09:36:37.244Z",
+                        "updatedAt": "2026-11-03T04:27:01.996Z",
+                    }
+                ]
+                real_works_resp = await client.get("/momo/v1/conversation/works?limit=10", headers=auth)
+                self.assertEqual(real_works_resp.status, 200)
+                real_works = await real_works_resp.json()
+                self.assertEqual(len(real_works["recent"]), 1)
+                self.assertEqual(real_works["recent"][0]["id"], "superagent:t-real-dsh-explicit")
+                self.assertEqual(real_works["recent"][0]["origin_kind"], "proactive_transcript")
+                self.assertEqual(real_works["recent"][0]["origin_label"], "录音主动派发")
+                self.assertIsNotNone(real_works["recent"][0]["source_recorded_at"])
+
+                real_detail_resp = await client.get(
+                    "/momo/v1/conversation/work/superagent%3At-real-dsh-explicit", headers=auth
+                )
+                self.assertEqual(real_detail_resp.status, 200)
+                real_detail = await real_detail_resp.json()
+                self.assertEqual(real_detail["scope"], "编排器显式路由派发")
+                self.assertEqual(real_detail["origin_label"], "录音主动派发")
+                self.assertIsNone(real_detail["source_title"])  # Raw UUID fallback suppressed when title == source_id
+                self.assertIn("按主分支官网整理设计参数", real_detail["trigger_preview"])
+                self.assertEqual(
+                    gateway._thread_keys(gateway._cached_tickets[0]["threads"]),
+                    [f"momo:transcript:{raw_uuid_sid}"],
+                )
             finally:
                 await client.close()
 
