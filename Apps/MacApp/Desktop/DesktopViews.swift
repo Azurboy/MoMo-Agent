@@ -321,8 +321,8 @@ struct DesktopChat: View {
         .accessibilityIdentifier("desktop.activeTasks")
         .popover(isPresented: $showingActiveTasks, arrowEdge: .bottom) {
             AgentActiveTasksSheet(store: store, isPopover: true)
-                .frame(width: 380)
-                .frame(minHeight: 240, maxHeight: 440)
+                .frame(width: 420)
+                .frame(minHeight: 300, maxHeight: 540)
         }
     }
 }
@@ -344,6 +344,7 @@ struct DesktopSettings: View {
     @State private var page = Page.advanced
     @State private var search = ""
     @State private var permissions = DesktopPermissionsController()
+    @State private var showingEngineTasks = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -530,13 +531,23 @@ struct DesktopSettings: View {
                     }.desktopSettingsRow()
                     if model.runtimeEngine == .superagent, let snap = model.proactiveSnapshot {
                         Divider().opacity(0.45)
-                        HStack {
-                            Text("引擎状态").font(.system(size: 14))
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("引擎状态").font(.system(size: 14))
+                                Text(snap.dshReady
+                                     ? String(localized: "已就绪 · 进行中 \(snap.activeTickets) · 已分析 \(snap.totalDecisions)")
+                                     : String(localized: "正在启动 DeepSeek SuperAgent…"))
+                                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                            }
                             Spacer()
-                            Text(snap.dshReady
-                                 ? String(localized: "已就绪 · 进行中 \(snap.activeTickets) · 已分析 \(snap.totalDecisions)")
-                                 : String(localized: "正在启动 DeepSeek SuperAgent…"))
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                            Button("查看任务") { showingEngineTasks.toggle() }
+                                .buttonStyle(DesktopSettingsButtonStyle())
+                                .accessibilityIdentifier("settings.superagentTasks")
+                                .popover(isPresented: $showingEngineTasks, arrowEdge: .bottom) {
+                                    AgentActiveTasksSheet(store: model.taskStore, isPopover: true)
+                                        .frame(width: 420)
+                                        .frame(minHeight: 300, maxHeight: 540)
+                                }
                         }.desktopSettingsRow()
                     }
                 }

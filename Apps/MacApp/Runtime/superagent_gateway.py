@@ -4,12 +4,14 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import suppress
+from datetime import datetime
 import hashlib
 import hmac
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import socket
@@ -17,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from urllib.parse import quote, unquote
 import urllib.error
 import urllib.request
 import uuid
@@ -140,7 +143,8 @@ class BridgeStore:
                 source_id TEXT PRIMARY KEY,
                 revision TEXT NOT NULL,
                 max_seq INTEGER NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                last_recorded_at REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS api_runs(
                 run_id TEXT PRIMARY KEY,
@@ -157,6 +161,8 @@ class BridgeStore:
         )
         with suppress(sqlite3.OperationalError):
             self.db.execute("ALTER TABLE triggers ADD COLUMN title TEXT")
+        with suppress(sqlite3.OperationalError):
+            self.db.execute("ALTER TABLE source_watermarks ADD COLUMN last_recorded_at REAL NOT NULL DEFAULT 0")
         path.chmod(0o600)
 
     def close(self) -> None:
@@ -262,12 +268,18 @@ class BridgeStore:
         for row in rows:
             by_source.setdefault(str(row["source_id"]), []).append(row)
 
-        def _strip_header(raw_text: str) -> str:
-            text = raw_text.strip()
-            if text.startswith("[MoMo 同步录音转写 |"):
-                _, sep, rest = text.partition("\n")
-                return rest.strip() if sep else text
-            return text
+        def _split_header_and_body(raw_text: str) -> tuple[str, str]:
+            lines = raw_text.strip().splitlines()
+            hdr: list[str] = []
+            idx = 0
+            while idx < len(lines):
+                stripped = lines[idx].strip()
+                if stripped.startswith("[MoMo 同步录音转写 |") or stripped.startswith("[⚠️"):
+                    hdr.append(stripped)
+                    idx += 1
+                else:
+                    break
+            return "\n".join(hdr), "\n".join(lines[idx:]).strip()
 
         to_delete: list[int] = []
         to_update: list[tuple[str, int]] = []
@@ -278,14 +290,16 @@ class BridgeStore:
             bucket_lines: list[str] = []
             bucket_chars = 0
             for item in group:
-                body = _strip_header(str(item["text"] or ""))
+                _, body = _split_header_and_body(str(item["text"] or ""))
                 if not body:
                     to_delete.append(int(item["seq"]))
                     continue
                 if bucket_rows and bucket_chars + len(body) + 1 > max_chars:
                     keep = bucket_rows[-1]
                     title = str(keep["title"] or sid)
-                    merged = f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n" + "\n".join(bucket_lines)
+                    keep_hdr, _ = _split_header_and_body(str(keep["text"] or ""))
+                    hdr_block = keep_hdr or f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]"
+                    merged = f"{hdr_block}\n" + "\n".join(bucket_lines)
                     to_update.append((merged, int(keep["seq"])))
                     to_delete.extend(int(r["seq"]) for r in bucket_rows[:-1])
                     bucket_rows = []
@@ -297,7 +311,9 @@ class BridgeStore:
             if len(bucket_rows) > 1:
                 keep = bucket_rows[-1]
                 title = str(keep["title"] or sid)
-                merged = f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n" + "\n".join(bucket_lines)
+                keep_hdr, _ = _split_header_and_body(str(keep["text"] or ""))
+                hdr_block = keep_hdr or f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]"
+                merged = f"{hdr_block}\n" + "\n".join(bucket_lines)
                 to_update.append((merged, int(keep["seq"])))
                 to_delete.extend(int(r["seq"]) for r in bucket_rows[:-1])
         if not to_delete and not to_update:
@@ -364,6 +380,8 @@ class SuperAgentGateway:
         self._cached_tickets: list[dict] = []
         self._cached_decisions: list[dict] = []
         self._cached_state: dict = {}
+        self._unsubscribed_legacy_threads: set[str] = set()
+        self._source_meta_cache: dict[str, tuple[str | None, float | None]] = {}
         self._stopping = False
         self.computer = SuperAgentComputer(self.data, self._computer_ticket)
 
@@ -444,35 +462,71 @@ class SuperAgentGateway:
         secret_file.chmod(0o600)
 
     def _ensure_proactive_baseline(self) -> None:
-        """Watermark historical recordings on first boot so existing archives are not replayed as live triggers."""
-        already = self.bridge.db.execute("SELECT 1 FROM meta WHERE key='proactive_baseline'").fetchone()
-        if already:
-            return
+        """Watermark historical recordings on first boot and backfill last_recorded_at so metadata revisions never replay old spans."""
         context_dir = self.data / "context"
-        now = time.time()
-        if (context_dir / "context.sqlite").is_file():
+        already = self.bridge.db.execute("SELECT 1 FROM meta WHERE key='proactive_baseline'").fetchone()
+        if not already:
+            now = time.time()
+            if (context_dir / "context.sqlite").is_file():
+                with suppress(Exception):
+                    from context_store import ContextStore
+
+                    cstore = ContextStore(context_dir)
+                    try:
+                        rows = cstore.db.execute(
+                            "SELECT id, revision, payload FROM sources WHERE deleted = 0"
+                        ).fetchall()
+                        with self.bridge.db:
+                            for row in rows:
+                                spans = json.loads(row["payload"]).get("spans") or []
+                                max_ts = max(
+                                    (float(s.get("recorded_at") or 0.0) for s in spans if isinstance(s, dict)),
+                                    default=0.0,
+                                )
+                                self.bridge.db.execute(
+                                    "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                                    (row["id"], row["revision"], len(spans) - 1, now, max_ts),
+                                )
+                    finally:
+                        cstore.close()
+            with self.bridge.db:
+                self.bridge.db.execute("INSERT OR REPLACE INTO meta VALUES('proactive_baseline', '1')")
+            if not self.store.db.execute("SELECT 1 FROM push_meta WHERE key='baseline'").fetchone():
+                with self.store.db:
+                    self.store.db.execute("INSERT INTO push_meta VALUES('baseline', '1')")
+            return
+
+        # Upgrade migration: populate last_recorded_at for pre-existing watermarks so diarization/summary edits never re-fire.
+        missing = self.bridge.db.execute(
+            "SELECT source_id FROM source_watermarks WHERE last_recorded_at <= 0 AND max_seq >= 0"
+        ).fetchall()
+        if missing and (context_dir / "context.sqlite").is_file():
             with suppress(Exception):
                 from context_store import ContextStore
 
                 cstore = ContextStore(context_dir)
                 try:
-                    rows = cstore.db.execute(
-                        "SELECT id, revision, payload FROM sources WHERE deleted = 0"
-                    ).fetchall()
-                    with self.bridge.db:
-                        for row in rows:
-                            spans = json.loads(row["payload"]).get("spans") or []
-                            self.bridge.db.execute(
-                                "INSERT OR REPLACE INTO source_watermarks VALUES(?,?,?,?)",
-                                (row["id"], row["revision"], len(spans) - 1, now),
+                    updates: list[tuple[float, str]] = []
+                    for mrow in missing:
+                        sid = str(mrow["source_id"])
+                        srow = cstore.db.execute("SELECT payload FROM sources WHERE id=?", (sid,)).fetchone()
+                        if not srow:
+                            continue
+                        spans = json.loads(srow["payload"]).get("spans") or []
+                        max_ts = max(
+                            (float(s.get("recorded_at") or 0.0) for s in spans if isinstance(s, dict)),
+                            default=0.0,
+                        )
+                        if max_ts > 0:
+                            updates.append((max_ts, sid))
+                    if updates:
+                        with self.bridge.db:
+                            self.bridge.db.executemany(
+                                "UPDATE source_watermarks SET last_recorded_at=? WHERE source_id=?",
+                                updates,
                             )
                 finally:
                     cstore.close()
-        with self.bridge.db:
-            self.bridge.db.execute("INSERT OR REPLACE INTO meta VALUES('proactive_baseline', '1')")
-        if not self.store.db.execute("SELECT 1 FROM push_meta WHERE key='baseline'").fetchone():
-            with self.store.db:
-                self.store.db.execute("INSERT INTO push_meta VALUES('baseline', '1')")
 
     def _dsh_pid_file(self) -> Path:
         return self.data / "superagent/dsh.pid"
@@ -712,6 +766,7 @@ class SuperAgentGateway:
                         raise RuntimeError(f"DSH runtime reported error state: {fetched[0].get('health', {}).get('runtime')}")
                     self._dsh_consecutive_failures = 0
                     self._apply_dsh_projections(*fetched)
+                    await asyncio.to_thread(self._unsubscribe_ended_transcript_threads, fetched[1])
                     self.publish_live_state()
                 except Exception as exc:
                     self._dsh_consecutive_failures += 1
@@ -721,6 +776,43 @@ class SuperAgentGateway:
                         self.dsh_error = str(exc)
                         await asyncio.to_thread(self._stop_dsh_process)
             await asyncio.sleep(1.0)
+
+    def _unsubscribe_ended_transcript_threads(self, tickets: list[dict]) -> None:
+        """Drop ended tickets' subscriptions to transcript threads so subsequent recording chunks never force-reopen ended tickets."""
+        if not self.dsh_ready:
+            return
+        open_threads: set[str] = set()
+        ended_threads: set[str] = set()
+        for t in tickets:
+            if not isinstance(t, dict):
+                continue
+            is_ended = bool(t.get("ended")) or str(t.get("state") or "") in (
+                "ended",
+                "completed",
+                "merged",
+                "dropped",
+                "stopped",
+                "canceled",
+                "cancelled",
+            )
+            for th in t.get("threads") or ():
+                th_s = str(th)
+                if not th_s.startswith("momo:transcript:"):
+                    continue
+                if is_ended:
+                    ended_threads.add(th_s)
+                else:
+                    open_threads.add(th_s)
+        for th_s in ended_threads - open_threads - self._unsubscribed_legacy_threads:
+            with suppress(Exception):
+                dsh_api_request(
+                    self.dsh_port,
+                    "POST",
+                    f"/orchestrator/api/threads/{quote(th_s, safe='')}/unsubscribe",
+                    {},
+                    timeout=3.0,
+                )
+                self._unsubscribed_legacy_threads.add(th_s)
 
     def _fetch_dsh_snapshots(self) -> tuple[dict, list[dict], list[dict]]:
         state = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/state", timeout=4.0)
@@ -849,35 +941,59 @@ class SuperAgentGateway:
                 sid = src["id"]
                 rev = src["revision"]
                 watermark = self.bridge.db.execute(
-                    "SELECT revision, max_seq, updated_at FROM source_watermarks WHERE source_id=?",
+                    "SELECT revision, max_seq, updated_at, last_recorded_at FROM source_watermarks WHERE source_id=?",
                     (sid,),
                 ).fetchone()
                 if watermark and watermark["revision"] == rev:
                     continue
                 prev_max = int(watermark["max_seq"]) if watermark else -1
+                prev_last_ts = float(watermark["last_recorded_at"] or 0.0) if watermark else 0.0
                 payload = json.loads(src["payload"])
                 spans = payload.get("spans") or []
                 if not spans:
                     with self.bridge.db:
                         self.bridge.db.execute(
-                            "INSERT OR REPLACE INTO source_watermarks VALUES(?,?,?,?)",
-                            (sid, rev, -1, now),
+                            "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                            (sid, rev, -1, now, prev_last_ts),
                         )
                     continue
                 max_seq = len(spans) - 1
-                new_spans = spans[prev_max + 1 :] if prev_max + 1 < len(spans) else spans[-8:]
+                max_span_ts = max(
+                    (float(s.get("recorded_at") or 0.0) for s in spans if isinstance(s, dict)),
+                    default=prev_last_ts,
+                )
+                if watermark is None:
+                    first_new_idx = 0
+                    new_spans = list(spans)
+                else:
+                    indexed_new = [
+                        (idx, s)
+                        for idx, s in enumerate(spans)
+                        if idx > prev_max and (prev_last_ts <= 0.0 or float(s.get("recorded_at") or 0.0) > prev_last_ts)
+                    ]
+                    if not indexed_new:
+                        # Non-append metadata/diarization/summary revision: advance watermark silently without re-triggering!
+                        with self.bridge.db:
+                            self.bridge.db.execute(
+                                "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                                (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
+                            )
+                        continue
+                    first_new_idx = indexed_new[0][0]
+                    new_spans = [s for _, s in indexed_new]
+
                 transcript_lines = []
                 for span in new_spans:
                     ts = float(span.get("recorded_at") or now)
-                    hhmmss = time.strftime("%H:%M:%S", time.localtime(ts))
+                    dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
                     speaker = f"{span['speaker']}: " if span.get("speaker") else ""
-                    transcript_lines.append(f"[{hhmmss}] {speaker}{span.get('text', '')}")
+                    transcript_lines.append(f"[{dt_str}] {speaker}{span.get('text', '')}")
                 body = "\n".join(transcript_lines).strip()
                 if not body:
                     with self.bridge.db:
                         self.bridge.db.execute(
-                            "INSERT OR REPLACE INTO source_watermarks VALUES(?,?,?,?)",
-                            (sid, rev, max_seq, now),
+                            "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                            (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
                         )
                     continue
                 is_final = bool(
@@ -900,35 +1016,74 @@ class SuperAgentGateway:
                         # Hold watermark while streaming ASR spans are actively arriving mid-thought.
                         continue
                 context_prefix = ""
-                if 0 <= prev_max < len(spans) and prev_max + 1 < len(spans):
-                    prior_spans = spans[max(0, prev_max - 5) : prev_max + 1]
+                if first_new_idx > 0:
+                    prior_spans = spans[max(0, first_new_idx - 6) : first_new_idx]
                     prior_lines = []
                     for pspan in prior_spans:
                         pts = float(pspan.get("recorded_at") or now)
-                        phhmmss = time.strftime("%H:%M:%S", time.localtime(pts))
+                        pdt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pts))
                         pspeaker = f"{pspan['speaker']}: " if pspan.get("speaker") else ""
                         ptxt = str(pspan.get("text") or "").strip()
                         if ptxt:
-                            prior_lines.append(f"[{phhmmss}] {pspeaker}{ptxt}")
+                            prior_lines.append(f"[{pdt_str}] {pspeaker}{ptxt}")
                     if prior_lines:
-                        prior_joined = "\n".join(prior_lines)[-480:]
+                        prior_joined = "\n".join(prior_lines)[-520:]
                         context_prefix = f"[近期前文参考]\n{prior_joined}\n[本次新增转写]\n"
                 with self.bridge.db:
                     self.bridge.db.execute(
-                        "INSERT OR REPLACE INTO source_watermarks VALUES(?,?,?,?)",
-                        (sid, rev, max_seq, now),
+                        "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                        (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
                     )
+                earliest_new_ts = min((float(s.get("recorded_at") or now) for s in new_spans), default=now)
+                latest_span_ts = max((float(s.get("recorded_at") or now) for s in new_spans), default=now)
+                rec_start_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(earliest_new_ts))
+                rec_end_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_span_ts))
+                rec_time_label = rec_start_str if rec_start_str[:16] == rec_end_str[:16] else f"{rec_start_str} ~ {rec_end_str}"
+                now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                rec_day = time.strftime("%Y-%m-%d", time.localtime(latest_span_ts))
+                today_day = time.strftime("%Y-%m-%d", time.localtime(now))
+                lag_seconds = max(0.0, now - latest_span_ts)
+                stale_warning = ""
+                if rec_day != today_day or lag_seconds >= 6 * 3600:
+                    lag_hours = lag_seconds / 3600.0
+                    sync_status = (
+                        f"跨日延迟补同步（滞后 {lag_hours:.1f} 小时，录音发生于 {rec_day}，并非今天 {today_day} 刚说的话）"
+                        if rec_day != today_day
+                        else f"延迟补同步（滞后 {lag_hours:.1f} 小时）"
+                    )
+                    stale_warning = (
+                        f"[⚠️ 历史日期录音提示：本段录音发生于 {rec_end_str}，距当前时间 {now_str} 已滞后 {lag_hours:.1f} 小时。"
+                        f"录音中的“今天/明天/今晚”均锚定在 {rec_day}，严禁当成 {today_day} 的新指令；"
+                        f"除非属于极少数跨日仍长期有效且核查后续记录确认未处理的硬核产出物，否则必须默认 ignore！]\n"
+                    )
+                else:
+                    sync_status = "实时同步" if lag_seconds < 600 else f"当日补同步（滞后 {int(lag_seconds // 60)} 分钟）"
+
+                win_bucket = int(latest_span_ts // 300)
+                base_thread = f"transcript:{sid}:w{win_bucket}"
+                ended_threads = {
+                    str(th)
+                    for t in self._cached_tickets
+                    if isinstance(t, dict) and (t.get("ended") or t.get("state") == "ended")
+                    for th in (t.get("threads") or ())
+                }
+                candidate_thread = base_thread
+                suffix_idx = 1
+                while f"momo:{candidate_thread}" in ended_threads:
+                    suffix_idx += 1
+                    candidate_thread = f"{base_thread}:r{suffix_idx}"
+
                 title = payload.get("title") or sid
                 event_id = f"transcript:{sid}:{rev[:24]}"
                 trigger_id = f"momo:{event_id}"
                 text = (
-                    f"[MoMo 同步录音转写 | source_id={sid} | 标题={title}]\n"
-                    f"{context_prefix}{body}"
+                    f"[MoMo 同步录音转写 | source_id={sid} | 标题={title} | 录音时间={rec_time_label} | 当前时间={now_str} | 同步状态={sync_status}]\n"
+                    f"{stale_warning}{context_prefix}{body}"
                 )
                 self.bridge.enqueue_trigger(
                     trigger_id=trigger_id,
                     kind="transcripts",
-                    thread_id=f"transcript:{sid}",
+                    thread_id=candidate_thread,
                     message_id=event_id,
                     source_id=sid,
                     title=title,
@@ -938,6 +1093,7 @@ class SuperAgentGateway:
                     human=True,
                     observed=True,
                     text=text,
+                    at_iso=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_span_ts)),
                 )
                 emitted.append(trigger_id)
         finally:
@@ -1360,26 +1516,212 @@ class SuperAgentGateway:
             **({"error": item["error"]} if item.get("error") else {}),
         }
 
-    def background_work(self) -> list[dict]:
-        items: list[dict] = []
-        for ticket in self._cached_tickets:
-            t_state = str(ticket.get("state") or "")
-            t_stage = str(ticket.get("stage") or "")
-            t_action = str(ticket.get("action") or "")
-            if (
-                ticket.get("ended")
-                or t_state in ("ended", "completed", "merged", "dropped", "stopped", "canceled", "cancelled")
-                or t_stage == "ended"
-            ):
+    @staticmethod
+    def _iso_to_epoch(raw: object) -> float | None:
+        if isinstance(raw, (int, float)):
+            val = float(raw)
+            return val / 1000.0 if val > 1e11 else val
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        with suppress(ValueError):
+            return datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).timestamp()
+        return None
+
+    def _lookup_source_meta(self, source_id: str) -> tuple[str | None, float | None]:
+        if not source_id:
+            return None, None
+        if source_id in self._source_meta_cache:
+            return self._source_meta_cache[source_id]
+        context_db = self.data / "context/context.sqlite"
+        if not context_db.is_file():
+            return None, None
+        title: str | None = None
+        recorded_at: float | None = None
+        with suppress(Exception):
+            conn = sqlite3.connect(context_db, timeout=3)
+            try:
+                row = conn.execute("SELECT payload FROM sources WHERE id=? AND deleted=0", (source_id,)).fetchone()
+                if row and row[0]:
+                    payload = json.loads(row[0])
+                    raw_title = str(payload.get("title") or "").strip()
+                    title = raw_title or None
+                    spans = payload.get("spans") or []
+                    span_ts = max(
+                        (float(s.get("recorded_at") or 0.0) for s in spans if isinstance(s, dict)),
+                        default=0.0,
+                    )
+                    if span_ts > 0:
+                        recorded_at = span_ts
+                    elif payload.get("recorded_at"):
+                        recorded_at = float(payload["recorded_at"])
+            finally:
+                conn.close()
+        if title is not None or recorded_at is not None:
+            self._source_meta_cache[source_id] = (title, recorded_at)
+        return title, recorded_at
+
+    @staticmethod
+    def _clean_trigger_excerpt(raw_text: str | None) -> str | None:
+        if not raw_text:
+            return None
+        kept: list[str] = []
+        in_prior = False
+        for line in raw_text.splitlines():
+            s = line.strip()
+            if not s:
                 continue
-            tid = str(ticket.get("id") or "")
-            if not tid:
+            if s.startswith("[MoMo 同步录音转写 |") or s.startswith("[⚠️"):
                 continue
-            linked = self.bridge.db.execute("SELECT run_id, work_id FROM chat_runs WHERE ticket_id=?", (tid,)).fetchone()
-            strength = str(ticket.get("strength") or "")
-            is_proactive = strength == "inferred" or (not linked and strength != "explicit")
-            if is_proactive and t_stage == "person" and t_action in ("blocked", "failed") and not ticket.get("attention"):
+            if s == "[近期前文参考]":
+                in_prior = True
                 continue
+            if s == "[本次新增转写]":
+                in_prior = False
+                continue
+            if not in_prior:
+                kept.append(s)
+        if not kept:
+            for line in raw_text.splitlines():
+                s = line.strip()
+                if s and not s.startswith("[MoMo 同步录音转写 |") and not s.startswith("[⚠️") and s not in ("[近期前文参考]", "[本次新增转写]"):
+                    kept.append(s)
+        joined = "\n".join(kept).strip()
+        return joined[:380] if joined else None
+
+    def _ticket_origin_and_source(
+        self, ticket: dict, *, linked_run: sqlite3.Row | None = None
+    ) -> tuple[str, str, str | None, str | None, float | None, str | None]:
+        tid = str(ticket.get("id") or "")
+        threads = [str(th) for th in (ticket.get("threads") or ()) if th]
+        mandate = ticket.get("mandate") if isinstance(ticket.get("mandate"), dict) else {}
+        basis = mandate.get("basis") if isinstance(mandate.get("basis"), dict) else {}
+        if basis.get("thread"):
+            threads.append(str(basis["thread"]))
+
+        trigger_ids: list[str] = []
+        if basis.get("triggerId"):
+            trigger_ids.append(str(basis["triggerId"]))
+        dec = ticket.get("decision") if isinstance(ticket.get("decision"), dict) else None
+        if dec is None and tid:
+            dec = next((d for d in self._cached_decisions if isinstance(d, dict) and d.get("ticketId") == tid), None)
+        if isinstance(dec, dict):
+            for trig_id in dec.get("triggerIds") or ():
+                if trig_id:
+                    trigger_ids.append(str(trig_id))
+            if dec.get("triggerId"):
+                trigger_ids.append(str(dec["triggerId"]))
+        for inp in ticket.get("inputs") or ():
+            if isinstance(inp, dict) and inp.get("triggerId"):
+                trigger_ids.append(str(inp["triggerId"]))
+        if linked_run and linked_run["trigger_id"]:
+            trigger_ids.append(str(linked_run["trigger_id"]))
+
+        trig_row: sqlite3.Row | None = None
+        for cand in trigger_ids:
+            lookup = cand if cand.startswith("momo:") else f"momo:{cand}"
+            trig_row = self.bridge.db.execute(
+                "SELECT * FROM triggers WHERE id=? OR message_id=? ORDER BY seq DESC LIMIT 1",
+                (lookup, cand.removeprefix("momo:")),
+            ).fetchone()
+            if trig_row is not None:
+                break
+
+        source_id: str | None = str(trig_row["source_id"]) if trig_row and trig_row["source_id"] else None
+        if not source_id:
+            for th in threads:
+                clean_th = th.removeprefix("momo:")
+                if clean_th.startswith("transcript:"):
+                    raw_sid = clean_th.partition(":")[2].split(":w", 1)[0]
+                    if raw_sid:
+                        source_id = raw_sid
+                        break
+
+        is_transcript = (
+            bool(source_id)
+            or (trig_row is not None and trig_row["kind"] == "transcripts")
+            or any(th.removeprefix("momo:").startswith("transcript:") for th in threads)
+        )
+        is_signal = (
+            (trig_row is not None and trig_row["kind"] == "life_signals")
+            or any(th.removeprefix("momo:").startswith("signal:") for th in threads)
+        )
+        if is_transcript:
+            origin_kind, origin_label = "proactive_transcript", "录音主动派发"
+        elif is_signal:
+            origin_kind, origin_label = "proactive_signal", "生活信号派发"
+        elif str(ticket.get("strength") or "") == "inferred" and not linked_run:
+            origin_kind, origin_label = "proactive_transcript", "主动跟进派发"
+        else:
+            origin_kind, origin_label = "chat", "对话派发"
+
+        src_title, src_rec_at = self._lookup_source_meta(source_id) if source_id else (None, None)
+        trig_title = str(trig_row["title"]).strip() if trig_row and trig_row["title"] else None
+        source_title = src_title or trig_title
+        source_recorded_at = src_rec_at
+        if source_recorded_at is None and trig_row and trig_row["kind"] == "transcripts":
+            # Parse explicit [YYYY-MM-DD HH:MM:SS] from trigger body if present, else fallback to at_iso.
+            txt = str(trig_row["text"] or "")
+            m = re.search(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", txt)
+            if m:
+                with suppress(ValueError):
+                    source_recorded_at = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            if source_recorded_at is None:
+                source_recorded_at = self._iso_to_epoch(trig_row["at_iso"])
+
+        raw_preview = str(trig_row["text"]) if trig_row and trig_row["text"] else (
+            str(dec.get("preview")) if isinstance(dec, dict) and dec.get("preview") else None
+        )
+        trigger_preview = self._clean_trigger_excerpt(raw_preview)
+        return origin_kind, origin_label, source_id, source_title, source_recorded_at, trigger_preview
+
+    def _project_ticket_work(self, ticket: dict, *, allow_ended: bool) -> dict | None:
+        tid = str(ticket.get("id") or "")
+        if not tid:
+            return None
+        t_state = str(ticket.get("state") or "")
+        t_stage = str(ticket.get("stage") or "")
+        t_action = str(ticket.get("action") or "")
+        ended_info = ticket.get("ended")
+        ended_outcome = (
+            str(ended_info.get("outcome") or "")
+            if isinstance(ended_info, dict)
+            else str(ended_info or "")
+        )
+        is_ended = (
+            bool(ended_info)
+            or t_state in ("ended", "completed", "merged", "dropped", "stopped", "canceled", "cancelled")
+            or t_stage == "ended"
+        )
+        if is_ended and not allow_ended:
+            return None
+        if not is_ended and allow_ended:
+            return None
+
+        linked = self.bridge.db.execute(
+            "SELECT run_id, work_id, trigger_id FROM chat_runs WHERE ticket_id=? ORDER BY seq DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        strength = str(ticket.get("strength") or "")
+        is_proactive = strength == "inferred" or (not linked and strength != "explicit")
+        if not is_ended and is_proactive and t_stage == "person" and t_action in ("blocked", "failed") and not ticket.get("attention"):
+            return None
+
+        if is_ended:
+            outcome = ended_outcome or t_state
+            if outcome in ("dropped",):
+                mapped_state = "dropped"
+                native_state = "proactive:dropped" if is_proactive else "dropped"
+            elif outcome in ("stopped", "canceled", "cancelled"):
+                mapped_state = "cancelled"
+                native_state = "stopped"
+            elif outcome in ("failed",):
+                mapped_state = "failed"
+                native_state = "failed"
+            else:
+                mapped_state = "completed"
+                native_state = "proactive:completed" if is_proactive else "completed"
+            cancellable = False
+        else:
             if t_stage == "working" and t_action == "queued":
                 mapped_state = "queued"
                 native_state = "proactive:queued" if is_proactive else "queued"
@@ -1393,30 +1735,456 @@ class SuperAgentGateway:
                 mapped_state = "running"
                 native_state = f"proactive:{t_stage or 'working'}" if is_proactive else (t_stage or "working")
             actions = ticket.get("actions") if isinstance(ticket.get("actions"), dict) else {}
-            items.append(
-                {
-                    "id": f"superagent:{tid}",
-                    "kind": "delegation",
-                    "work_id": linked["work_id"] if linked else f"proactive-{tid}",
-                    "origin_run_id": linked["run_id"] if linked else None,
-                    "title": str(ticket.get("title") or tid)[:80],
-                    "execution_generation": 1,
-                    "state": mapped_state,
-                    "native_state": native_state,
-                    "report_state": (
-                        "failed"
-                        if t_action == "delivery"
-                        else ("blocked" if t_action == "blocked" else "pending")
-                    ),
-                    "wait_reason": "clarify" if ticket.get("attention") or t_action == "answer" else None,
-                    "blocking_work_id": None,
-                    "report_retry_available": False,
-                    "cancellable": bool(actions.get("stop", True)),
-                    "cancel_requested": False,
-                    "cancel_state": None,
-                }
-            )
+            cancellable = bool(actions.get("stop", True))
+
+        origin_kind, origin_label, _, _, source_recorded_at, _ = self._ticket_origin_and_source(
+            ticket, linked_run=linked
+        )
+        created_at = self._iso_to_epoch(ticket.get("createdAt"))
+        ended_at = self._iso_to_epoch(ended_info.get("at")) if isinstance(ended_info, dict) else None
+        updated_at = self._iso_to_epoch(ticket.get("updatedAt")) or ended_at or created_at
+        raw_summary = str(ticket.get("summary") or "").strip() or None
+
+        return {
+            "id": f"superagent:{tid}",
+            "kind": "delegation",
+            "work_id": linked["work_id"] if linked else f"proactive-{tid}",
+            "origin_run_id": linked["run_id"] if linked else None,
+            "title": str(ticket.get("title") or tid)[:80],
+            "execution_generation": 1,
+            "state": mapped_state,
+            "native_state": native_state,
+            "report_state": (
+                "reported"
+                if is_ended
+                else (
+                    "failed"
+                    if t_action == "delivery"
+                    else ("blocked" if t_action == "blocked" else "pending")
+                )
+            ),
+            "wait_reason": None if is_ended else ("clarify" if ticket.get("attention") or t_action == "answer" else None),
+            "blocking_work_id": None,
+            "report_retry_available": False,
+            "cancellable": cancellable,
+            "cancel_requested": False,
+            "cancel_state": None,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "source_recorded_at": source_recorded_at,
+            "origin_kind": origin_kind,
+            "origin_label": origin_label,
+            "summary": raw_summary,
+        }
+
+    def background_work(self) -> list[dict]:
+        items: list[dict] = []
+        for ticket in self._cached_tickets:
+            if not isinstance(ticket, dict):
+                continue
+            projected = self._project_ticket_work(ticket, allow_ended=False)
+            if projected is not None:
+                items.append(projected)
         return items
+
+    def recent_work(self, limit: int = 15) -> list[dict]:
+        items: list[dict] = []
+        for ticket in self._cached_tickets:
+            if not isinstance(ticket, dict):
+                continue
+            projected = self._project_ticket_work(ticket, allow_ended=True)
+            if projected is not None:
+                items.append(projected)
+        items.sort(key=lambda w: float(w.get("updated_at") or w.get("created_at") or 0.0), reverse=True)
+        return items[: max(1, min(50, limit))]
+
+    @staticmethod
+    def _decompress_zstd_lines(raw: bytes) -> list[str]:
+        from compression import zstd
+
+        out = bytearray()
+        mv = memoryview(raw)
+        pos = 0
+        while pos < len(mv):
+            dec = zstd.ZstdDecompressor()
+            try:
+                out.extend(dec.decompress(mv[pos:]))
+            except Exception:
+                break
+            if not dec.eof:
+                break
+            consumed = len(mv[pos:]) - len(dec.unused_data)
+            if consumed <= 0:
+                break
+            pos += consumed
+        return out.decode("utf-8", errors="replace").splitlines()
+
+    def _parse_worker_session(
+        self, ticket_id: str, *, is_active: bool
+    ) -> tuple[int, int, str | None, list[dict], list[dict]]:
+        if not ticket_id or "/" in ticket_id or ".." in ticket_id:
+            return 0, 0, None, [], []
+        sessions_root = self.data / "superagent/dsh-home/sessions"
+        if not sessions_root.is_dir():
+            return 0, 0, None, [], []
+        candidates = sorted(sessions_root.glob(f"**/worker-{ticket_id}/session.v4.jsonl.zstd"))
+        is_compressed = True
+        if not candidates:
+            candidates = sorted(sessions_root.glob(f"**/worker-{ticket_id}/session.v4.jsonl"))
+            is_compressed = False
+        if not candidates:
+            return 0, 0, None, [], []
+
+        session_file = candidates[-1]
+        try:
+            raw_bytes = session_file.read_bytes()
+            lines = (
+                self._decompress_zstd_lines(raw_bytes)
+                if is_compressed
+                else raw_bytes.decode("utf-8", errors="replace").splitlines()
+            )
+        except Exception:
+            return 0, 0, None, [], []
+
+        turn_count = 0
+        step_count = 0
+        cwd_path: str | None = None
+        todos: list[dict] = []
+        activities: list[dict] = []
+        by_call_id: dict[str, dict] = {}
+        cli_path = str(self.data / "superagent/state/momo-cli")
+
+        for ln in lines:
+            if not ln.strip():
+                continue
+            try:
+                ev = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            ev_type = str(ev.get("type") or "")
+            ts_ms = ev.get("time") or ev.get("createdAt")
+            ts_sec = (float(ts_ms) / 1000.0) if isinstance(ts_ms, (int, float)) and ts_ms > 1e11 else (
+                float(ts_ms) if isinstance(ts_ms, (int, float)) else None
+            )
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+
+            if ev_type == "session":
+                if ev.get("cwd"):
+                    cwd_path = str(ev["cwd"])
+            elif ev_type == "turn/start":
+                turn_count += 1
+            elif ev_type == "step/start":
+                step_count += 1
+            elif ev_type == "assistant/message":
+                msg = data.get("message") if isinstance(data.get("message"), dict) else {}
+                for block in msg.get("content") or ():
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        txt = " ".join(str(block.get("text") or "").split()).strip()
+                        if txt:
+                            activities.append(
+                                {
+                                    "id": f"msg-{ev.get('seq', len(activities))}",
+                                    "kind": "thought",
+                                    "title": txt[:76] + ("…" if len(txt) > 76 else ""),
+                                    "detail": txt[:260] if len(txt) > 76 else None,
+                                    "status": "completed",
+                                    "timestamp": ts_sec,
+                                }
+                            )
+            elif ev_type == "tool/call":
+                call_id = str(data.get("callId") or f"call-{ev.get('seq', len(activities))}")
+                name = str(data.get("name") or "tool")
+                raw_args = data.get("arguments")
+                if isinstance(raw_args, str):
+                    try:
+                        args = json.loads(raw_args)
+                    except ValueError:
+                        args = {}
+                elif isinstance(raw_args, dict):
+                    args = raw_args
+                else:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+
+                if name == "skill":
+                    continue
+                if name == "todo_write":
+                    raw_todos = args.get("todos")
+                    if isinstance(raw_todos, list):
+                        parsed_todos: list[dict] = []
+                        for idx, td in enumerate(raw_todos):
+                            if isinstance(td, dict) and td.get("content"):
+                                parsed_todos.append(
+                                    {
+                                        "id": str(td.get("id") or f"todo-{idx}"),
+                                        "content": str(td["content"]),
+                                        "status": str(td.get("status") or "pending"),
+                                    }
+                                )
+                        if parsed_todos:
+                            todos = parsed_todos
+                    continue
+
+                kind = "tool"
+                title = f"调用工具 {name}"
+                detail: str | None = None
+                if name == "bash":
+                    desc = " ".join(str(args.get("description") or "").split()).strip()
+                    cmd = " ".join(str(args.get("command") or "").split()).strip()
+                    if cli_path:
+                        cmd = cmd.replace(f'"{cli_path}"', "momo-cli").replace(cli_path, "momo-cli")
+                    cmd = cmd.replace('"$DSH_SUPERAGENT_MOMO_CLI"', "momo-cli")
+                    title = desc or (f"运行命令：{cmd[:48]}" if cmd else "执行终端命令")
+                    detail = cmd[:180] if cmd else None
+                elif name in ("read", "write", "edit", "multi_edit"):
+                    fp = str(args.get("file_path") or args.get("path") or "").strip()
+                    verb = "读取文件" if name == "read" else ("写入文件" if name == "write" else "修改文件")
+                    fname = Path(fp).name if fp else ""
+                    title = f"{verb} {fname}" if fname else verb
+                    detail = fp[-160:] if fp else None
+                elif name in ("glob", "grep"):
+                    pat = str(args.get("pattern") or "").strip()
+                    base = str(args.get("path") or "").strip()
+                    verb = "查找文件" if name == "glob" else "检索内容"
+                    title = f"{verb} {pat[:56]}" if pat else verb
+                    detail = base[-140:] if base else None
+                elif name in ("subagent", "task", "delegate"):
+                    kind = "subagent"
+                    role = str(
+                        args.get("role")
+                        or args.get("agent")
+                        or args.get("subagent_type")
+                        or args.get("description")
+                        or "子智能体"
+                    ).strip()
+                    prompt_preview = " ".join(str(args.get("prompt") or args.get("task") or "").split()).strip()
+                    title = f"派发子任务：{role[:52]}"
+                    detail = prompt_preview[:200] if prompt_preview else None
+                elif name == "orchestrator_read":
+                    res = str(args.get("resource") or "").strip()
+                    title = f"读取上下文 {res[:48]}" if res else "读取上下文"
+                elif name == "orchestrator_reply":
+                    kind = "report"
+                    purpose = str(args.get("purpose") or "result")
+                    msg_txt = " ".join(str(args.get("message") or args.get("text") or "").split()).strip()
+                    title = "向你发起确认提问" if purpose == "attention" else "向对话发送回复"
+                    detail = msg_txt[:220] if msg_txt else None
+                elif name == "orchestrator_report":
+                    kind = "report"
+                    rep_state = str(args.get("state") or "")
+                    rep_sum = " ".join(str(args.get("summary") or "").split()).strip()
+                    label_map = {
+                        "ready": "提交任务完成结论",
+                        "dropped": "核查后静默跳过",
+                        "waiting": "阶段性汇报并等待",
+                        "blocked": "汇报任务受阻",
+                        "failed": "汇报执行失败",
+                    }
+                    title = label_map.get(rep_state, f"汇报任务状态 ({rep_state})")
+                    detail = rep_sum[:240] if rep_sum else None
+                elif name in ("orchestrator_trigger_handback", "orchestrator_thread_unrelated"):
+                    kind = "report"
+                    title = "退回无关触发片段"
+                    reason = " ".join(str(args.get("reason") or "").split()).strip()
+                    detail = reason[:180] if reason else None
+                elif name in ("job_output", "job_kill"):
+                    title = "查看后台命令输出" if name == "job_output" else "终止后台命令"
+                    detail = str(args.get("job_id") or "") or None
+                elif args:
+                    detail = json.dumps(args, ensure_ascii=False)[:160]
+
+                item = {
+                    "id": call_id,
+                    "kind": kind,
+                    "title": title,
+                    "detail": detail,
+                    "status": "running",
+                    "timestamp": ts_sec,
+                }
+                activities.append(item)
+                by_call_id[call_id] = item
+            elif ev_type == "tool/result":
+                msg = data.get("message") if isinstance(data.get("message"), dict) else {}
+                src = msg.get("source") if isinstance(msg.get("source"), dict) else {}
+                call_id = str(msg.get("toolCallId") or src.get("callId") or "")
+                target_item = by_call_id.get(call_id)
+                if target_item is not None:
+                    is_err = bool(msg.get("isError"))
+                    target_item["status"] = "failed" if is_err else "completed"
+
+        if not is_active:
+            for act in activities:
+                if act["status"] == "running":
+                    act["status"] = "completed"
+
+        return turn_count, step_count, cwd_path, todos, activities[-40:]
+
+    def _build_work_detail(self, ident: str) -> dict | None:
+        ticket_id: str | None = None
+        if ident.startswith("superagent:"):
+            ticket_id = ident.removeprefix("superagent:")
+        elif ident.startswith("proactive-"):
+            ticket_id = ident.removeprefix("proactive-")
+
+        run_row = self.bridge.db.execute(
+            "SELECT * FROM chat_runs WHERE work_id=? OR run_id=? OR (ticket_id IS NOT NULL AND ticket_id=?) ORDER BY seq DESC LIMIT 1",
+            (ident, ident, ticket_id or ident),
+        ).fetchone()
+        if run_row and run_row["ticket_id"]:
+            ticket_id = str(run_row["ticket_id"])
+        elif ticket_id is None and run_row is None:
+            ticket_id = ident
+
+        detail_ticket: dict | None = None
+        if ticket_id:
+            if self.dsh_ready:
+                with suppress(Exception):
+                    fetched_detail = dsh_api_request(
+                        self.dsh_port,
+                        "GET",
+                        f"/orchestrator/api/tickets/{quote(ticket_id, safe='')}",
+                        timeout=4.0,
+                    )
+                    if isinstance(fetched_detail, dict) and fetched_detail.get("id"):
+                        detail_ticket = fetched_detail
+            if detail_ticket is None:
+                detail_ticket = next(
+                    (t for t in self._cached_tickets if isinstance(t, dict) and str(t.get("id")) == ticket_id),
+                    None,
+                )
+
+        if detail_ticket is None and run_row is None:
+            return None
+
+        if detail_ticket is not None:
+            tid = str(detail_ticket.get("id") or ticket_id or "")
+            projected = self._project_ticket_work(detail_ticket, allow_ended=False) or self._project_ticket_work(
+                detail_ticket, allow_ended=True
+            )
+            status = projected["state"] if projected else "running"
+            is_active = status in ("queued", "running", "waiting_for_input", "finalizing")
+            cancellable = bool(projected["cancellable"]) if projected else False
+            origin_kind, origin_label, source_id, source_title, source_recorded_at, trigger_preview = (
+                self._ticket_origin_and_source(detail_ticket, linked_run=run_row)
+            )
+            ended_info = detail_ticket.get("ended") if isinstance(detail_ticket.get("ended"), dict) else {}
+            created_at = self._iso_to_epoch(detail_ticket.get("createdAt"))
+            ended_at = self._iso_to_epoch(ended_info.get("at"))
+            updated_at = self._iso_to_epoch(detail_ticket.get("updatedAt")) or ended_at or created_at
+
+            mandate = detail_ticket.get("mandate") if isinstance(detail_ticket.get("mandate"), dict) else {}
+            decision = detail_ticket.get("decision") if isinstance(detail_ticket.get("decision"), dict) else {}
+            scope = str(mandate.get("scope") or decision.get("reason") or "").strip() or None
+            matched_rules: list[str] = []
+            for r in decision.get("rules") or ():
+                if isinstance(r, dict) and r.get("matched"):
+                    rname = str(r.get("name") or r.get("id") or "").strip()
+                    if rname and rname not in matched_rules:
+                        matched_rules.append(rname)
+
+            summary = str(detail_ticket.get("summary") or "").strip() or None
+            if not summary:
+                for assign in reversed(detail_ticket.get("assignments") or ()):
+                    if isinstance(assign, dict) and isinstance(assign.get("report"), dict):
+                        rep_sum = str(assign["report"].get("summary") or "").strip()
+                        if rep_sum:
+                            summary = rep_sum
+                            break
+            if not summary and isinstance(ended_info, dict) and ended_info.get("reason"):
+                summary = str(ended_info["reason"]).strip() or None
+
+            attention = detail_ticket.get("attention")
+            attention_question = (
+                str(attention.get("question") or "").strip() or None
+                if isinstance(attention, dict)
+                else None
+            )
+            turn_count, step_count, session_cwd, todos, activities = self._parse_worker_session(
+                tid, is_active=is_active
+            )
+            workspace_path = str(detail_ticket.get("directory") or session_cwd or "").strip() or None
+
+            status_labels = {
+                "queued": "排队等待执行",
+                "running": "正在等待你的确认" if attention_question else "正在执行",
+                "waiting_for_input": "等待你的确认",
+                "finalizing": "正在整理交付结果",
+                "completed": "已完成",
+                "dropped": "核查后静默跳过",
+                "cancelled": "已停止",
+                "failed": "执行未完成",
+            }
+            return {
+                "id": f"superagent:{tid}",
+                "ticket_id": tid,
+                "title": str(detail_ticket.get("title") or (run_row["title"] if run_row else tid))[:120],
+                "status": status,
+                "status_label": status_labels.get(status, status),
+                "origin_kind": origin_kind,
+                "origin_label": origin_label,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "ended_at": ended_at,
+                "source_id": source_id,
+                "source_title": source_title,
+                "source_recorded_at": source_recorded_at,
+                "trigger_preview": trigger_preview,
+                "scope": scope,
+                "matched_rules": matched_rules,
+                "summary": summary,
+                "attention_question": attention_question,
+                "workspace_path": workspace_path,
+                "cancellable": cancellable,
+                "turn_count": turn_count,
+                "step_count": step_count,
+                "todos": todos,
+                "activities": activities,
+            }
+
+        # Fallback: chat_run without an allocated Worker ticket yet
+        assert run_row is not None
+        proj = self._project_chat_run(run_row)
+        trig_preview = None
+        if run_row["trigger_id"]:
+            trow = self.bridge.db.execute(
+                "SELECT text FROM triggers WHERE id=? LIMIT 1", (run_row["trigger_id"],)
+            ).fetchone()
+            if trow:
+                trig_preview = self._clean_trigger_excerpt(str(trow["text"]))
+        msg_row = self.store.db.execute(
+            "SELECT content FROM messages WHERE run_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",
+            (run_row["run_id"],),
+        ).fetchone()
+        st = proj["status"]
+        return {
+            "id": str(run_row["work_id"]),
+            "ticket_id": None,
+            "title": str(run_row["title"]),
+            "status": st,
+            "status_label": "排队等待执行" if st == "queued" else ("正在执行" if st == "running" else st),
+            "origin_kind": "chat",
+            "origin_label": "对话派发",
+            "created_at": float(run_row["created_at"]),
+            "updated_at": float(run_row["updated_at"]),
+            "ended_at": float(run_row["updated_at"]) if st in ("completed", "failed", "cancelled") else None,
+            "source_id": None,
+            "source_title": None,
+            "source_recorded_at": None,
+            "trigger_preview": trig_preview,
+            "scope": None,
+            "matched_rules": [],
+            "summary": str(msg_row["content"])[:400] if msg_row else None,
+            "attention_question": None,
+            "workspace_path": None,
+            "cancellable": bool(proj["cancellable"]),
+            "turn_count": 0,
+            "step_count": 0,
+            "todos": [],
+            "activities": [],
+        }
 
     def run_page(self, after: int = 0, limit: int = 100, *, include_work: bool = True) -> dict:
         rows = self.bridge.db.execute(
@@ -1521,9 +2289,32 @@ class SuperAgentGateway:
                 return await self.store.events.subscribe(request, lambda: self._check_bearer(request) is None)
             if request.method == "POST" and suffix == "/messages":
                 return await self._handle_post_message(request)
+            if request.method == "GET" and suffix == "/works":
+                if set(request.query) - {"limit"}:
+                    raise ValueError("Invalid works query")
+                limit = int(request.query.get("limit", 15))
+                if not 1 <= limit <= 50:
+                    raise ValueError("Invalid works query")
+                if self.dsh_ready:
+                    with suppress(Exception):
+                        fetched = await asyncio.to_thread(self._fetch_dsh_snapshots)
+                        self._apply_dsh_projections(*fetched)
+                return web.json_response(
+                    {"active": self.background_work(), "recent": self.recent_work(limit=limit)}
+                )
+            if request.method == "GET" and suffix.startswith("/work/") and "/" not in suffix[len("/work/") :]:
+                if request.query:
+                    raise ValueError("Invalid work query")
+                ident = unquote(suffix[len("/work/") :])
+                if not ident or "/" in ident or ".." in ident:
+                    raise ValueError("Invalid work")
+                detail = await asyncio.to_thread(self._build_work_detail, ident)
+                if detail is None:
+                    raise web.HTTPNotFound()
+                return web.json_response(detail)
             if request.method == "POST" and suffix.startswith("/work/") and suffix.endswith("/cancel"):
-                ident = suffix[len("/work/") : -len("/cancel")]
-                if not ident or "/" in ident:
+                ident = unquote(suffix[len("/work/") : -len("/cancel")])
+                if not ident or "/" in ident or ".." in ident:
                     raise ValueError("Invalid work")
                 return await self._handle_cancel_work(ident, await request.json())
             if request.method == "POST" and suffix == "/adopt":
@@ -1833,7 +2624,8 @@ class SuperAgentGateway:
         except ValueError:
             limit = 20
         if thread_id.startswith("transcript:") or source_id:
-            sid = source_id or thread_id.partition(":")[2]
+            raw_tid = thread_id.partition(":")[2]
+            sid = source_id or raw_tid.split(":w", 1)[0]
             messages, next_cursor = self._transcript_thread_messages(
                 sid, message_id=message_id, cursor=cursor, limit=limit
             )
@@ -1893,9 +2685,9 @@ class SuperAgentGateway:
                 if not raw_text:
                     continue
                 ts = float(span.get("recorded_at") or src["updated"])
-                hhmmss = time.strftime("%H:%M:%S", time.localtime(ts))
+                dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
                 spk = str(span.get("speaker") or "").strip()
-                line = f"[{hhmmss}] {spk}: {raw_text}" if spk else f"[{hhmmss}] {raw_text}"
+                line = f"[{dt_str}] {spk}: {raw_text}" if spk else f"[{dt_str}] {raw_text}"
                 if buf_lines and buf_chars + len(line) + 1 > 1000:
                     passages.append(
                         {
@@ -1934,8 +2726,12 @@ class SuperAgentGateway:
                     trig_lines = [
                         ln.strip()
                         for ln in str(trig_row["text"]).splitlines()
-                        if ln.strip() and not ln.strip().startswith("[")
-                        or (ln.strip().startswith("[") and len(ln.strip()) > 10 and ln.strip()[3:4] == ":")
+                        if ln.strip()
+                        and (
+                            not ln.strip().startswith("[")
+                            or bool(re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", ln.strip()))
+                            or bool(re.match(r"^\[\d{2}:\d{2}:\d{2}\]", ln.strip()))
+                        )
                     ]
                     probe = trig_lines[-1] if trig_lines else ""
                     if probe:

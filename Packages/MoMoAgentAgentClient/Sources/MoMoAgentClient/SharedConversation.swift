@@ -71,12 +71,95 @@ public struct ConversationWork: Codable, Sendable, Identifiable, Equatable {
     public var waitReason: String? = nil
     public var blockingWorkID: String? = nil
     public var reportRetryAvailable: Bool? = nil
+    public var createdAt: Double? = nil
+    public var updatedAt: Double? = nil
+    public var sourceRecordedAt: Double? = nil
+    public var originKind: String? = nil
+    public var originLabel: String? = nil
+    public var summary: String? = nil
     public var isPending: Bool { reportState != "reported" }
     enum CodingKeys: String, CodingKey {
         case id, state, reportState = "report_state", kind, title, workID = "work_id", originRunID = "origin_run_id"
         case executionGeneration = "execution_generation", nativeState = "native_state", cancellable
         case cancelRequested = "cancel_requested", cancelState = "cancel_state"
         case waitReason = "wait_reason", blockingWorkID = "blocking_work_id", reportRetryAvailable = "report_retry_available"
+        case createdAt = "created_at", updatedAt = "updated_at", sourceRecordedAt = "source_recorded_at"
+        case originKind = "origin_kind", originLabel = "origin_label", summary
+    }
+}
+
+public struct ConversationWorkOverview: Codable, Sendable, Equatable {
+    public let active: [ConversationWork]
+    public let recent: [ConversationWork]
+    public init(active: [ConversationWork] = [], recent: [ConversationWork] = []) {
+        self.active = active
+        self.recent = recent
+    }
+}
+
+public struct ConversationWorkDetail: Codable, Sendable, Equatable, Identifiable {
+    public struct TodoItem: Codable, Sendable, Equatable, Identifiable {
+        public let id: String
+        public let content: String
+        public let status: String
+    }
+
+    public struct ActivityItem: Codable, Sendable, Equatable, Identifiable {
+        public let id: String
+        public let kind: String
+        public let title: String
+        public let detail: String?
+        public let status: String
+        public let timestamp: Double?
+    }
+
+    public let id: String
+    public let ticketID: String?
+    public let title: String
+    public let status: String
+    public let statusLabel: String
+    public let originKind: String
+    public let originLabel: String
+    public let createdAt: Double?
+    public let updatedAt: Double?
+    public let endedAt: Double?
+    public let sourceID: String?
+    public let sourceTitle: String?
+    public let sourceRecordedAt: Double?
+    public let triggerPreview: String?
+    public let scope: String?
+    public let matchedRules: [String]
+    public let summary: String?
+    public let attentionQuestion: String?
+    public let workspacePath: String?
+    public let cancellable: Bool
+    public let turnCount: Int
+    public let stepCount: Int
+    public let todos: [TodoItem]
+    public let activities: [ActivityItem]
+
+    public var isActive: Bool {
+        ["queued", "running", "waiting_for_input", "finalizing"].contains(status)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, status, scope, summary, cancellable, todos, activities
+        case ticketID = "ticket_id"
+        case statusLabel = "status_label"
+        case originKind = "origin_kind"
+        case originLabel = "origin_label"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case endedAt = "ended_at"
+        case sourceID = "source_id"
+        case sourceTitle = "source_title"
+        case sourceRecordedAt = "source_recorded_at"
+        case triggerPreview = "trigger_preview"
+        case matchedRules = "matched_rules"
+        case attentionQuestion = "attention_question"
+        case workspacePath = "workspace_path"
+        case turnCount = "turn_count"
+        case stepCount = "step_count"
     }
 }
 
@@ -179,5 +262,17 @@ extension AgentClient {
     public func markConversationRead(through seq: Int) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["through_seq": seq])
         _ = try await request(path: ["momo", "v1", "conversation", "read"], method: "POST", body: body)
+    }
+    public func workOverview(limit: Int = 15) async throws -> ConversationWorkOverview {
+        let clamped = max(1, min(50, limit))
+        let data = try await request(
+            path: ["momo", "v1", "conversation", "works"],
+            query: [.init(name: "limit", value: String(clamped))]
+        )
+        return try JSONDecoder().decode(ConversationWorkOverview.self, from: data)
+    }
+    public func workDetail(id: String) async throws -> ConversationWorkDetail {
+        let data = try await request(path: ["momo", "v1", "conversation", "work", id])
+        return try JSONDecoder().decode(ConversationWorkDetail.self, from: data)
     }
 }

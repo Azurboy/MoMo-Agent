@@ -798,6 +798,27 @@ import XCTest
         }
         XCTAssertEqual(store.connectionState, .ready)
     }
+
+    func testWorkOverviewAndDetailDecodingAndFetching() async throws {
+        let (_, connection, client, folder) = try fixture()
+        let store = try RemoteTaskStore(file: folder.appendingPathComponent("works.json"), connection: connection, client: client)
+        let overview = try await store.fetchWorkOverview(limit: 10)
+        XCTAssertEqual(overview.active.count, 1)
+        XCTAssertEqual(overview.active.first?.id, "superagent:t-live")
+        XCTAssertEqual(overview.active.first?.originLabel, "录音主动派发")
+        XCTAssertEqual(overview.recent.count, 1)
+        XCTAssertEqual(overview.recent.first?.state, "dropped")
+        XCTAssertFalse(overview.recent.first?.isPending ?? true)
+
+        let detail = try await store.fetchWorkDetail(id: "superagent:t-live")
+        XCTAssertEqual(detail.ticketID, "t-live")
+        XCTAssertTrue(detail.isActive)
+        XCTAssertEqual(detail.scope, "核查录音中的发布检查清单")
+        XCTAssertEqual(detail.matchedRules, ["明确备忘与交付物起草"])
+        XCTAssertEqual(detail.todos.count, 1)
+        XCTAssertEqual(detail.activities.count, 1)
+        XCTAssertEqual(detail.activities.first?.kind, "subagent")
+    }
 }
 
 private actor SharedWire: AgentTransport {
@@ -977,6 +998,60 @@ private actor SharedWire: AgentTransport {
                 }
             }
             return AgentByteStream(status: 200, contentType: "text/event-stream", chunks: AsyncThrowingStream { $0.yield(frame); $0.finish() })
+        } else if path.hasSuffix("/conversation/works") {
+            value = [
+                "active": [[
+                    "id": "superagent:t-live",
+                    "state": "running",
+                    "report_state": "pending",
+                    "title": "核查发布清单",
+                    "execution_generation": 1,
+                    "cancellable": true,
+                    "origin_kind": "proactive_transcript",
+                    "origin_label": "录音主动派发",
+                    "source_recorded_at": 1761897600.0
+                ]],
+                "recent": [[
+                    "id": "superagent:t-old",
+                    "state": "dropped",
+                    "report_state": "reported",
+                    "title": "历史讨论跳过",
+                    "execution_generation": 1,
+                    "cancellable": false,
+                    "origin_kind": "proactive_transcript",
+                    "origin_label": "录音主动派发"
+                ]]
+            ]
+        } else if path.contains("/conversation/work/") && request.httpMethod == "GET" {
+            value = [
+                "id": "superagent:t-live",
+                "ticket_id": "t-live",
+                "title": "核查发布清单",
+                "status": "running",
+                "status_label": "正在执行",
+                "origin_kind": "proactive_transcript",
+                "origin_label": "录音主动派发",
+                "created_at": 1762070400.0,
+                "updated_at": 1762070430.0,
+                "source_id": "lib/sess-1",
+                "source_title": "晚间备忘",
+                "source_recorded_at": 1761897600.0,
+                "trigger_preview": "[2025-10-31 16:00:00] 备忘一下：整理发布清单。",
+                "scope": "核查录音中的发布检查清单",
+                "matched_rules": ["明确备忘与交付物起草"],
+                "cancellable": true,
+                "turn_count": 1,
+                "step_count": 2,
+                "todos": [["id": "1", "content": "整理检查项", "status": "in_progress"]],
+                "activities": [[
+                    "id": "call-1",
+                    "kind": "subagent",
+                    "title": "派发子任务：核对版本构建配置",
+                    "detail": "检查 Config/App.xcconfig",
+                    "status": "running",
+                    "timestamp": 1762070420.0
+                ]]
+            ]
         } else if path.contains("/v1/runs/") { value = run(path.components(separatedBy: "/").last!); if unappliedSteering { value["status"] = "not_applied"; value["delivery_state"] = "not_applied" } }
         let body = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         return AgentByteStream(status: 200, contentType: "application/json", chunks: AsyncThrowingStream { $0.yield(body); $0.finish() })

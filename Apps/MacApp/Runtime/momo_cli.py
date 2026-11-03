@@ -11,10 +11,23 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Context"))
 sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
+
+
+def _local_dt(ts: float | int | None) -> str | None:
+    if ts is None:
+        return None
+    try:
+        val = float(ts)
+    except (TypeError, ValueError):
+        return None
+    if val <= 0:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(val))
 
 
 def _open_context(data: Path):
@@ -26,9 +39,18 @@ def _cmd_recordings(data: Path, args: argparse.Namespace) -> dict:
     store = _open_context(data)
     try:
         result = store.list_sources(args.after, args.limit)
-        for item in result.get("items", ()):
-            item.pop("windows", None)
+        items = result.get("items") or []
+        for item in items:
+            windows = item.pop("windows", None) or []
             item.pop("recorded_summary", None)
+            if item.get("recorded_at") is None and windows:
+                item["recorded_at"] = windows[0].get("recorded_at")
+            if windows:
+                item["ended_at"] = windows[-1].get("end_at")
+            item["recorded_at_local"] = _local_dt(item.get("recorded_at"))
+            item["ended_at_local"] = _local_dt(item.get("ended_at"))
+        items.sort(key=lambda x: float(x.get("ended_at") or x.get("recorded_at") or 0.0), reverse=True)
+        result["current_local_time"] = _local_dt(time.time())
         return result
     finally:
         store.close()
@@ -37,7 +59,15 @@ def _cmd_recordings(data: Path, args: argparse.Namespace) -> dict:
 def _cmd_recording(data: Path, args: argparse.Namespace) -> dict:
     store = _open_context(data)
     try:
-        return store.read_source(args.source_id, args.revision or None, args.offset, args.limit)
+        result = store.read_source(args.source_id, args.revision or None, args.offset, args.limit)
+        spans = result.get("spans") or []
+        for span in spans:
+            span["recorded_at_local"] = _local_dt(span.get("recorded_at"))
+        if spans:
+            result["recorded_start_local"] = spans[0].get("recorded_at_local")
+            result["recorded_end_local"] = spans[-1].get("recorded_at_local")
+        result["current_local_time"] = _local_dt(time.time())
+        return result
     finally:
         store.close()
 
@@ -51,12 +81,14 @@ def _cmd_search(data: Path, args: argparse.Namespace) -> dict:
         ).fetchall()
         matches: list[dict] = []
         limit = max(1, min(args.limit, 50))
+        now_local = _local_dt(time.time())
         for row in rows:
             payload = json.loads(row["payload"])
             title = payload.get("title") or row["id"]
             for idx, span in enumerate(payload.get("spans") or ()):
                 text = str(span.get("text") or "")
                 if query in text.lower():
+                    rec_at = span.get("recorded_at")
                     matches.append(
                         {
                             "source_id": row["id"],
@@ -64,13 +96,14 @@ def _cmd_search(data: Path, args: argparse.Namespace) -> dict:
                             "revision": row["revision"],
                             "seq": idx,
                             "span_id": span.get("id"),
-                            "recorded_at": span.get("recorded_at"),
+                            "recorded_at": rec_at,
+                            "recorded_at_local": _local_dt(rec_at),
                             "text": text,
                         }
                     )
                     if len(matches) >= limit:
-                        return {"query": args.query, "matches": matches}
-        return {"query": args.query, "matches": matches}
+                        return {"query": args.query, "current_local_time": now_local, "matches": matches}
+        return {"query": args.query, "current_local_time": now_local, "matches": matches}
     finally:
         store.close()
 
@@ -128,7 +161,7 @@ def _cmd_conversation(data: Path, args: argparse.Namespace) -> dict:
     import sqlite3
     db_path = data / "runtime/conversation.sqlite"
     if not db_path.is_file():
-        return {"messages": []}
+        return {"current_local_time": _local_dt(time.time()), "messages": []}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -136,7 +169,12 @@ def _cmd_conversation(data: Path, args: argparse.Namespace) -> dict:
             "SELECT seq, id, role, content, created_at, run_id FROM messages ORDER BY seq DESC LIMIT ?",
             (max(1, min(args.limit, 50)),),
         ).fetchall()
-        return {"messages": [dict(row) for row in reversed(rows)]}
+        messages = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["created_at_local"] = _local_dt(item.get("created_at"))
+            messages.append(item)
+        return {"current_local_time": _local_dt(time.time()), "messages": messages}
     finally:
         conn.close()
 

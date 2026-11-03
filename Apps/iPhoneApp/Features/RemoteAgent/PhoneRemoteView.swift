@@ -14,6 +14,7 @@ struct PhoneRemoteView: View {
     var chatIsVisible = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var showingTasks = false
+    @State private var tasksSheetDetent: PresentationDetent = .medium
     @State private var showingDesktop = false
     @State private var reconnecting = false
 
@@ -54,10 +55,12 @@ struct PhoneRemoteView: View {
         }
         .onChange(of: showingDesktop) { _, value in agent.notifications.desktopVisible = value }
         .onChange(of: agent.notifications.navigationRevision) { _, _ in showingDesktop = false; showingTasks = false }
-        .sheet(isPresented: $showingTasks) {
-            AgentActiveTasksSheet(store: agent.store)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+        .sheet(isPresented: $showingTasks, onDismiss: { tasksSheetDetent = .medium }) {
+            AgentActiveTasksSheet(store: agent.store) { isDetail in
+                if isDetail { tasksSheetDetent = .large }
+            }
+            .presentationDetents([.medium, .large], selection: $tasksSheetDetent)
+            .presentationDragIndicator(.visible)
         }
         .fullScreenCover(isPresented: $reconnecting) { PhoneConnectionFlow(agent: agent, reconnecting: true, finish: { reconnecting = false }) }
         .fullScreenCover(isPresented: $showingDesktop) { PhoneDesktopView(agent: agent) }

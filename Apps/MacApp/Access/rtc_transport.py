@@ -56,9 +56,11 @@ def permitted_route(method, path):
         return None
     if not context and target.startswith('/momo/v1/conversation'):
         suffix = target[len('/momo/v1/conversation'):]
-        if method == 'POST' and re.fullmatch(r'/work/[A-Za-z0-9_:-]+/(cancel|report-retry)', suffix) and not parts.query: return path, False, False
+        if method == 'POST' and re.fullmatch(r'/work/[A-Za-z0-9_%:-]+/(cancel|report-retry)', suffix) and '..' not in suffix and not parts.query: return path, False, False
+        if method == 'GET' and re.fullmatch(r'/work/[A-Za-z0-9_%:-]+', suffix) and '..' not in suffix and not parts.query: return path, False, False
         query = parse_qs(parts.query, keep_blank_values=True)
         if method == 'GET' and suffix in ('','/push','/snapshot') and not parts.query: return path, False, False
+        if method == 'GET' and suffix == '/works' and set(query) <= {'limit'} and all(len(v) == 1 and v[0].isdigit() for v in query.values()): return path, False, False
         if method == 'GET' and suffix == '/subscribe' and set(query) == {'after'} and len(query['after']) == 1 and query['after'][0].isdigit(): return path, False, True
         if method == 'GET' and suffix == '/runs' and set(query) <= {'after','limit'} and all(len(v) == 1 and v[0].isdigit() for v in query.values()): return path, False, False
         if method == 'GET' and suffix in ('/messages', '/events'):

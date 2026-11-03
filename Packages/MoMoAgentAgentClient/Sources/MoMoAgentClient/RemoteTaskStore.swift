@@ -605,6 +605,19 @@ public final class RemoteTaskStore {
         defer { controlsInFlight.remove(work.id) }
         await cancel(id: work.id, generation: generation)
     }
+    public func cancelBackgroundWorkByID(_ id: String, generation: Int = 1) async {
+        guard controlsInFlight.insert(id).inserted else { return }
+        defer { controlsInFlight.remove(id) }
+        await cancel(id: id, generation: generation)
+    }
+    public func fetchWorkOverview(limit: Int = 15) async throws -> ConversationWorkOverview {
+        guard canContactServer else { throw CancellationError() }
+        return try await client.workOverview(limit: limit)
+    }
+    public func fetchWorkDetail(id: String) async throws -> ConversationWorkDetail {
+        guard canContactServer else { throw CancellationError() }
+        return try await client.workDetail(id: id)
+    }
     private func cancel(id: String, generation: Int, targetRunID: String? = nil) async {
         if pendingCancellations[id] == nil { pendingCancellations[id] = Cancellation(operationID: UUID(), generation: generation, targetRunID: targetRunID) }
         do { try persist(tasks: tasks, draft: draft); try await sendCancellation(id); await receiveSharedMessages() }

@@ -138,6 +138,43 @@ class PersonalAgent(WorkRouting, ComputerGate):
                     from message_stream import stream_message
                     return await stream_message(request, receipt, self.adapter._run_streams)
                 return web.json_response(receipt)
+            if request.method == 'GET' and suffix == '/works':
+                if set(request.query) - {'limit'}: raise ValueError('Invalid works query')
+                limit = int(request.query.get('limit', 20))
+                if not 1 <= limit <= 50: raise ValueError('Invalid works query')
+                return web.json_response(dict(active=self.background_work(), recent=[]))
+            if request.method == 'GET' and suffix.startswith('/work/') and '/' not in suffix[len('/work/'):]:
+                from urllib.parse import unquote
+                ident = unquote(suffix[len('/work/'):])
+                if not ident or '/' in ident: raise ValueError('Invalid work')
+                active = next((w for w in self.background_work() if w['id'] == ident or w.get('work_id') == ident), None)
+                if active is None: raise web.HTTPNotFound()
+                return web.json_response(dict(
+                    id=active['id'],
+                    ticket_id=None,
+                    title=active.get('title') or '后台任务',
+                    status=active['state'],
+                    status_label='正在执行' if active['state'] == 'running' else active['state'],
+                    origin_kind='chat',
+                    origin_label='对话派发',
+                    created_at=None,
+                    updated_at=None,
+                    ended_at=None,
+                    source_id=None,
+                    source_title=None,
+                    source_recorded_at=None,
+                    trigger_preview=None,
+                    scope=None,
+                    matched_rules=[],
+                    summary=None,
+                    attention_question=None,
+                    workspace_path=None,
+                    cancellable=bool(active.get('cancellable')),
+                    turn_count=0,
+                    step_count=0,
+                    todos=[],
+                    activities=[],
+                ))
             if request.method=='POST' and suffix.startswith('/work/') and suffix.endswith('/cancel'):
                 ident=suffix[len('/work/'):-len('/cancel')]
                 if not ident or '/' in ident: raise ValueError('Invalid work')

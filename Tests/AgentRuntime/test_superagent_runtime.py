@@ -78,6 +78,17 @@ class RuntimeEngineConfigTests(unittest.TestCase):
         self.assertEqual(permitted_route("GET", "/momo/v1/proactive"), ("/momo/v1/proactive", False, False))
         self.assertEqual(permitted_route("POST", "/momo/v1/proactive"), ("/momo/v1/proactive", False, False))
         self.assertEqual(permitted_route("POST", "/momo/v1/proactive/ingest"), ("/momo/v1/proactive/ingest", False, False))
+        self.assertEqual(permitted_route("GET", "/momo/v1/conversation/works"), ("/momo/v1/conversation/works", False, False))
+        self.assertEqual(permitted_route("GET", "/momo/v1/conversation/works?limit=15"), ("/momo/v1/conversation/works?limit=15", False, False))
+        self.assertEqual(
+            permitted_route("GET", "/momo/v1/conversation/work/superagent%3At-101"),
+            ("/momo/v1/conversation/work/superagent%3At-101", False, False),
+        )
+        self.assertEqual(
+            permitted_route("GET", "/momo/v1/conversation/work/superagent:t-101"),
+            ("/momo/v1/conversation/work/superagent:t-101", False, False),
+        )
+        self.assertIsNone(permitted_route("GET", "/momo/v1/conversation/work/..%2Fsecret"))
         self.assertIsNone(permitted_route("GET", "/momo/v1/proactive/ingest"))
         self.assertIsNone(permitted_route("GET", "/momo/internal/superagent/triggers"))
 
@@ -417,6 +428,183 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(backlog_events), 1)
                 for idx in range(5):
                     self.assertIn(f"第 {idx} 段讨论内容", backlog_events[0]["text"])
+
+                # 9. Non-append revision updates (diarization / summary / speaker re-segmentation with no newer recorded_at)
+                #    advance watermarks silently and emit ZERO duplicate historical triggers; cross-day triggers include explicit dates.
+                self.assertIn("录音时间=", pt["text"])
+                self.assertIn("当前时间=", pt["text"])
+                self.assertIn("[⚠️ 历史日期录音提示", pt["text"])
+                self.assertEqual(pt["at"], "2025-10-31T08:00:00Z")
+                self.assertTrue(pt["thread_id"].startswith(f"transcript:{synced_proactive['source_id']}:w"))
+
+                cstore = ContextStore(data / "context")
+                try:
+                    diarized_payload = make_source_payload(
+                        "晚间备忘（已说话人分离）",
+                        ["备忘一下：", "明早九点前把发布检查表整理出来。"],
+                    )
+                    # Keep session_id identical and span timestamps <= original 1761897600.0 so this is a pure diarization re-segmentation!
+                    src_uuid = synced_proactive["source_id"].split("/", 1)[1]
+                    diarized_payload["session_id"] = src_uuid
+                    diarized_payload["version"] = 2
+                    diarized_payload["ended_at"] = 1761897600.0
+                    diarized_payload["spans"][0]["recorded_at"] = 1761897595.0
+                    diarized_payload["spans"][0]["speaker"] = "Speaker 1"
+                    diarized_payload["spans"][1]["recorded_at"] = 1761897600.0
+                    diarized_payload["spans"][1]["speaker"] = "Speaker 1"
+                    cstore.sync_source(diarized_payload)
+                finally:
+                    cstore.close()
+
+                re_ingested = await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json()
+                self.assertEqual(re_ingested["count"], 0)
+
+                # Ended ticket on the same 5-minute window forces next window suffix (:r2) instead of zombie-reopening ended ticket.
+                gateway._cached_tickets = [
+                    {
+                        "id": "t-ended-old",
+                        "title": "旧录音核查",
+                        "state": "ended",
+                        "ended": {"outcome": "dropped", "at": "2026-11-01T10:05:00Z", "reason": "历史沟通事项已过时"},
+                        "threads": [f"momo:{pt['thread_id']}"],
+                        "strength": "inferred",
+                        "createdAt": "2026-11-01T10:00:00Z",
+                        "updatedAt": "2026-11-01T10:05:00Z",
+                        "summary": "核查后续记录发现该事项已在昨日完成，静默跳过。",
+                    },
+                    {
+                        "id": "t-live-worker",
+                        "title": "整理 Q4 架构评审纪要",
+                        "state": "open",
+                        "stage": "working",
+                        "strength": "inferred",
+                        "threads": [f"momo:{pt['thread_id']}:r2"],
+                        "createdAt": "2026-11-03T04:10:00Z",
+                        "updatedAt": "2026-11-03T04:12:00Z",
+                        "mandate": {"strength": "inferred", "scope": "核查录音中的 Q4 架构改动清单并生成评审纪要草稿"},
+                        "decision": {
+                            "outcome": "accept",
+                            "rules": [{"id": "r1", "name": "明确备忘与交付物起草", "matched": True}],
+                            "triggerIds": [f"momo:{pt['id']}"],
+                        },
+                        "actions": {"stop": True},
+                    },
+                ]
+
+                cstore = ContextStore(data / "context")
+                try:
+                    appended_payload = dict(diarized_payload)
+                    appended_payload["version"] = 3
+                    appended_payload["spans"] = [
+                        *diarized_payload["spans"],
+                        {"id": str(uuid.uuid4()), "text": "再补一句：把灰度回滚脚本也记上。", "recorded_at": 1761897620.0},
+                    ]
+                    appended_payload["text_sha256"] = digest("\n".join(s["text"] for s in appended_payload["spans"]))
+                    cstore.sync_source(appended_payload)
+                finally:
+                    cstore.close()
+
+                appended_ingested = await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json()
+                self.assertEqual(appended_ingested["count"], 1)
+                polled_appended = await (
+                    await client.get(f"/momo/internal/superagent/triggers?after={polled_backlog['next_cursor']}", headers=bridge_headers)
+                ).json()
+                self.assertTrue(polled_appended["events"][0]["thread_id"].endswith(":r2"))
+
+                # 10. Task overview (/works) & live task detail (/work/{id}) decompress zstd worker logs cleanly.
+                from compression import zstd
+
+                worker_dir = data / "superagent/dsh-home/sessions/2026-11-03/worker-t-live-worker"
+                worker_dir.mkdir(parents=True, exist_ok=True)
+                sample_events = [
+                    {"type": "session", "version": 4, "id": "worker-t-live-worker", "cwd": str(data / "superagent/work/q4-review")},
+                    {"type": "turn/start", "seq": 1, "time": 1793611800000, "data": {"turn": 1}},
+                    {"type": "step/start", "seq": 2, "time": 1793611801000, "data": {"turn": 1, "step": 1}},
+                    {
+                        "type": "tool/call",
+                        "seq": 3,
+                        "time": 1793611802000,
+                        "data": {
+                            "turn": 1,
+                            "step": 1,
+                            "callId": "call-todo",
+                            "name": "todo_write",
+                            "arguments": json.dumps(
+                                {
+                                    "todos": [
+                                        {"id": "1", "content": "读取完整录音与后续聊天记录", "status": "completed"},
+                                        {"id": "2", "content": "输出 Q4 架构评审纪要草稿", "status": "in_progress"},
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    },
+                    {
+                        "type": "tool/call",
+                        "seq": 4,
+                        "time": 1793611803000,
+                        "data": {
+                            "turn": 1,
+                            "step": 1,
+                            "callId": "call-bash-1",
+                            "name": "bash",
+                            "arguments": json.dumps(
+                                {
+                                    "description": "核查源录音完整原文与近期记录",
+                                    "command": '"$DSH_SUPERAGENT_MOMO_CLI" recordings --limit 10',
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    },
+                    {
+                        "type": "tool/result",
+                        "seq": 5,
+                        "time": 1793611804000,
+                        "data": {"message": {"toolCallId": "call-bash-1", "isError": False}},
+                    },
+                    {
+                        "type": "tool/call",
+                        "seq": 6,
+                        "time": 1793611805000,
+                        "data": {
+                            "turn": 1,
+                            "step": 2,
+                            "callId": "call-sub-1",
+                            "name": "subagent",
+                            "arguments": json.dumps(
+                                {"role": "代码核查子代理", "prompt": "核对网关路由与单测覆盖情况"},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    },
+                ]
+                jsonl_bytes = ("\n".join(json.dumps(ev, ensure_ascii=False) for ev in sample_events) + "\n").encode("utf-8")
+                (worker_dir / "session.v4.jsonl.zstd").write_bytes(zstd.compress(jsonl_bytes))
+
+                works_overview = await (await client.get("/momo/v1/conversation/works?limit=10", headers=auth)).json()
+                self.assertEqual([w["id"] for w in works_overview["active"]], ["superagent:t-live-worker"])
+                self.assertEqual([w["id"] for w in works_overview["recent"]], ["superagent:t-ended-old"])
+                self.assertEqual(works_overview["recent"][0]["state"], "dropped")
+
+                detail_resp = await client.get("/momo/v1/conversation/work/superagent%3At-live-worker", headers=auth)
+                self.assertEqual(detail_resp.status, 200)
+                detail = await detail_resp.json()
+                self.assertEqual(detail["title"], "整理 Q4 架构评审纪要")
+                self.assertEqual(detail["origin_kind"], "proactive_transcript")
+                self.assertEqual(detail["origin_label"], "录音主动派发")
+                self.assertEqual(detail["scope"], "核查录音中的 Q4 架构改动清单并生成评审纪要草稿")
+                self.assertEqual(detail["matched_rules"], ["明确备忘与交付物起草"])
+                self.assertIsNotNone(detail["source_recorded_at"])
+                self.assertEqual(detail["turn_count"], 1)
+                self.assertEqual(len(detail["todos"]), 2)
+                self.assertEqual(len(detail["activities"]), 2)
+                self.assertEqual(detail["activities"][0]["title"], "核查源录音完整原文与近期记录")
+                self.assertEqual(detail["activities"][0]["status"], "completed")
+                self.assertIn("momo-cli recordings", detail["activities"][0]["detail"])
+                self.assertEqual(detail["activities"][1]["kind"], "subagent")
+                self.assertEqual(detail["activities"][1]["status"], "running")
             finally:
                 await client.close()
 
