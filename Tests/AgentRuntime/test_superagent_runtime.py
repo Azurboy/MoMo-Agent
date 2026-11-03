@@ -433,7 +433,7 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 #    advance watermarks silently and emit ZERO duplicate historical triggers; cross-day triggers include explicit dates.
                 self.assertIn("录音时间=", pt["text"])
                 self.assertIn("当前时间=", pt["text"])
-                self.assertIn("[⚠️ 历史日期录音提示", pt["text"])
+                self.assertIn("[日期参考：本段录音记录于", pt["text"])
                 self.assertEqual(pt["at"], "2025-10-31T08:00:00Z")
                 self.assertTrue(pt["thread_id"].startswith(f"transcript:{synced_proactive['source_id']}:w"))
 

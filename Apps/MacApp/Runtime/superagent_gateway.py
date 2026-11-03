@@ -1087,18 +1087,18 @@ class SuperAgentGateway:
                 rec_day = time.strftime("%Y-%m-%d", time.localtime(latest_span_ts))
                 today_day = time.strftime("%Y-%m-%d", time.localtime(now))
                 lag_seconds = max(0.0, now - latest_span_ts)
-                stale_warning = ""
+                date_anchor_note = ""
                 if rec_day != today_day or lag_seconds >= 6 * 3600:
                     lag_hours = lag_seconds / 3600.0
                     sync_status = (
-                        f"跨日延迟补同步（滞后 {lag_hours:.1f} 小时，录音发生于 {rec_day}，并非今天 {today_day} 刚说的话）"
+                        f"跨日补同步（滞后 {lag_hours:.1f} 小时，录制于 {rec_day}）"
                         if rec_day != today_day
                         else f"延迟补同步（滞后 {lag_hours:.1f} 小时）"
                     )
-                    stale_warning = (
-                        f"[⚠️ 历史日期录音提示：本段录音发生于 {rec_end_str}，距当前时间 {now_str} 已滞后 {lag_hours:.1f} 小时。"
-                        f"录音中的“今天/明天/今晚”均锚定在 {rec_day}，严禁当成 {today_day} 的新指令；"
-                        f"除非属于极少数跨日仍长期有效且核查后续记录确认未处理的硬核产出物，否则必须默认 ignore！]\n"
+                    date_anchor_note = (
+                        f"[日期参考：本段录音记录于 {rec_end_str}，当前时间为 {now_str}。"
+                        f"录音中的“今天/明天/今晚”等相对时间请以 {rec_day} 为基准换算实际日期，"
+                        f"结合事项本身的时效性与后续上下文自然判断是否仍需跟进。]\n"
                     )
                 else:
                     sync_status = "实时同步" if lag_seconds < 600 else f"当日补同步（滞后 {int(lag_seconds // 60)} 分钟）"
@@ -1122,7 +1122,7 @@ class SuperAgentGateway:
                 trigger_id = f"momo:{event_id}"
                 text = (
                     f"[MoMo 同步录音转写 | source_id={sid} | 标题={title} | 录音时间={rec_time_label} | 当前时间={now_str} | 同步状态={sync_status}]\n"
-                    f"{stale_warning}{context_prefix}{body}"
+                    f"{date_anchor_note}{context_prefix}{body}"
                 )
                 self.bridge.enqueue_trigger(
                     trigger_id=trigger_id,
@@ -1614,7 +1614,7 @@ class SuperAgentGateway:
             s = line.strip()
             if not s:
                 continue
-            if s.startswith("[MoMo 同步录音转写 |") or s.startswith("[⚠️"):
+            if s.startswith("[MoMo 同步录音转写 |") or s.startswith("[⚠️") or s.startswith("[日期参考："):
                 continue
             if s == "[近期前文参考]":
                 in_prior = True
@@ -1627,7 +1627,13 @@ class SuperAgentGateway:
         if not kept:
             for line in raw_text.splitlines():
                 s = line.strip()
-                if s and not s.startswith("[MoMo 同步录音转写 |") and not s.startswith("[⚠️") and s not in ("[近期前文参考]", "[本次新增转写]"):
+                if (
+                    s
+                    and not s.startswith("[MoMo 同步录音转写 |")
+                    and not s.startswith("[⚠️")
+                    and not s.startswith("[日期参考：")
+                    and s not in ("[近期前文参考]", "[本次新增转写]")
+                ):
                     kept.append(s)
         joined = "\n".join(kept).strip()
         return joined[:380] if joined else None
