@@ -863,6 +863,7 @@ private struct AgentTaskDetailView: View {
     @State private var loading = true
     @State private var loadError: String?
     @State private var stopping = false
+    @State private var previewAttachment: AgentAttachment?
 
     private var effectiveTitle: String {
         detail?.title ?? initialWork.title ?? String(localized: "后台任务")
@@ -934,6 +935,10 @@ private struct AgentTaskDetailView: View {
                     }
                 }
 
+                if let attachments = detail?.attachments, !attachments.isEmpty {
+                    deliverablesCard(attachments)
+                }
+
                 if detail?.scope != nil || detail?.triggerPreview != nil {
                     dispatchMandateCard
                 }
@@ -956,6 +961,9 @@ private struct AgentTaskDetailView: View {
             }
         }
         .phonePageSurface()
+        .sheet(item: $previewAttachment) { item in
+            ClientAttachmentPreview(attachment: item)
+        }
         .task(id: initialWork.id) {
             await fetchDetail()
             while !Task.isCancelled {
@@ -1189,6 +1197,53 @@ private struct AgentTaskDetailView: View {
                         .background(MoMoPalette.ink.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                 }
                 .padding(.top, detail?.scope == nil ? 0 : 6)
+            }
+        }
+    }
+
+    private func deliverablesCard(_ attachments: [AgentAttachment]) -> some View {
+        detailSectionCard(title: "交付附件（\(attachments.count)）", icon: "doc.richtext", tint: MoMoPalette.ink) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(attachments) { item in
+                    Button {
+                        previewAttachment = item
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(item.displayFormat)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(MoMoPalette.ink)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(MoMoPalette.ink.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(MoMoPalette.ink)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text("\(item.displaySize) · 点击查看")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(MoMoPalette.muted)
+                            }
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(MoMoPalette.muted.opacity(0.75))
+                        }
+                        .padding(10)
+                        .background(MoMoPalette.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 11)
+                                .strokeBorder(MoMoPalette.line, lineWidth: 0.8)
+                                .allowsHitTesting(false)
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("预览附件：\(item.name)")
+                    .accessibilityIdentifier("activeTasks.detail.attachment.\(item.id)")
+                }
             }
         }
     }

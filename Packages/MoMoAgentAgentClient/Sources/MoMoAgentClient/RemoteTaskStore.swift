@@ -332,6 +332,8 @@ public final class RemoteTaskStore {
         } catch { failures[.storage] = error.localizedDescription }
     }
 
+    @ObservationIgnored private var cachedWorkAttachments: [UUID: AgentAttachment] = [:]
+
     public func attachment(id: UUID) -> AgentAttachment? {
         if let item = draftAttachments.first(where: { $0.id == id }) { return item }
         for task in tasks {
@@ -340,7 +342,7 @@ public final class RemoteTaskStore {
         for message in messages {
             if let item = message.attachments?.first(where: { $0.id == id }) { return item }
         }
-        return nil
+        return cachedWorkAttachments[id]
     }
 
     @discardableResult public func enqueue() throws -> UUID {
@@ -616,7 +618,9 @@ public final class RemoteTaskStore {
     }
     public func fetchWorkDetail(id: String) async throws -> ConversationWorkDetail {
         guard canContactServer else { throw CancellationError() }
-        return try await client.workDetail(id: id)
+        let detail = try await client.workDetail(id: id)
+        for item in detail.attachments { cachedWorkAttachments[item.id] = item }
+        return detail
     }
     private func cancel(id: String, generation: Int, targetRunID: String? = nil) async {
         if pendingCancellations[id] == nil { pendingCancellations[id] = Cancellation(operationID: UUID(), generation: generation, targetRunID: targetRunID) }
@@ -978,7 +982,7 @@ public final class RemoteTaskStore {
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
                 let saved = messages[index]
                 guard saved.seq == message.seq, saved.role == message.role, saved.content == message.content else { throw StoreError.invalidResponse }
-                if saved.runID != message.runID || saved.operationID != message.operationID || saved.deliveryState != message.deliveryState || (saved.attachments == nil && message.attachments != nil) {
+                if saved.runID != message.runID || saved.operationID != message.operationID || saved.deliveryState != message.deliveryState || (message.attachments != nil && saved.attachments != message.attachments) {
                     messages[index] = message
                 }
             } else {

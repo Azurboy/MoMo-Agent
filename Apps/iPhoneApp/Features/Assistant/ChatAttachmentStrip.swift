@@ -53,27 +53,8 @@ struct ChatAttachmentStrip: View {
 
 struct ChatAttachmentPreview: View {
     let attachment: AgentAttachment
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let data = attachment.data, let image = UIImage(data: data) {
-                    GeometryReader { geometry in
-                        Image(uiImage: image).resizable().scaledToFit()
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                    }
-                } else if let text = attachment.text {
-                    ScrollView {
-                        Text(text).phoneText(.body).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                    }
-                }
-            }
-            .background(MoMoPalette.canvas)
-            .phoneSoftTopEdge()
-            .navigationTitle(attachment.name).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-        }
+        ClientAttachmentPreview(attachment: attachment)
     }
 }

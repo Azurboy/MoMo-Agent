@@ -107,6 +107,64 @@ button[hidden], [hidden] { display: none !important; }
   color: var(--paper);
 }
 .assistant > .parts { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; max-width: 85%; }
+.assistant > .assistant-attachments { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; max-width: 85%; margin-top: 10px; }
+.assistant-attachment {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 340px);
+  min-height: 58px;
+  padding: 10px 14px;
+  text-align: start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  transition: transform 160ms ease-out, background 160ms ease-out;
+}
+.assistant-attachment:active { transform: scale(.985); }
+.assistant-attachment-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--paper);
+  border: .5px solid var(--line);
+  color: var(--ink);
+  font: 600 .6875rem/1 ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  letter-spacing: .02em;
+}
+.assistant-attachment[data-format=html] .assistant-attachment-badge,
+.assistant-attachment[data-format=htm] .assistant-attachment-badge {
+  background: #e8eefb;
+  border-color: #c8d8f6;
+  color: #264a96;
+}
+.assistant-attachment[data-format=md] .assistant-attachment-badge,
+.assistant-attachment[data-format=markdown] .assistant-attachment-badge {
+  background: #e8f3ec;
+  border-color: #c4e1cf;
+  color: #215c3a;
+}
+:root[data-dark=true] .assistant-attachment[data-format=html] .assistant-attachment-badge,
+:root[data-dark=true] .assistant-attachment[data-format=htm] .assistant-attachment-badge {
+  background: #22304a;
+  border-color: #354c75;
+  color: #b7cef7;
+}
+:root[data-dark=true] .assistant-attachment[data-format=md] .assistant-attachment-badge,
+:root[data-dark=true] .assistant-attachment[data-format=markdown] .assistant-attachment-badge {
+  background: #1f3629;
+  border-color: #315641;
+  color: #b5e2c6;
+}
+.assistant-attachment-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.assistant-attachment-name { font: 500 .875rem/1.35 var(--ui); color: var(--ink); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.assistant-attachment-meta { font: .75rem/1.3 var(--ui); color: var(--muted); }
+.assistant-attachment-chevron { flex: none; font: 400 1.125rem/1 var(--ui); color: var(--muted); padding-inline-start: 2px; }
 .assistant > .actions { max-width: 85%; }
 .assistant .prose { width:fit-content; max-width:100%; box-sizing:border-box; padding:10px 16px; background:var(--surface); border-radius:22px; }
 .user-message-row { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-width:0; }

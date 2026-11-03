@@ -12,7 +12,7 @@ enum ChatAttachmentImportError: LocalizedError {
         case .tooLarge: String(localized: "这个文件超过 20 MB，请选择较小的文件。")
         case .imageTooLarge: String(localized: "照片压缩后仍然过大，请裁剪后再添加。")
         case .unreadable: String(localized: "无法读取这个文件，请重新选择。")
-        case .unsupported: String(localized: "目前支持照片、PDF 和文本文件，请选择这些格式。")
+        case .unsupported: String(localized: "目前支持照片、PDF、HTML、Markdown 和文本文件，请选择这些格式。")
         case .noText: String(localized: "这个 PDF 没有可提取的文字。请将需要阅读的页面作为照片添加。")
         case .tooMuchText: String(localized: "文件文字过多，请拆分后再添加。")
         }
@@ -20,7 +20,13 @@ enum ChatAttachmentImportError: LocalizedError {
 }
 
 enum ChatAttachmentImporter {
-    static let allowedTypes: [UTType] = [.image, .pdf, .plainText, .json, .sourceCode, .commaSeparatedText]
+    static let allowedTypes: [UTType] = {
+        var types: [UTType] = [.image, .pdf, .html, .plainText, .json, .sourceCode, .commaSeparatedText]
+        if let markdown = UTType(filenameExtension: "md"), !types.contains(markdown) {
+            types.append(markdown)
+        }
+        return types
+    }()
 
     nonisolated static func cameraImage(_ image: UIImage) throws -> AgentAttachment {
         try Task.checkCancellation()
@@ -57,7 +63,8 @@ enum ChatAttachmentImporter {
         guard size <= 20 * 1_048_576 else { throw ChatAttachmentImportError.tooLarge }
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard data.count <= 20 * 1_048_576 else { throw ChatAttachmentImportError.tooLarge }
-        let type = properties.contentType ?? UTType(filenameExtension: url.pathExtension)
+        let ext = url.pathExtension.lowercased()
+        let type = properties.contentType ?? UTType(filenameExtension: ext)
         if type?.conforms(to: .image) == true { return try image(data, name: url.lastPathComponent) }
         let text: String
         if type?.conforms(to: .pdf) == true {
@@ -68,19 +75,29 @@ enum ChatAttachmentImporter {
                 try Task.checkCancellation()
                 let page = document.page(at: index)?.string ?? ""
                 count += page.utf8.count
-                guard count <= 48_000 else { throw ChatAttachmentImportError.tooMuchText }
+                guard count <= 256_000 else { throw ChatAttachmentImportError.tooMuchText }
                 pages.append(page)
             }
             text = pages.joined(separator: "\n\n")
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatAttachmentImportError.noText }
         } else {
-            guard let type, type.conforms(to: .text) || type.conforms(to: .json),
+            let isKnownTextExt = ["md", "markdown", "html", "htm", "txt", "csv", "json"].contains(ext)
+            let isSupportedType = type?.conforms(to: .text) == true || type?.conforms(to: .json) == true || type?.conforms(to: .html) == true || isKnownTextExt
+            guard isSupportedType,
                   let decoded = String(data: data, encoding: .utf8), !decoded.contains("\0") else { throw ChatAttachmentImportError.unsupported }
             text = decoded
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatAttachmentImportError.unreadable }
-        guard text.utf8.count <= 48_000 else { throw ChatAttachmentImportError.tooMuchText }
-        return AgentAttachment(name: url.lastPathComponent, kind: .document, mediaType: type?.preferredMIMEType ?? "text/plain", byteCount: data.count, text: text)
+        guard text.utf8.count <= 256_000 else { throw ChatAttachmentImportError.tooMuchText }
+        let mediaType: String
+        if ext == "html" || ext == "htm" || type?.conforms(to: .html) == true {
+            mediaType = "text/html"
+        } else if ext == "md" || ext == "markdown" {
+            mediaType = "text/markdown"
+        } else {
+            mediaType = type?.preferredMIMEType ?? "text/plain"
+        }
+        return AgentAttachment(name: url.lastPathComponent, kind: .document, mediaType: mediaType, byteCount: data.count, text: text)
     }
 
     nonisolated static func image(_ data: Data, name: String = String(localized: "照片.jpg")) throws -> AgentAttachment {

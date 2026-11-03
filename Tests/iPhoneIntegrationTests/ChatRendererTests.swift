@@ -1270,6 +1270,97 @@ final class ChatRendererTests: XCTestCase {
         XCTAssertEqual(Set(nativeMarkers.keys), ["u-yesterday", "a-today-1", "a-today-2"])
     }
 
+    func testAssistantDeliverableAttachmentsRenderCardsAndPreviewRichHTMLAndMarkdown() async throws {
+        let renderer = try RendererHarness()
+        defer { renderer.close() }
+        try await renderer.ready()
+
+        let htmlDoc = AgentAttachment(
+            name: "startup-roadmap.html",
+            kind: .document,
+            mediaType: "text/html",
+            byteCount: 512,
+            text: "<section id=\"hero\"><h1>AI 创业路线图</h1><button id=\"toggle\" onclick=\"document.body.dataset.clicked='yes'\">切换视角</button></section>"
+        )
+        let mdDoc = AgentAttachment(
+            name: "competitive-matrix.md",
+            kind: .document,
+            mediaType: "text/markdown",
+            byteCount: 256,
+            text: "# 竞品对比方案\n\n| 方向 | 切入壁垒 |\n| --- | --- |\n| 个人上下文硬件 | 持续记忆与主动合成 |"
+        )
+        let reply = AgentChatMessage(
+            id: "proactive-reply",
+            turnID: "proactive-turn",
+            role: "assistant",
+            blocks: [
+                .init(id: "proactive-prose", content: .text("已为你整理好创业路线图原型与竞品对比文档。")),
+                .init(id: htmlDoc.id.uuidString, content: .attachment(htmlDoc)),
+                .init(id: mdDoc.id.uuidString, content: .attachment(mdDoc))
+            ],
+            state: .complete
+        )
+
+        var openedIDs: [UUID] = []
+        renderer.coordinator.attachment = { openedIDs.append($0) }
+        renderer.render([reply], canRegenerate: false)
+        try await renderer.wait("document.querySelectorAll('.assistant-attachment').length === 2")
+        try await renderer.check("document.querySelector('.assistant-attachment[data-format=html] .assistant-attachment-badge')?.textContent === 'HTML'")
+        try await renderer.check("document.querySelector('.assistant-attachment[data-format=md] .assistant-attachment-badge')?.textContent === 'MD'")
+        try await renderer.check("!document.body.textContent.includes('切换视角') && !document.body.textContent.includes('切入壁垒')")
+
+        _ = try await renderer.web.evaluateJavaScript("document.querySelectorAll('.assistant-attachment')[0].click(); document.querySelectorAll('.assistant-attachment')[1].click(); true")
+        for _ in 0..<40 {
+            if openedIDs.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(openedIDs, [htmlDoc.id, mdDoc.id])
+
+        // Verify SandboxedDocumentWebView renders both interactive HTML and GFM Markdown cleanly.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 640)
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+
+        func findWeb(_ view: UIView) -> WKWebView? {
+            if let web = view as? WKWebView { return web }
+            return view.subviews.compactMap(findWeb).first
+        }
+
+        let htmlHost = UIHostingController(rootView: ClientAttachmentPreview(attachment: htmlDoc))
+        window.rootViewController = htmlHost
+        window.makeKeyAndVisible()
+        htmlHost.view.layoutIfNeeded()
+        var htmlWeb: WKWebView?
+        for _ in 0..<80 {
+            htmlWeb = findWeb(htmlHost.view)
+            if let web = htmlWeb,
+               (try? await web.evaluateJavaScript("document.querySelector('#hero h1')?.textContent === 'AI 创业路线图' && !!document.querySelector('meta[name=viewport]')")) as? Bool == true {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let verifiedHTMLWeb = try XCTUnwrap(htmlWeb)
+        _ = try await verifiedHTMLWeb.evaluateJavaScript("document.querySelector('#toggle').click(); true")
+        let clicked = try await verifiedHTMLWeb.evaluateJavaScript("document.body.dataset.clicked") as? String
+        XCTAssertEqual(clicked, "yes")
+
+        let mdHost = UIHostingController(rootView: ClientAttachmentPreview(attachment: mdDoc))
+        window.rootViewController = mdHost
+        mdHost.view.layoutIfNeeded()
+        var mdWeb: WKWebView?
+        for _ in 0..<80 {
+            mdWeb = findWeb(mdHost.view)
+            if let web = mdWeb,
+               (try? await web.evaluateJavaScript("document.querySelectorAll('#document-root table td').length === 2 && document.querySelector('#document-root h1')?.textContent === '竞品对比方案'")) as? Bool == true {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertNotNil(mdWeb)
+    }
+
     private func user(_ text: String) -> AgentChatMessage {
         .init(id:"user",turnID:"turn",role:"user",blocks:[.init(id:"user-text",content:.text(text))],state:.complete)
     }

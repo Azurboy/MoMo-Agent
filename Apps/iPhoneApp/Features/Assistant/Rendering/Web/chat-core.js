@@ -276,8 +276,10 @@
             previous.text += block.text; previous.streaming = streaming;
           } else turn.parts.push({ ...block, messageID:message.id, streaming });
           messageText += block.text;
-        } else if (block.type === 'attachment' && message.role === 'user') {
-          turn.attachments.push(block);
+        } else if (block.type === 'attachment' && (message.role === 'user' || message.role === 'assistant')) {
+          if (!block.attachmentID || !turn.attachments.some(item => item.attachmentID === block.attachmentID)) {
+            turn.attachments.push(block);
+          }
         } else {
           let process = turn.parts.at(-1);
           if (process?.type !== 'process') {

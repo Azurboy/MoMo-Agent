@@ -145,13 +145,43 @@ public struct ConversationWorkDetail: Codable, Sendable, Equatable, Identifiable
     public let stepCount: Int
     public let todos: [TodoItem]
     public let activities: [ActivityItem]
+    public let attachments: [AgentAttachment]
 
     public var isActive: Bool {
         ["queued", "running", "waiting_for_input", "finalizing"].contains(status)
     }
 
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        ticketID = try container.decodeIfPresent(String.self, forKey: .ticketID)
+        title = try container.decode(String.self, forKey: .title)
+        status = try container.decode(String.self, forKey: .status)
+        statusLabel = try container.decode(String.self, forKey: .statusLabel)
+        originKind = try container.decode(String.self, forKey: .originKind)
+        originLabel = try container.decode(String.self, forKey: .originLabel)
+        createdAt = try container.decodeIfPresent(Double.self, forKey: .createdAt)
+        updatedAt = try container.decodeIfPresent(Double.self, forKey: .updatedAt)
+        endedAt = try container.decodeIfPresent(Double.self, forKey: .endedAt)
+        sourceID = try container.decodeIfPresent(String.self, forKey: .sourceID)
+        sourceTitle = try container.decodeIfPresent(String.self, forKey: .sourceTitle)
+        sourceRecordedAt = try container.decodeIfPresent(Double.self, forKey: .sourceRecordedAt)
+        triggerPreview = try container.decodeIfPresent(String.self, forKey: .triggerPreview)
+        scope = try container.decodeIfPresent(String.self, forKey: .scope)
+        matchedRules = try container.decodeIfPresent([String].self, forKey: .matchedRules) ?? []
+        summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        attentionQuestion = try container.decodeIfPresent(String.self, forKey: .attentionQuestion)
+        workspacePath = try container.decodeIfPresent(String.self, forKey: .workspacePath)
+        cancellable = try container.decode(Bool.self, forKey: .cancellable)
+        turnCount = try container.decodeIfPresent(Int.self, forKey: .turnCount) ?? 0
+        stepCount = try container.decodeIfPresent(Int.self, forKey: .stepCount) ?? 0
+        todos = try container.decodeIfPresent([TodoItem].self, forKey: .todos) ?? []
+        activities = try container.decodeIfPresent([ActivityItem].self, forKey: .activities) ?? []
+        attachments = try container.decodeIfPresent([AgentAttachment].self, forKey: .attachments) ?? []
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, title, status, scope, summary, cancellable, todos, activities
+        case id, title, status, scope, summary, cancellable, todos, activities, attachments
         case ticketID = "ticket_id"
         case statusLabel = "status_label"
         case originKind = "origin_kind"

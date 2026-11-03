@@ -66,10 +66,26 @@ public struct AgentAttachment: Codable, Equatable, Sendable, Identifiable {
                       !data.isEmpty, data.count <= 1_048_576, item.text == nil else { throw AttachmentError.invalid }
             case .document:
                 guard item.data == nil, let text = item.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      text.utf8.count <= 48_000 else { throw AttachmentError.invalid }
+                      text.utf8.count <= 256_000 else { throw AttachmentError.invalid }
             }
         }
-        guard attachments.reduce(0, { $0 + ($1.text?.utf8.count ?? 0) }) <= 48_000 else { throw AttachmentError.invalid }
+        guard attachments.reduce(0, { $0 + ($1.text?.utf8.count ?? 0) }) <= 256_000 else { throw AttachmentError.invalid }
+    }
+
+    public var isHTMLDocument: Bool {
+        guard kind == .document else { return false }
+        let mime = mediaType.lowercased()
+        if mime.contains("html") { return true }
+        let ext = (name as NSString).pathExtension.lowercased()
+        return ext == "html" || ext == "htm"
+    }
+
+    public var isMarkdownDocument: Bool {
+        guard kind == .document else { return false }
+        let mime = mediaType.lowercased()
+        if mime.contains("markdown") { return true }
+        let ext = (name as NSString).pathExtension.lowercased()
+        return ext == "md" || ext == "markdown"
     }
 
     func strippingRawPayload() -> Self {

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="stylesheet" href="vendor/katex.css">
+  <link rel="stylesheet" href="chat.css">
+  <style>
+    body {
+      padding: 20px 24px 44px;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    #document-root {
+      max-width: 780px;
+      margin: 0 auto;
+      font-family: var(--response);
+      font-size: 0.96875rem;
+      line-height: 1.68;
+      word-wrap: break-word;
+    }
+    #document-root > :first-child { margin-top: 0; }
+    #document-root h1 { font-size: 1.5em; margin: 22px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    #document-root h2 { font-size: 1.28em; margin: 20px 0 10px; }
+    #document-root h3 { font-size: 1.12em; margin: 16px 0 8px; }
+  </style>
+  <script defer src="vendor/marked.js"></script>
+  <script defer src="vendor/purify.js"></script>
+  <script defer src="vendor/katex.js"></script>
+  <script defer src="vendor/highlight.js"></script>
+  <script defer src="markdown-document.js"></script>
+  <title>文档预览</title>
+</head>
+<body>
+  <article id="document-root" class="prose"></article>
+</body>
+</html>

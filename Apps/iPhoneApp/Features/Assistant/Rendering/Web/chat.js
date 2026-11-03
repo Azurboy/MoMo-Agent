@@ -436,6 +436,43 @@
           piece.node.dataset.sourceMessage = part.messageID || '';
         });
         for (const [id,piece] of view.pieces) if (!ids.has(id)) { piece.node.remove(); view.pieces.delete(id); }
+        if (turn.attachments.length) {
+          const attachmentSignature = JSON.stringify(turn.attachments.map(item => [item.attachmentID,item.name,item.preview,item.format,item.size]));
+          if (view.attachmentSignature !== attachmentSignature) {
+            view.attachmentSignature = attachmentSignature;
+            if (!view.assistantAttachments) {
+              view.assistantAttachments = element('div','assistant-attachments');
+              view.assistantAttachments.setAttribute('data-markdown-copy','exclude');
+              view.node.insertBefore(view.assistantAttachments, view.actions || null);
+            }
+            const cards = [];
+            for (const item of turn.attachments) {
+              const card = element('button','assistant-attachment');
+              card.type = 'button';
+              const nameText = item.name || t("附件");
+              const fmtRaw = String(item.format || '').trim();
+              const fmtLower = fmtRaw.toLowerCase();
+              if (fmtLower) card.dataset.format = fmtLower;
+              card.setAttribute('aria-label',t("预览{0}", nameText));
+              card.addEventListener('click',() => post('attachment',{attachmentID:item.attachmentID,sessionID:latest.sessionID}));
+              const badge = element('span','assistant-attachment-badge',fmtRaw || t("文件"));
+              const info = element('span','assistant-attachment-info');
+              info.append(
+                element('span','assistant-attachment-name',nameText),
+                element('span','assistant-attachment-meta',item.size ? `${item.size} · ${t("点击查看")}` : t("点击查看"))
+              );
+              const chevron = element('span','assistant-attachment-chevron','›');
+              chevron.setAttribute('aria-hidden','true');
+              card.append(badge, info, chevron);
+              cards.push(card);
+            }
+            view.assistantAttachments.replaceChildren(...cards);
+          }
+        } else if (view.assistantAttachments) {
+          view.assistantAttachments.remove();
+          view.assistantAttachments = null;
+          view.attachmentSignature = null;
+        }
         if (!view.actions) {
           view.actions = element('div','actions');
           view.actions.append(replyButton(t("重新生成回复"),'regenerate','<svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M16 7a6.3 6.3 0 1 0 .2 5M16 3.5V7h-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'),element('span','end-status'));

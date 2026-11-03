@@ -144,6 +144,114 @@ final class RemoteTaskStoreTests: XCTestCase {
         XCTAssertTrue(store.tasks.isEmpty)
         XCTAssertFalse(state.requests.contains { $0.httpMethod == "POST" })
     }
+
+    func testRichHTMLAndMarkdownDeliverablesDecodeAndResolveAcrossMessagesAndWorkDetail() throws {
+        let htmlID = UUID()
+        let mdID = UUID()
+        let htmlDoc = AgentAttachment(
+            id: htmlID,
+            name: "startup-roadmap.html",
+            kind: .document,
+            mediaType: "text/html",
+            byteCount: 120_000,
+            text: String(repeating: "a", count: 120_000)
+        )
+        let mdDoc = AgentAttachment(
+            id: mdID,
+            name: "competitive-matrix.md",
+            kind: .document,
+            mediaType: "text/markdown",
+            byteCount: 80_000,
+            text: String(repeating: "#", count: 80_000)
+        )
+        XCTAssertTrue(htmlDoc.isHTMLDocument)
+        XCTAssertFalse(htmlDoc.isMarkdownDocument)
+        XCTAssertTrue(mdDoc.isMarkdownDocument)
+        XCTAssertFalse(mdDoc.isHTMLDocument)
+        XCTAssertNoThrow(try AgentAttachment.validate([htmlDoc, mdDoc]))
+
+        let oversized = AgentAttachment(
+            name: "oversized.md",
+            kind: .document,
+            mediaType: "text/markdown",
+            byteCount: 260_000,
+            text: String(repeating: "x", count: 260_000)
+        )
+        XCTAssertThrowsError(try AgentAttachment.validate([oversized]))
+
+        // Server-generated deliverables up to 512 KB decode without client upload validation limits.
+        let serverDeliverableID = UUID()
+        let serverPageJSON = """
+        {
+          "data": [{
+            "id": "msg-proactive-1",
+            "seq": 1,
+            "role": "assistant",
+            "content": "已为你整理好创业方案对比与原型。",
+            "created_at": 1730620000.0,
+            "run_id": "superagent:tkt-1",
+            "attachments": [{
+              "id": "\(serverDeliverableID.uuidString.lowercased())",
+              "name": "interactive-prototype.html",
+              "kind": "document",
+              "media_type": "text/html",
+              "byte_count": 320000,
+              "text": "\(String(repeating: "p", count: 320_000))"
+            }]
+          }],
+          "next_cursor": 1,
+          "has_more": false
+        }
+        """.data(using: .utf8)!
+        let page = try JSONDecoder().decode(ConversationPage.self, from: serverPageJSON)
+        XCTAssertEqual(page.data.first?.attachments?.first?.id, serverDeliverableID)
+        XCTAssertEqual(page.data.first?.attachments?.first?.isHTMLDocument, true)
+
+        let detailWithAttachmentsJSON = """
+        {
+          "id": "sa_ticket:tkt-1",
+          "ticket_id": "tkt-1",
+          "title": "调研 AI 硬件创业切入点并输出可交互方案",
+          "status": "completed",
+          "status_label": "已完成",
+          "origin_kind": "proactive_recording",
+          "origin_label": "主动发现 · 录音触发",
+          "cancellable": false,
+          "matched_rules": ["research_and_synthesis"],
+          "turn_count": 2,
+          "step_count": 5,
+          "todos": [],
+          "activities": [],
+          "attachments": [{
+            "id": "\(mdID.uuidString.lowercased())",
+            "name": "research-brief.md",
+            "kind": "document",
+            "media_type": "text/markdown",
+            "byte_count": 2048,
+            "text": "# 创业调研报告\\n\\n- 方案 A\\n- 方案 B"
+          }]
+        }
+        """.data(using: .utf8)!
+        let detail = try JSONDecoder().decode(ConversationWorkDetail.self, from: detailWithAttachmentsJSON)
+        XCTAssertEqual(detail.attachments.count, 1)
+        XCTAssertEqual(detail.attachments.first?.id, mdID)
+        XCTAssertEqual(detail.attachments.first?.isMarkdownDocument, true)
+
+        // Legacy work detail payloads without "attachments" still decode cleanly to [].
+        let legacyDetailJSON = """
+        {
+          "id": "sa_ticket:tkt-legacy",
+          "title": "旧版任务",
+          "status": "completed",
+          "status_label": "已完成",
+          "origin_kind": "proactive_recording",
+          "origin_label": "主动发现",
+          "cancellable": false
+        }
+        """.data(using: .utf8)!
+        let legacyDetail = try JSONDecoder().decode(ConversationWorkDetail.self, from: legacyDetailJSON)
+        XCTAssertTrue(legacyDetail.attachments.isEmpty)
+    }
 }
 
 private final class DeliveryScenario: @unchecked Sendable {
