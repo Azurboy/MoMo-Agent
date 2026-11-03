@@ -39,6 +39,7 @@ extension AgentClient {
 @MainActor final class ConversationSubscription {
     private var worker: Task<Void, Never>?
     private(set) var isRunning = true
+    private(set) var isBackingOff = false
     init(client: AgentClient, cursor: @escaping @MainActor () -> Int?,
          snapshot: @escaping @MainActor (ConversationSnapshot) throws -> Void,
          event: @escaping @MainActor (ConversationEvent) throws -> Void,
@@ -49,6 +50,7 @@ extension AgentClient {
             var needsSnapshot = cursor() == nil
             var streamFailures = 0
             while !Task.isCancelled {
+                self?.isBackingOff = false
                 var failure: Error?
                 var attemptedStream = false
                 do {
@@ -92,6 +94,7 @@ extension AgentClient {
                 } else if case AgentClientError.invalidResponse = failure {
                     // Transient proxy/tunnel HTML responses retry with backoff instead of locking out SSE.
                 } else if !AgentTransportFailure.isTransient(failure) { return }
+                self?.isBackingOff = true
                 do { try await Task.sleep(for: .seconds(delay)) } catch { return }
                 backoff = min(5, backoff * 2)
             }

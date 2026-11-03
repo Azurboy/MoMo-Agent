@@ -149,33 +149,26 @@ final class PhoneRemoteAgent {
         guard !connecting, let connection, let store, let client = desktopClient,
               store.canContactServer else { return }
         connecting = true; failure = nil
-        store.background(); context?.background(); health?.background(); sources?.background(); network?.suspend()
-        defer {
-            connecting = false
-            if active, store.canContactServer {
-                network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); store.foreground()
-            }
-        }
+        defer { connecting = false }
         do {
             if connection.network == "tailscale" {
                 tailnet.prepareForForeground()
-                let originalGeneration = tailnet.generation
                 do {
                     _ = try await client.capabilities()
                 } catch {
-                    // Escalate once only when the existing route failed and the local
-                    // health check has not already replaced the node for this attempt.
-                    guard AgentTransportFailure.isSocketOrLinkFailure(error),
-                          originalGeneration == tailnet.generation else { throw error }
+                    guard AgentTransportFailure.isSocketOrLinkFailure(error) else { throw error }
                     try Task.checkCancellation()
-                    await tailnet.close()
+                    // A timeout reaching the Mac does not establish that our SOCKS listener died.
+                    // connectedSession checks the local listener before replacing the node.
+                    tailnet.prepareForForeground()
                     _ = try await client.capabilities()
                 }
             } else {
                 network?.resume()
                 _ = try await client.capabilities()
             }
-            await store.retryConnection()
+            guard self.store === store else { return }
+            await store.retryConnection(ifNeeded: true)
         } catch is CancellationError { }
         catch {
             guard !AgentTransportFailure.isCancelled(error) else { return }
@@ -210,19 +203,19 @@ final class PhoneRemoteAgent {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
         pathMonitor = monitor
-        monitor.pathUpdateHandler = { [weak self] path in
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
             let interfaces = path.availableInterfaces.filter { path.usesInterfaceType($0.type) }
                 .map { "\($0.type):\($0.name)" }.sorted().joined(separator: ",")
             let signature = "\(path.status):\(interfaces)"
-            Task { @MainActor [weak self] in
-                guard let self, self.active else { return }
+            Task { @MainActor [weak self, weak monitor] in
+                guard let self, let monitor, self.pathMonitor === monitor, self.active else { return }
                 let previous = self.lastPathSignature
                 self.lastPathSignature = signature
                 guard path.status == .satisfied, previous != nil, previous != signature,
                       self.store?.canContactServer != false else { return }
                 if self.connection?.network == "tailscale" { self.tailnet.prepareForForeground() }
                 else { self.network?.resume() }
-                await self.store?.retryConnection()
+                await self.store?.retryConnection(ifNeeded: true)
                 await self.context?.refresh()
             }
         }

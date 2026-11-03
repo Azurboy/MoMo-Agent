@@ -70,6 +70,24 @@ import XCTest
         let posts = await wire.requests.filter { $0.httpMethod == "POST" }
         XCTAssertEqual(posts.count, 1)
     }
+    func testPathNotificationsPreserveOpeningAndReceivingSubscription() async throws {
+        let (wire, store, _, _) = try fixture()
+        await wire.delaySubscriptionHandshake()
+        store.foreground(); defer { store.background() }
+        try await eventually { await wire.subscriptions.count == 1 }
+        await store.retryConnection(ifNeeded: true)
+        try await eventually { await wire.streams.count == 1 }
+        await wire.appendMessage("before path change")
+        try await eventually { store.messages.count == 1 }
+        for _ in 0..<3 { await store.retryConnection(ifNeeded: true) }
+        await wire.appendMessage("after path change")
+        try await eventually { store.messages.count == 2 }
+        let subscriptions = await wire.subscriptions
+        let closed = await wire.detached
+        XCTAssertEqual(subscriptions.count, 1)
+        XCTAssertEqual(closed, 0)
+    }
+
     func testEndedSubscriptionAutomaticallyReplacedWithoutSendingAnotherMessage() async throws {
         let (wire, store, _, _) = try fixture()
         await wire.failSubscriptionOnce()
@@ -355,6 +373,8 @@ private actor LiveWire: AgentTransport {
     var betweenSnapshot = false, rejection: Int?, throttle = false
     var lostReceipt = false, postError: URLError.Code?
     var postRejection: Int?
+    var delayedHandshake = false
+    func delaySubscriptionHandshake() { delayedHandshake = true }
     var failedSubscription = false
     var badSubscriptionContentType = false
     var holdCompletion = false
@@ -422,6 +442,7 @@ private actor LiveWire: AgentTransport {
         if path == "/momo/v1/conversation/subscribe" {
             let after = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value!)!
             subscriptions.append(after)
+            if delayedHandshake { try await Task.sleep(for: .milliseconds(100)) }
             if failedSubscription { failedSubscription = false; throw InterruptedTransport.closed }
             if badSubscriptionContentType {
                 badSubscriptionContentType = false

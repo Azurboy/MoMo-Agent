@@ -131,7 +131,7 @@ final class PhoneNotifications {
         guard agent?.store?.canContactServer != false, route.open(target, connection: agent?.connection) else { return }
         focusedTarget = target
         navigationRevision += 1
-        Task { await agent?.store?.retryConnection(); await restoreTarget() }
+        Task { await agent?.store?.retryConnection(ifNeeded: true); await restoreTarget() }
     }
     func shouldSuppress(_ target: AgentNotificationTarget) -> Bool {
         guard let connection = agent?.connection, target.matches(connection), chatVisible, !desktopVisible,

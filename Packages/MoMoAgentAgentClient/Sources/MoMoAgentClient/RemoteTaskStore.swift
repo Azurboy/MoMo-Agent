@@ -401,8 +401,13 @@ public final class RemoteTaskStore {
         // No remote stop: an interrupted HTTP response is reconciled with the same identity.
     }
 
-    public func retryConnection() async {
+    public func retryConnection(ifNeeded: Bool = false) async {
         guard canContactServer else { return }
+        // Path changes can arrive during the handshake or while the peer is sending.
+        if ifNeeded, connectionState != .unavailable, let subscription, subscription.isRunning, !subscription.isBackingOff {
+            await refresh(userInitiated: true)
+            return
+        }
         subscription?.stop(); subscription = nil
         if connectionState == .unavailable { connectionState = .retrying }
         startConversationSubscription()
