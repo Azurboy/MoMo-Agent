@@ -41,8 +41,8 @@ final class PhoneSpeechSettings {
         guard self.language != language else { return }
         guard models.choice.supports(language) else {
             failure = switch models.choice {
-            case .xASR: String(localized: "X-ASR 只支持中文和英文，请先切换到 SenseVoice 或 FunASR (CoreML)。")
-            default: String(localized: "FunASR Nano 不支持韩语，请先切换到 SenseVoice 或 FunASR (CoreML)。")
+            case .xASR: String(localized: "X-ASR 只支持中文和英文，请先切换到 SenseVoice。")
+            default: String(localized: "FunASR 不支持韩语，请先切换到 SenseVoice。")
             }
             return
         }

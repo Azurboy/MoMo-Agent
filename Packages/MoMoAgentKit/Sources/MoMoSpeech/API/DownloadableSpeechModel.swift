@@ -16,15 +16,8 @@ public struct DownloadableSpeechModel: Codable, Equatable, Sendable {
     public var downloadBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
 
     static let xASRIdentifier = "sherpa-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03"
-    static let funASRNanoCoreMLIdentifier = "sherpa-sense-voice-funasr-nano-int8-2025-12-17"
 
     public static func funASRNano() throws -> Self { try bundled("funasr-nano-onnx-v1") }
-
-    public static func funASRNanoCoreML() throws -> Self {
-        let value = try bundled("funasr-nano-coreml-onnx-v1")
-        guard value.identifier == funASRNanoCoreMLIdentifier else { throw SpeechModelInstallationError.invalidCatalog }
-        return value
-    }
 
     public static func xASR() throws -> Self {
         let value = try bundled("x-asr-zh-en-onnx-v1")

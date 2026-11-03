@@ -47,6 +47,24 @@ public actor SpeechModelInstaller {
         }
     }
 
+    public static func pruneUnreferencedDownloads(at root: URL, retaining activeCatalogs: [DownloadableSpeechModel]) {
+        let manager = FileManager.default
+        var kept: Set<String> = []
+        for catalog in activeCatalogs {
+            guard let revision = try? catalog.revision else { return }
+            kept.insert(revision)
+            kept.insert(revision + ".partial")
+        }
+        guard let entries = try? manager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for entry in entries where !kept.contains(entry.lastPathComponent) {
+            try? manager.removeItem(at: entry)
+        }
+    }
+
     public static func installedDirectory(for catalog: DownloadableSpeechModel, in root: URL) throws -> URL? {
         let manager = FileManager.default
         let directory = try root.appendingPathComponent(catalog.revision)

@@ -108,6 +108,7 @@ enum PhoneComposition {
                 let bundle = try SpeechModelBundle.load(from: directory)
                 pruneStaleCoreMLCaches(in: coreMLCacheRoot, retainingASRHash: bundle.manifest.asrSHA256)
                 let downloadedModelsRoot = support.appendingPathComponent("SpeechModels", isDirectory: true)
+                PhoneSpeechModelSettings.pruneRetiredDownloads(at: downloadedModelsRoot)
                 SpeechModelInstaller.repairInstalledProtection(at: downloadedModelsRoot)
                 speech = try SpeechEngine(bundle: bundle, configuration: SpeechConfiguration(),
                     continuousArchive: true,

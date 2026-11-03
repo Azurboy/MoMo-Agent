@@ -13,19 +13,6 @@ import MoMoSherpaBridge
     #expect(catalog.files.allSatisfy { !$0.path.contains(".mlmodel") })
 }
 
-@Test func funASRNanoCoreMLCatalogPinsUpstreamFilesWithoutRequantization() throws {
-    let catalog = try DownloadableSpeechModel.funASRNanoCoreML()
-    #expect(catalog.files.map(\.path).sorted() == ["model.int8.onnx", "tokens.txt"])
-    #expect(catalog.files.contains { $0.path == "model.int8.onnx" && $0.byteCount == 263_531_902 })
-    #expect(catalog.files.contains { $0.path == "tokens.txt" && $0.byteCount == 939_815 })
-    #expect(catalog.baseURL.absoluteString.contains("ebb95fbda2a034d9a8f3b2d2cba32c104b60bed3"))
-    #expect(try SpeechModelChoice.funASRNanoCoreML.catalog() == catalog)
-    #expect(try catalog.revision != DownloadableSpeechModel.funASRNano().revision)
-    #expect(try catalog.revision != DownloadableSpeechModel.xASR().revision)
-    let unused = URL(fileURLWithPath: "/unused")
-    #expect(DownloadedSpeechModel(directory: unused, catalog: catalog).model == .funASRNanoCoreML)
-}
-
 @Test func xASRCatalogPinsUpstreamFilesWithoutRequantization() throws {
     let catalog = try DownloadableSpeechModel.xASR()
     #expect(catalog.files.map(\.path).sorted() == ["decoder-epoch-99-avg-1.onnx", "encoder-epoch-99-avg-1.int8.onnx",
@@ -103,13 +90,21 @@ import MoMoSherpaBridge
     let senseConfig = try String(contentsOf: URL(fileURLWithPath: String(senseProvider.dropFirst("coreml:".count))), encoding: .utf8)
     #expect(senseConfig.contains("ModelFormat=MLProgram"))
     #expect(senseConfig.contains("RequireStaticInputShapes=1"))
+}
 
-    let funASRCoreMLProvider = try SherpaRuntime.provider(backend: .sherpaCoreML, revision: rev, model: .funASRNanoCoreML, cacheRoot: root)
-    #expect(funASRCoreMLProvider.hasPrefix("coreml:"))
-    let funASRCoreMLConfig = try String(contentsOf: URL(fileURLWithPath: String(funASRCoreMLProvider.dropFirst("coreml:".count))), encoding: .utf8)
-    #expect(funASRCoreMLConfig.contains("ModelFormat=MLProgram"))
-    #expect(funASRCoreMLConfig.contains("MLComputeUnits=CPUAndNeuralEngine"))
-    #expect(funASRCoreMLConfig.contains("RequireStaticInputShapes=1"))
+@Test func pruneUnreferencedDownloadsRemovesRetiredDirectoriesAndRetainsActiveModels() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let nanoRev = try DownloadableSpeechModel.funASRNano().revision
+    let xasrRev = try DownloadableSpeechModel.xASR().revision
+    let retiredRev = String(repeating: "d", count: 64)
+    for folder in [nanoRev, xasrRev + ".partial", retiredRev, retiredRev + ".partial"] {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: true)
+    }
+    SpeechModelInstaller.pruneUnreferencedDownloads(at: root, retaining: [try .funASRNano(), try .xASR()])
+    let remaining = Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+    #expect(remaining == [nanoRev, xasrRev + ".partial"])
 }
 
 @Test func validationReceiptSurvivesVolumeDeviceNumberChangeWhileRejectingContentEdits() throws {

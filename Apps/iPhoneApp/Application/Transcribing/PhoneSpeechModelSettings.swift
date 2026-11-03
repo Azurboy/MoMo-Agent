@@ -8,7 +8,8 @@ import MoMoSpeech
 @MainActor @Observable
 final class PhoneSpeechModelSettings {
     static let selectionKey = "speech.recognitionModel"
-    static let downloadable: [SpeechModelChoice] = [.funASRNanoCoreML, .xASR, .funASRNano]
+    private static let legacyFunASRCoreMLSelection = "funASRNanoCoreML"
+    static let downloadable: [SpeechModelChoice] = [.funASRNano, .xASR]
     private(set) var choice: SpeechModelChoice
     private(set) var installed: Set<SpeechModelChoice> = []
     private(set) var checking = false
@@ -39,22 +40,45 @@ final class PhoneSpeechModelSettings {
         self.catalogs = catalogs
         self.installers = installers
         if unavailable { failure = String(localized: "模型下载信息不可用，请更新 App。") }
+        if defaults.string(forKey: Self.selectionKey) == Self.legacyFunASRCoreMLSelection {
+            defaults.removeObject(forKey: Self.selectionKey)
+        }
         if let saved = defaults.string(forKey: Self.selectionKey).flatMap(SpeechModelChoice.init(rawValue:)),
            saved != .senseVoice, choice != saved {
             failure = switch saved {
             case .xASR: String(localized: "X-ASR 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
-            case .funASRNanoCoreML: String(localized: "FunASR (CoreML) 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
             default: String(localized: "FunASR 文件未就绪，当前使用 SenseVoice。请重新下载后启用。")
             }
         }
+    }
+
+    static func pruneRetiredDownloads(at root: URL) {
+        let activeCatalogs = downloadable.compactMap { try? $0.catalog() }
+        guard activeCatalogs.count == downloadable.count else { return }
+        SpeechModelInstaller.pruneUnreferencedDownloads(at: root, retaining: activeCatalogs)
     }
 
     /// Startup only checks the small receipt. Weight validation runs later on the recognition queue.
     static func restoredDownload(at root: URL, defaults: UserDefaults = .standard) -> DownloadedSpeechModel? {
         let language = defaults.string(forKey: PhoneSpeechSettings.languageKey)
             .flatMap(SpeechLanguage.init(rawValue:)) ?? .automatic
-        guard let model = defaults.string(forKey: selectionKey).flatMap(SpeechModelChoice.init(rawValue:)),
-              model.supports(language),
+        if defaults.string(forKey: selectionKey) == legacyFunASRCoreMLSelection {
+            if let migrated = verifiedDownload(for: .funASRNano, language: language, at: root) {
+                defaults.set(SpeechModelChoice.funASRNano.rawValue, forKey: selectionKey)
+                return migrated
+            }
+            defaults.removeObject(forKey: selectionKey)
+            return nil
+        }
+        guard let model = defaults.string(forKey: selectionKey).flatMap(SpeechModelChoice.init(rawValue:)) else {
+            return nil
+        }
+        return verifiedDownload(for: model, language: language, at: root)
+    }
+
+    private static func verifiedDownload(for model: SpeechModelChoice, language: SpeechLanguage,
+                                         at root: URL) -> DownloadedSpeechModel? {
+        guard model.supports(language),
               let catalog = try? model.catalog(),
               let revision = try? catalog.revision else { return nil }
         let directory = root.appendingPathComponent(revision)
@@ -134,7 +158,6 @@ final class PhoneSpeechModelSettings {
                     installed.remove(model)
                     failure = switch model {
                     case .xASR: String(localized: "请先下载 X-ASR 模型。")
-                    case .funASRNanoCoreML: String(localized: "请先下载 FunASR (CoreML) 模型。")
                     default: String(localized: "请先下载 FunASR 模型。")
                     }
                 }

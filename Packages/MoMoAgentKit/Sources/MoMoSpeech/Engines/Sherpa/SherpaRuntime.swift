@@ -64,7 +64,6 @@ final class SherpaRuntime: @unchecked Sendable {
         self.revision = revision
         let runtimeTag = switch model {
         case .senseVoice: "sherpa-1.13.8-coreml-v1"
-        case .funASRNanoCoreML: "sherpa-1.13.8-funasr-nano-coreml-v1"
         case .funASRNano: "funasr-nano-ort-cpu-naud-v2"
         case .xASR: "sherpa-1.13.8-transducer-cpu-v1"
         }
@@ -120,7 +119,7 @@ final class SherpaRuntime: @unchecked Sendable {
             return
         }
 
-        let useCoreML = backend == .sherpaCoreML && (model == .senseVoice || model == .funASRNanoCoreML)
+        let useCoreML = backend == .sherpaCoreML && model == .senseVoice
         let senseThreads = useCoreML ? configuration.threads : cpuThreads
         let strings = [
             provider, configuration.language, "greedy_search",
@@ -154,9 +153,8 @@ final class SherpaRuntime: @unchecked Sendable {
     }
 
     func updateLanguage(_ language: SpeechLanguage) throws -> Bool {
-        // Nano takes the language as a prompt; FunASR CoreML CTC and X-ASR decode without language prefix reload.
-        guard (model == .funASRNano && nanoRuntime != nil)
-            || ((model == .xASR || model == .funASRNanoCoreML) && recognizer != nil) else { return false }
+        // Nano takes the language as a prompt; X-ASR ignores it, so neither needs a reload.
+        guard (model == .funASRNano && nanoRuntime != nil) || (model == .xASR && recognizer != nil) else { return false }
         guard model.supports(language) else { throw SpeechModelSelectionError.unsupportedLanguage }
         let updated = try configuration.withLanguage(language)
         configuration = updated
@@ -316,8 +314,8 @@ final class SherpaRuntime: @unchecked Sendable {
         //   and promotes rank-0 int64 downsample scalars to rank-1, crashing /encoder/{1,2,3}/downsample/If Concat;
         // - CoreML NeuralNetwork creates 345-448 partitions and runs 1.25-1.74x slower than AMX INT8 CPU;
         // - Full static FP32 dequantization bloats 154 MB -> 576 MB and overflows ANE FP16 in Zipformer2 BasicNorm (cos=0.195).
-        // SenseVoice and FunASR-Nano (CoreML CTC) SAN-M encoders cleanly offload static subgraphs to CoreML without overflow.
-        let useCoreML = backend == .sherpaCoreML && (model == .senseVoice || model == .funASRNanoCoreML)
+        // SenseVoice SAN-M encoders cleanly offload static subgraphs to CoreML without overflow.
+        let useCoreML = backend == .sherpaCoreML && model == .senseVoice
         if useCoreML {
             lines += ["ModelFormat=MLProgram", "MLComputeUnits=CPUAndNeuralEngine",
                       "RequireStaticInputShapes=1",
