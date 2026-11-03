@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import OSLog
+import UIKit
 import MoMoAgentClient
 import MoMoArchive
 import MoMoLink
@@ -106,7 +107,10 @@ final class PhoneRuntime {
         if let speech {
             speech.setSceneForeground(isForeground)
             speech.setForegroundPriority(isForeground)
-            transcription = try TranscriptionCoordinator(archive: archive, speech: speech, onStateChanged: { [weak self] snapshot in
+            transcription = try TranscriptionCoordinator(
+                archive: archive,
+                speech: speech,
+                onStateChanged: { [weak self] snapshot in
                 Task { @MainActor in
                     guard let self else { return }
                     let becameIdle = snapshot.phase == .idle && self.transcriptionSnapshot?.phase != .idle
@@ -118,6 +122,7 @@ final class PhoneRuntime {
                             || (currentBatch.completedDuration - previousBatch.completedDuration) >= 1.0
                     }()
                     let completedNewWindows = snapshot.completedWindows > (self.transcriptionSnapshot?.completedWindows ?? 0)
+                    let completedNewPreparations = snapshot.completedPreparations > (self.transcriptionSnapshot?.completedPreparations ?? 0)
                     self.transcriptionSnapshot = snapshot
                     self.speechPerformance?.record(snapshot, foreground: self.isForeground)
                     if snapshot.completedWindows > 0
@@ -128,14 +133,20 @@ final class PhoneRuntime {
                     self.backgroundTasks?.update(snapshot)
                     if !self.isForeground, self.transcriptionContinuation?.isActive == true, !snapshot.nativeInFlight,
                        [.idle, .systemSuspended, .paused, .failed, .waitingForAudio, .waitingForContext, .waitingForRetry, .audioUnavailable].contains(snapshot.phase) {
-                        if await self.transcription?.finishForegroundContinuationIfIdle() == true {
+                        let shouldFinishContinuation: Bool
+                        if snapshot.phase == .systemSuspended {
+                            shouldFinishContinuation = true
+                        } else {
+                            shouldFinishContinuation = await self.transcription?.finishForegroundContinuationIfIdle() == true
+                        }
+                        if shouldFinishContinuation {
                             self.transcriptionContinuation?.finish()
                         }
                     }
                     let settled = !snapshot.nativeInFlight
                         && [.idle, .queued, .waitingForAudio, .waitingForContext, .waitingForRetry, .audioUnavailable, .systemSuspended, .paused, .failed].contains(snapshot.phase)
                     let refreshProgress = self.transcriptionRefresh.shouldRefresh(
-                        completedNewWindow: completedNewWindows || batchProgressAdvanced,
+                        completedNewWindow: completedNewWindows || completedNewPreparations || batchProgressAdvanced,
                         settled: settled)
                     if self.libraryPresentationDeferred {
                         if refreshProgress {
@@ -151,10 +162,7 @@ final class PhoneRuntime {
                         if self.isForeground, snapshot.execution == nil, snapshot.phase != .failed,
                            !self.preparingTranscriptionContinuation,
                            (self.requestedTranscriptionBatchID == nil || self.backgroundTasks?.hasActiveContinuedGrant != true),
-                           self.activeBatches.contains(where: {
-                               $0.configurationFingerprint == self.speechFingerprint
-                                   && ($0.state == .ready || ($0.state == .paused && $0.endReason == .interrupted))
-                           }) {
+                           self.activeBatches.contains(where: { self.isBatchAutomaticallyResumable($0) }) {
                             await self.resumeAutomaticTranscription()
                         }
                     } else if refreshProgress {
@@ -168,9 +176,21 @@ final class PhoneRuntime {
                 }
             }, onVoiceprintUpdated: { [weak self] in
                 Task { @MainActor in self?.scheduleSpeakerRematch() }
+            }, remainingFiniteBackgroundSeconds: { @MainActor in
+                guard UIApplication.shared.applicationState == .background else { return nil }
+                return UIApplication.shared.backgroundTimeRemaining
             })
         }
-        if let transcription { receivedAudioTranscription = ReceivedAudioTranscription(coordinator: transcription) }
+        if let transcription {
+            let received = ReceivedAudioTranscription(
+                coordinator: transcription,
+                excludingBatchID: { [weak self] in
+                    self?.backgroundTasks?.pendingContinuedBatchID ?? self?.requestedTranscriptionBatchID
+                }
+            )
+            received.onActivityChanged = { [weak self] in self?.syncSpeechExecutionMode() }
+            receivedAudioTranscription = received
+        }
         receiver.onChanged = { [weak self] in await self?.archiveChanged() }
         receiver.onFailure = { [weak self] message in self?.failure = message }
         receiver.onSyncFailure = { [weak self] message in self?.syncFailure = message }
@@ -254,9 +274,21 @@ final class PhoneRuntime {
             let targets = windows.filter { !$0.sources.isEmpty }.map { AudioPlaybackTarget.window($0.id, $0.sources) }
             self.playback.requestWaveformPreparation(for: targets, run: self.isForeground)
         }
-        transcriptionContinuation = PhoneTranscriptionContinuation { [weak self] in
+        let continuation = PhoneTranscriptionContinuation { [weak self] in
             await self?.expireForegroundTranscription()
         }
+        continuation.onActivityChanged = { [weak self] in self?.syncSpeechExecutionMode() }
+        transcriptionContinuation = continuation
+    }
+
+    private func isBatchAutomaticallyResumable(_ batch: TranscriptionBatch) -> Bool {
+        batch.configurationFingerprint == speechFingerprint
+            && (batch.state == .ready || (batch.state == .paused && batch.endReason != .userPaused))
+    }
+
+    private func isAutomaticWorkActivelyRunning(_ snapshot: TranscriptionSnapshot?) -> Bool {
+        guard let snapshot, snapshot.execution == nil else { return false }
+        return snapshot.nativeInFlight || snapshot.phase == .preparing || snapshot.phase == .transcribing
     }
 
     func activateTransportIfNeeded() {
@@ -266,23 +298,22 @@ final class PhoneRuntime {
     }
 
     private func archiveChanged() async {
-        if isForeground,
-           let fingerprint = speechFingerprint,
-           let handle = transcriptionSnapshot?.execution,
-           handle.origin == .foreground,
+        let initialSnapshot = await transcription?.snapshot()
+        if let fingerprint = speechFingerprint,
+           let handle = initialSnapshot?.execution ?? transcriptionSnapshot?.execution,
+           handle.origin != .continuedProcessing,
            handle.batchExecution != nil,
            (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: fingerprint)) == true {
-            try? await transcription?.stop(execution: handle, reason: .interrupted)
+            await transcription?.requestPriorityInterleaving(execution: handle)
         }
         await transcription?.requestWork()
         await backgroundTasks?.scheduleAutomatic()
         if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
+        let currentSnapshot = await transcription?.snapshot()
         if isForeground, !preparingTranscriptionContinuation,
-           (await transcription?.snapshot())?.execution == nil,
-           activeBatches.contains(where: {
-               $0.configurationFingerprint == speechFingerprint
-                   && ($0.state == .ready || ($0.state == .paused && ($0.endReason == .systemEndedUnknown || $0.endReason == .interrupted)))
-           }) {
+           currentSnapshot?.execution == nil,
+           !isAutomaticWorkActivelyRunning(currentSnapshot),
+           activeBatches.contains(where: { isBatchAutomaticallyResumable($0) }) {
             await resumeAutomaticTranscription()
         }
     }
@@ -356,7 +387,11 @@ final class PhoneRuntime {
 
     private func syncSpeechExecutionMode() {
         speech?.setSceneForeground(isForeground)
-        let elevatedQoS = isForeground || activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true
+        let elevatedQoS = isForeground
+            || activeSystemTaskRunning
+            || backgroundTasks?.hasActiveContinuedGrant == true
+            || transcriptionContinuation?.isActive == true
+            || receivedAudioTranscription?.isActive == true
         speech?.setForegroundPriority(elevatedQoS)
     }
 
@@ -432,7 +467,6 @@ final class PhoneRuntime {
     func leavingForeground() {
         guard isForeground else { return }
         isForeground = false
-        syncSpeechExecutionMode()
         pendingForegroundBatchFlush = false
         remoteAgent.leavingForeground()
         if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
@@ -447,6 +481,7 @@ final class PhoneRuntime {
                 transcriptionContinuation?.start()
             }
         }
+        syncSpeechExecutionMode()
     }
 
     func background() async {
@@ -454,7 +489,11 @@ final class PhoneRuntime {
         guard !isForeground else { return }
         libraryPresentationDeferred = true
         syncSpeechExecutionMode()
-        speech?.trimBackgroundMemory()
+        if !activeSystemTaskRunning
+            && backgroundTasks?.hasActiveContinuedGrant != true
+            && transcriptionContinuation?.isActive != true {
+            speech?.trimBackgroundMemory()
+        }
         if activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true {
             transcriptionContinuation?.finish()
         }
@@ -531,12 +570,23 @@ final class PhoneRuntime {
                 let continuedGrantActive = backgroundTasks?.hasActiveContinuedGrant == true
                 guard isForeground, !preparingTranscriptionContinuation, !continuedGrantActive else { continue }
                 await transcription.resumeAfterSystemSuspension()
-                guard (await transcription.snapshot()).execution == nil else { continue }
+                let currentSnapshot = await transcription.snapshot()
+                guard currentSnapshot.execution == nil else { continue }
+                if isAutomaticWorkActivelyRunning(currentSnapshot) {
+                    await transcription.requestWork()
+                    continue
+                }
                 try await transcription.preserveCompletedHistory()
                 let batches = try await archive.activeTranscriptionBatches()
                 activeBatches = batches
                 guard isForeground, !preparingTranscriptionContinuation,
                       backgroundTasks?.hasActiveContinuedGrant != true else { continue }
+                let afterPreserveSnapshot = await transcription.snapshot()
+                guard afterPreserveSnapshot.execution == nil else { continue }
+                if isAutomaticWorkActivelyRunning(afterPreserveSnapshot) {
+                    await transcription.requestWork()
+                    continue
+                }
                 let hasUrgentLiveWork: Bool
                 if let speechFingerprint {
                     hasUrgentLiveWork = (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speechFingerprint)) ?? false
@@ -565,10 +615,7 @@ final class PhoneRuntime {
                         requestedTranscriptionBatchID = nil
                     }
                 }
-                if !hasUrgentLiveWork, let batch = batches.first(where: {
-                    $0.configurationFingerprint == speechFingerprint
-                        && ($0.state == .ready || ($0.state == .paused && ($0.endReason == .systemEndedUnknown || $0.endReason == .interrupted)))
-                }) {
+                if !hasUrgentLiveWork, let batch = batches.first(where: { isBatchAutomaticallyResumable($0) }) {
                     if batch.state == .paused { _ = try await transcription.resumeBatch(id: batch.id) }
                     _ = try await transcription.startBatch(id: batch.id, origin: .foreground) { [weak self] completion in
                         guard completion.reason == .completed || completion.reason == .userPaused else { return }

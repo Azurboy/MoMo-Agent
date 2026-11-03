@@ -95,8 +95,12 @@ enum TimelineDate {
     }
     static func duration(_ seconds: TimeInterval) -> String {
         if seconds < 60 { return String(localized: "\(max(1, Int(seconds.rounded()))) 秒") }
-        if seconds < 3_600 { return String(localized: "\(Int((seconds / 60).rounded())) 分钟") }
-        return String(localized: "\(Int((seconds / 3_600).rounded())) 小时")
+        let totalMinutes = Int((seconds / 60).rounded())
+        if totalMinutes < 60 { return String(localized: "\(totalMinutes) 分钟") }
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if minutes == 0 { return String(localized: "\(hours) 小时") }
+        return String(localized: "\(hours) 小时 \(minutes) 分钟")
     }
 }
 
