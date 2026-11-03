@@ -58,9 +58,9 @@ final class BackgroundCPUPacer: @unchecked Sendable {
     private let refillRate: Double
 
     init(initiallyForeground: Bool = true,
-         maxCapacity: Double = 5.0,
-         initialBackgroundBurst: Double = 2.5,
-         refillRate: Double = 0.55) {
+         maxCapacity: Double = 6.0,
+         initialBackgroundBurst: Double = 6.0,
+         refillRate: Double = 0.65) {
         self.isForeground = initiallyForeground
         self.maxCapacity = maxCapacity
         self.initialBackgroundBurst = initialBackgroundBurst

@@ -219,15 +219,13 @@ final class PhoneRuntime {
             self.activeSystemTaskRunning = true
             self.transcriptionContinuation?.finish()
             await self.transcription?.clearForegroundContinuation()
-            self.speech?.setSceneForeground(self.isForeground)
-            self.speech?.setForegroundPriority(self.isForeground)
+            self.syncSpeechExecutionMode()
             await self.receivedAudioTranscription?.handOffToSystemTask()
         }
         backgroundTasks?.onSystemTasksFinished = { [weak self] in
             guard let self else { return }
             self.activeSystemTaskRunning = false
-            self.speech?.setSceneForeground(self.isForeground)
-            self.speech?.setForegroundPriority(self.isForeground)
+            self.syncSpeechExecutionMode()
             self.receivedAudioTranscription?.systemTaskFinished()
         }
         backgroundTasks?.onContinuedBatchFinished = { [weak self] id, _ in
@@ -356,10 +354,15 @@ final class PhoneRuntime {
         receiver.dismissFailures()
     }
 
+    private func syncSpeechExecutionMode() {
+        speech?.setSceneForeground(isForeground)
+        let elevatedQoS = isForeground || activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true
+        speech?.setForegroundPriority(elevatedQoS)
+    }
+
     func foreground() async {
         isForeground = true
-        speech?.setSceneForeground(true)
-        speech?.setForegroundPriority(true)
+        syncSpeechExecutionMode()
         remoteAgent.foreground()
         if foregrounding {
             await withCheckedContinuation { foregroundWaiters.append($0) }
@@ -429,8 +432,7 @@ final class PhoneRuntime {
     func leavingForeground() {
         guard isForeground else { return }
         isForeground = false
-        speech?.setSceneForeground(false)
-        speech?.setForegroundPriority(false)
+        syncSpeechExecutionMode()
         pendingForegroundBatchFlush = false
         remoteAgent.leavingForeground()
         if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
@@ -451,8 +453,7 @@ final class PhoneRuntime {
         // A queued background callback must not suspend a scene that became active again.
         guard !isForeground else { return }
         libraryPresentationDeferred = true
-        speech?.setSceneForeground(false)
-        speech?.setForegroundPriority(false)
+        syncSpeechExecutionMode()
         speech?.trimBackgroundMemory()
         if activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true {
             transcriptionContinuation?.finish()

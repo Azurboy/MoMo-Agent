@@ -55,10 +55,23 @@ final class PhoneBackgroundTasks {
     private let prepare: @MainActor () async throws -> TranscriptionCoordinator
     private var registered = false
     private var registrationSucceeded = false
+    struct ContinuedRunState: Sendable, Equatable {
+        var batchID: UUID
+        var baselinePreparedSeconds: Double
+        var baselineCompletedSeconds: Double
+        var targetSliceSeconds: Double
+        var backgroundEnteredUptime: Double?
+        var backgroundStartPreparedSeconds: Double
+        var backgroundStartCompletedSeconds: Double
+        var lastCommittedCompletedSeconds: Double
+        var sliceCompleting = false
+    }
+
     private var grants: [String: TranscriptionTaskGrant] = [:]
     private var systemTasks: [String: BGTask] = [:]
     private var progressHighWaterMark: [String: Int64] = [:]
     private var progressBaseAnchor: [String: Int64] = [:]
+    private var continuedRunStates: [String: ContinuedRunState] = [:]
     private var progressHeartbeats: [String: Task<Void, Never>] = [:]
     private var latestSnapshot: TranscriptionSnapshot?
     private lazy var automatic = makeAutomaticSubmission()
@@ -213,28 +226,65 @@ final class PhoneBackgroundTasks {
                                               activeWorkInFlight: Bool,
                                               advanceHeartbeat: Bool,
                                               previousHighWater: Int64,
-                                              previousBaseAnchor: Int64) -> (completedUnits: Int64, baseAnchor: Int64) {
+                                              previousBaseAnchor: Int64,
+                                              baselinePreparedDuration: Double? = nil,
+                                              baselineCompletedDuration: Double? = nil,
+                                              targetSliceDuration: Double? = nil) -> (completedUnits: Int64, baseAnchor: Int64) {
         let scale = Self.progressScale
         if batch.state == .completed {
             return (scale, scale)
         }
-        let totalDuration = max(0.001, batch.totalDuration)
-        let preparedFraction = min(1.0, max(0.0, (batch.preparedDuration + batch.removedDuration) / totalDuration))
-        let completedFraction = min(1.0, max(0.0, (batch.completedDuration + batch.removedDuration) / totalDuration))
-        let baseUnits = min(scale - 50, max(100, Int64(((preparedFraction * 0.15 + completedFraction * 0.85) * Double(scale)).rounded())))
+        let currentPrepared = batch.preparedDuration + batch.removedDuration
+        let currentCompleted = batch.completedDuration + batch.removedDuration
+        let basePrepared = min(currentPrepared, max(0.0, baselinePreparedDuration ?? 0.0))
+        let baseCompleted = min(currentCompleted, max(0.0, baselineCompletedDuration ?? 0.0))
+        let remainingFromBaseline = max(1.0, batch.totalDuration - baseCompleted)
+        let sliceTarget = max(1.0, targetSliceDuration ?? min(120.0, max(20.0, remainingFromBaseline)))
+        let preparedDelta = min(sliceTarget, max(0.0, currentPrepared - basePrepared))
+        let completedDelta = min(sliceTarget, max(0.0, currentCompleted - baseCompleted))
+        let weightedFraction = min(1.0, (preparedDelta * 0.15 + completedDelta * 0.85) / sliceTarget)
+        let baseUnits = min(scale - 800, max(100, Int64((weightedFraction * Double(scale - 800)).rounded())))
         let baseAnchor = max(previousBaseAnchor, baseUnits)
         var next = max(previousHighWater, baseUnits)
         if advanceHeartbeat && activeWorkInFlight {
-            let remainingDuration = max(0.0, totalDuration - batch.completedDuration - batch.removedDuration)
-            let activeSliceSeconds = min(22.0, max(4.0, remainingDuration))
-            let spanUnits = max(150, Int64(((activeSliceSeconds / totalDuration) * 0.80 * Double(scale)).rounded()))
-            let ceiling = min(scale - 50, baseAnchor + spanUnits)
-            if next < ceiling {
-                let step = max(8, (ceiling - next) / 14)
-                next = min(ceiling, next + step)
+            // Advance smoothly across the active window, then keep a steady monotonic pulse up to 98.5%
+            // so BGTaskScheduler never observes a 60-second stalled-progress interval on multi-hour batches.
+            let windowSpanUnits = max(600, Int64(((20.0 / sliceTarget) * 0.75 * Double(scale - 800)).rounded()))
+            let softCeiling = min(scale - 500, baseAnchor + windowSpanUnits)
+            let hardCeiling = scale - 150
+            if next < softCeiling {
+                let step = max(10, (softCeiling - next) / 16)
+                next = min(softCeiling, next + step)
+            } else if next < hardCeiling {
+                next = min(hardCeiling, next + 4)
             }
         }
         return (min(scale - 1, next), baseAnchor)
+    }
+
+    static func shouldCompleteContinuedSliceProactively(batch: TranscriptionBatch,
+                                                        nativeInFlight: Bool,
+                                                        isAppInBackground: Bool,
+                                                        backgroundElapsedSeconds: Double,
+                                                        backgroundCompletedDelta: Double,
+                                                        backgroundPreparedDelta: Double,
+                                                        justCommittedWindow: Bool,
+                                                        thermalState: ProcessInfo.ThermalState) -> Bool {
+        guard batch.state == .running, isAppInBackground else { return false }
+        let constrainedThermal = thermalState == .serious || thermalState == .critical
+        let softLimit = constrainedThermal ? 70.0 : 105.0
+        let hardLimit = constrainedThermal ? 90.0 : 130.0
+        if backgroundElapsedSeconds >= hardLimit {
+            return true
+        }
+        guard backgroundElapsedSeconds >= softLimit else { return false }
+        let remainingDuration = max(0.0, batch.totalDuration - batch.completedDuration - batch.removedDuration)
+        if remainingDuration <= 22.0 && backgroundElapsedSeconds < (hardLimit - 15.0) {
+            return false
+        }
+        let madeDurableProgress = backgroundCompletedDelta >= 10.0 || backgroundPreparedDelta >= 60.0
+        let atCleanBoundary = !nativeInFlight || justCommittedWindow
+        return madeDurableProgress && atCleanBoundary
     }
 
     func update(_ snapshot: TranscriptionSnapshot) {
@@ -242,21 +292,60 @@ final class PhoneBackgroundTasks {
         refreshAllContinuedProgress(advanceHeartbeat: false)
     }
 
+    private static func monotonicUptimeSeconds() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+    }
+
     private func refreshAllContinuedProgress(advanceHeartbeat: Bool) {
         guard #available(iOS 26.0, *) else { return }
+        let isAppInBackground = UIApplication.shared.applicationState == .background
+        let nowUptime = Self.monotonicUptimeSeconds()
+        let thermalState = ProcessInfo.processInfo.thermalState
         for (identifier, grant) in grants {
             guard let task = systemTasks[identifier] as? BGContinuedProcessingTask else { continue }
             let matchedBatchID = grant.execution?.batchExecution?.batchID ?? continued.activeBatchID(for: identifier)
             guard let snapshot = latestSnapshot, let batch = snapshot.batch, batch.id == matchedBatchID else {
                 if advanceHeartbeat {
                     let current = progressHighWaterMark[identifier] ?? 100
-                    let bumped = min(250, current + 8)
+                    let bumped = min(600, current + 8)
                     progressHighWaterMark[identifier] = bumped
                     task.progress.totalUnitCount = Self.progressScale
                     task.progress.completedUnitCount = bumped
                 }
                 continue
             }
+            let currentPrepared = batch.preparedDuration + batch.removedDuration
+            let currentCompleted = batch.completedDuration + batch.removedDuration
+            var state = continuedRunStates[identifier] ?? {
+                let remaining = max(1.0, batch.totalDuration - currentCompleted)
+                return ContinuedRunState(
+                    batchID: batch.id,
+                    baselinePreparedSeconds: currentPrepared,
+                    baselineCompletedSeconds: currentCompleted,
+                    targetSliceSeconds: min(120.0, max(20.0, remaining)),
+                    backgroundEnteredUptime: isAppInBackground ? nowUptime : nil,
+                    backgroundStartPreparedSeconds: currentPrepared,
+                    backgroundStartCompletedSeconds: currentCompleted,
+                    lastCommittedCompletedSeconds: currentCompleted
+                )
+            }()
+            if isAppInBackground {
+                if state.backgroundEnteredUptime == nil {
+                    state.backgroundEnteredUptime = nowUptime
+                    state.backgroundStartPreparedSeconds = currentPrepared
+                    state.backgroundStartCompletedSeconds = currentCompleted
+                    let alreadyCompletedInGrant = max(0.0, currentCompleted - state.baselineCompletedSeconds)
+                    let remaining = max(1.0, batch.totalDuration - currentCompleted)
+                    state.targetSliceSeconds = max(state.targetSliceSeconds, alreadyCompletedInGrant + min(120.0, remaining))
+                }
+            } else {
+                state.backgroundEnteredUptime = nil
+                state.backgroundStartPreparedSeconds = currentPrepared
+                state.backgroundStartCompletedSeconds = currentCompleted
+            }
+            let justCommittedWindow = (currentCompleted - state.lastCommittedCompletedSeconds) >= 1.0
+            state.lastCommittedCompletedSeconds = max(state.lastCommittedCompletedSeconds, currentCompleted)
+
             let activeInFlight = snapshot.nativeInFlight || snapshot.phase == .preparing || snapshot.phase == .transcribing
             let previousHigh = progressHighWaterMark[identifier] ?? 100
             let previousAnchor = progressBaseAnchor[identifier] ?? 100
@@ -265,22 +354,63 @@ final class PhoneBackgroundTasks {
                 activeWorkInFlight: activeInFlight,
                 advanceHeartbeat: advanceHeartbeat,
                 previousHighWater: previousHigh,
-                previousBaseAnchor: previousAnchor
+                previousBaseAnchor: previousAnchor,
+                baselinePreparedDuration: state.baselinePreparedSeconds,
+                baselineCompletedDuration: state.baselineCompletedSeconds,
+                targetSliceDuration: state.targetSliceSeconds
             )
             progressHighWaterMark[identifier] = computed.completedUnits
             progressBaseAnchor[identifier] = computed.baseAnchor
             task.progress.totalUnitCount = Self.progressScale
             task.progress.completedUnitCount = computed.completedUnits
-            let processedSeconds = Int((batch.completedDuration + batch.removedDuration).rounded(.down))
+
             let totalSeconds = max(1, Int(batch.totalDuration.rounded(.up)))
-            if snapshot.phase == .preparing && processedSeconds == 0 {
-                let preparedSeconds = min(totalSeconds, Int((batch.preparedDuration + batch.removedDuration).rounded(.down)))
-                task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "正在分析音频 \(preparedSeconds) / \(totalSeconds) 秒"))
+            let processedSeconds = min(totalSeconds, Int(currentCompleted.rounded(.down)))
+            let preparedSeconds = min(totalSeconds, Int(currentPrepared.rounded(.down)))
+            if snapshot.phase == .preparing && preparedSeconds < totalSeconds {
+                if processedSeconds > 0 {
+                    task.updateTitle(
+                        String(localized: "本机转写"),
+                        subtitle: String(localized: "正在分析音频 \(preparedSeconds) / \(totalSeconds) 秒 · 已转写 \(processedSeconds) 秒")
+                    )
+                } else {
+                    task.updateTitle(
+                        String(localized: "本机转写"),
+                        subtitle: String(localized: "正在分析音频 \(preparedSeconds) / \(totalSeconds) 秒")
+                    )
+                }
             } else if activeInFlight && processedSeconds < totalSeconds {
-                task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "正在转写 · 已完成 \(min(totalSeconds, processedSeconds)) / \(totalSeconds) 秒"))
+                task.updateTitle(
+                    String(localized: "本机转写"),
+                    subtitle: String(localized: "正在转写 · 已完成 \(processedSeconds) / \(totalSeconds) 秒")
+                )
             } else {
-                task.updateTitle(String(localized: "本机转写"), subtitle: String(localized: "已处理 \(min(totalSeconds, processedSeconds)) / \(totalSeconds) 秒"))
+                task.updateTitle(
+                    String(localized: "本机转写"),
+                    subtitle: String(localized: "已处理 \(processedSeconds) / \(totalSeconds) 秒")
+                )
             }
+
+            let bgElapsed = state.backgroundEnteredUptime.map { max(0.0, nowUptime - $0) } ?? 0.0
+            let bgCompletedDelta = max(0.0, currentCompleted - state.backgroundStartCompletedSeconds)
+            let bgPreparedDelta = max(0.0, currentPrepared - state.backgroundStartPreparedSeconds)
+            if !state.sliceCompleting,
+               Self.shouldCompleteContinuedSliceProactively(
+                   batch: batch,
+                   nativeInFlight: snapshot.nativeInFlight,
+                   isAppInBackground: isAppInBackground,
+                   backgroundElapsedSeconds: bgElapsed,
+                   backgroundCompletedDelta: bgCompletedDelta,
+                   backgroundPreparedDelta: bgPreparedDelta,
+                   justCommittedWindow: justCommittedWindow,
+                   thermalState: thermalState
+               ) {
+                state.sliceCompleting = true
+                continuedRunStates[identifier] = state
+                grant.completeSlice(reason: .systemEndedUnknown)
+                continue
+            }
+            continuedRunStates[identifier] = state
         }
     }
 
@@ -367,22 +497,41 @@ final class PhoneBackgroundTasks {
             try await coordinator.stop(execution: execution, reason: reason)
         }, completion: { [weak self] success, failure in
             self?.stopProgressHeartbeat(identifier: id)
-            let reason = self?.grants[id]?.endReason
+            let grantRef = self?.grants[id]
+            let reason = grantRef?.endReason
+            let sliceCompletedCleanly = grantRef?.completedProactively == true && failure == nil
+            let userCancelled = reason == .userPaused && failure == nil
             task.expirationHandler = nil
-            let taskSucceeded = continued ? (failure == nil && (success || reason == .systemEndedUnknown || reason == .interrupted || reason == .userPaused)) : success
+            let taskSucceeded = continued ? (failure == nil && (success || sliceCompletedCleanly || userCancelled)) : success
             if continued, taskSucceeded, #available(iOS 26.0, *), let continuedTask = task as? BGContinuedProcessingTask {
                 let total = max(Self.progressScale, continuedTask.progress.totalUnitCount)
                 continuedTask.progress.totalUnitCount = total
                 continuedTask.progress.completedUnitCount = total
+                if let batch = self?.latestSnapshot?.batch, batch.id == batchID {
+                    let totalSeconds = max(1, Int(batch.totalDuration.rounded(.up)))
+                    let processedSeconds = min(totalSeconds, Int((batch.completedDuration + batch.removedDuration).rounded(.down)))
+                    if batch.state == .completed || reason == .completed {
+                        continuedTask.updateTitle(
+                            String(localized: "本机转写"),
+                            subtitle: String(localized: "已完成全部 \(totalSeconds) 秒转写")
+                        )
+                    } else if sliceCompletedCleanly {
+                        continuedTask.updateTitle(
+                            String(localized: "本机转写"),
+                            subtitle: String(localized: "本轮后台已完成 · 累计 \(processedSeconds) / \(totalSeconds) 秒")
+                        )
+                    }
+                }
             }
             task.setTaskCompleted(success: taskSucceeded)
             self?.grants[id] = nil
             self?.systemTasks[id] = nil
             self?.progressHighWaterMark[id] = nil
             self?.progressBaseAnchor[id] = nil
+            self?.continuedRunStates[id] = nil
             if self?.grants.isEmpty == true { self?.onSystemTasksFinished?() }
             if continued { self?.continued.complete(identifier: id) }
-            if let batchID { self?.onContinuedBatchFinished?(batchID, success) }
+            if let batchID { self?.onContinuedBatchFinished?(batchID, success || sliceCompletedCleanly) }
             if failure != nil { self?.onFailure?(String(localized: "后台转写已停止，进度保存在本机。请回到转录页检查。")) }
             if failure == nil, (reason == .backgroundExpired || reason == .interrupted || (continued && reason == .systemEndedUnknown)) {
                 Task { await self?.scheduleAutomatic() }

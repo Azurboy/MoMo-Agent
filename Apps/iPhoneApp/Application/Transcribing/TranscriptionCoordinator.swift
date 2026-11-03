@@ -669,7 +669,9 @@ public actor TranscriptionCoordinator {
         // Allow a short edit burst, but stop retrying if a file keeps changing without any committed progress.
         let maximumConsecutiveRevisions = 3
         do {
-            try await preserveCompletedHistory()
+            if managed?.handle.batchExecution == nil || managed?.handle.origin == .foreground {
+                try await preserveCompletedHistory()
+            }
             if managed == nil || managed?.handle.origin == .foreground {
                 // Process user-confirmed speaker anchors promptly without starving incoming live audio.
                 try await extractPendingVoiceprintSeedsIfNeeded(limit: 2)
@@ -1024,7 +1026,8 @@ public actor TranscriptionCoordinator {
             }
             try Task.checkCancellation()
             guard let sequence = readingSequence else { throw SpeechError.incompatibleWindow }
-            if retryScope == nil, !batchDecodeFailed, speech.archiveBatchSize > 1 {
+            let allowCompanionBatching = managed == nil || managed?.handle.origin == .foreground
+            if allowCompanionBatching, retryScope == nil, !batchDecodeFailed, speech.archiveBatchSize > 1 {
                 let companions = Task { [archive, limit = speech.archiveBatchSize] in
                     try await archive.claimCompanionWindows(after: ticket, inputLease: sequence.lease, maximumCount: limit)
                 }

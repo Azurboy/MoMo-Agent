@@ -14,6 +14,7 @@ final class TranscriptionTaskGrant {
     private(set) var execution: TranscriptionExecutionHandle?
     private(set) var finished = false
     private(set) var endReason: TranscriptionBatchEndReason?
+    private(set) var completedProactively = false
     private var expiration: TranscriptionBatchEndReason?
     private var started = false
     private var admissionStarted = false
@@ -29,7 +30,7 @@ final class TranscriptionTaskGrant {
     func run() async {
         guard !finished, !started else { return }
         started = true
-        if let expiration { finish(success: false, failure: nil, reason: expiration); return }
+        if let expiration { finish(success: completedProactively, failure: nil, reason: expiration); return }
         do {
             try await prepare()
             guard !finished else { return }
@@ -39,18 +40,35 @@ final class TranscriptionTaskGrant {
             }
             execution = handle
             if let expiration { await stopAndFinish(handle, reason: expiration) }
-        } catch { finish(success: false, failure: "background_start_failed", reason: expiration ?? .interrupted) }
+        } catch {
+            completedProactively = false
+            finish(success: false, failure: "background_start_failed", reason: expiration ?? .interrupted)
+        }
+    }
+
+    func completeSlice(reason: TranscriptionBatchEndReason = .systemEndedUnknown) {
+        guard !finished, expiration == nil else { return }
+        completedProactively = true
+        expiration = reason
+        if !admissionStarted { finish(success: true, failure: nil, reason: reason); return }
+        if let execution { Task { await stopAndFinish(execution, reason: reason) } }
     }
 
     func expire(reason: TranscriptionBatchEndReason) {
-        guard !finished, expiration == nil else { return }
+        guard !finished else { return }
+        if completedProactively {
+            completedProactively = false
+            if reason != .systemEndedUnknown { expiration = reason }
+            return
+        }
+        guard expiration == nil else { return }
         expiration = reason
         if !admissionStarted { finish(success: false, failure: nil, reason: reason); return }
         if let execution { Task { await stopAndFinish(execution, reason: reason) } }
     }
 
     private func completed(_ result: TranscriptionExecutionCompletion) {
-        // An expiration already owns completion; wait for its durable stop barrier.
+        // An expiration or proactive slice completion already owns completion; wait for its durable stop barrier.
         guard expiration == nil else { return }
         finish(success: result.reason == .completed && result.failureCode == nil, failure: result.failureCode, reason: result.reason)
     }
@@ -58,8 +76,11 @@ final class TranscriptionTaskGrant {
     private func stopAndFinish(_ execution: TranscriptionExecutionHandle, reason: TranscriptionBatchEndReason) async {
         do {
             try await stop(execution, reason)
-            finish(success: false, failure: nil, reason: reason)
-        } catch { finish(success: false, failure: "archive_cancel_barrier_failed", reason: reason) }
+            finish(success: completedProactively, failure: nil, reason: expiration ?? reason)
+        } catch {
+            completedProactively = false
+            finish(success: false, failure: "archive_cancel_barrier_failed", reason: expiration ?? reason)
+        }
     }
 
     private func finish(success: Bool, failure: String?, reason: TranscriptionBatchEndReason) {

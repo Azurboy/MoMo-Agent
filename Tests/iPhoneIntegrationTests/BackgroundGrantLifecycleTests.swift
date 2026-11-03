@@ -292,6 +292,202 @@ final class BackgroundGrantLifecycleTests: XCTestCase {
         XCTAssertEqual(finished.completedUnits, PhoneBackgroundTasks.progressScale)
     }
 
+    func testMultiHourBatchProgressNeverStallsAcrossNinetySecondsOfHeartbeats() throws {
+        let sessionID = UUID(), epochID = UUID()
+        let totalFrames: Int64 = 9_613 * 16_000
+        struct BatchWire: Encodable {
+            let id: UUID
+            let configurationFingerprint: String
+            let state: TranscriptionBatchState
+            let endReason: TranscriptionBatchEndReason?
+            let execution: TranscriptionBatchExecution?
+            let windowIDs: [String]
+            let coverage: [TranscriptionBatchCoverage]
+        }
+        func makeMultiHourBatch(preparedSeconds: Int64, completedSeconds: Int64) throws -> TranscriptionBatch {
+            let frozen = [try FrameRange(start: 0, count: totalFrames)]
+            let prepared = [try FrameRange(start: 0, count: preparedSeconds * 16_000)]
+            let completed = [try FrameRange(start: 0, count: completedSeconds * 16_000)]
+            let wire = BatchWire(
+                id: UUID(),
+                configurationFingerprint: String(repeating: "b", count: 64),
+                state: .running,
+                endReason: nil,
+                execution: nil,
+                windowIDs: ["w1", "w2", "w3", "w4"],
+                coverage: [
+                    TranscriptionBatchCoverage(
+                        sessionID: sessionID,
+                        epochID: epochID,
+                        timebaseHz: 16_000,
+                        frozen: frozen,
+                        noSpeech: [],
+                        prepared: prepared,
+                        completed: completed,
+                        removed: []
+                    )
+                ]
+            )
+            let data = try JSONEncoder().encode(wire)
+            return try JSONDecoder().decode(TranscriptionBatch.self, from: data)
+        }
+
+        // Exact regression for a 9,613s batch resumed at 4,925s completed / 4,995s prepared:
+        // 80 consecutive 1.5s heartbeats (120 seconds) during a slow window must never stall.
+        var highWater: Int64 = 100
+        var anchor: Int64 = 100
+        let batchAt4925 = try makeMultiHourBatch(preparedSeconds: 4_995, completedSeconds: 4_925)
+        for tick in 0..<80 {
+            let step = PhoneBackgroundTasks.computeContinuedProgressUnits(
+                batch: batchAt4925,
+                activeWorkInFlight: true,
+                advanceHeartbeat: true,
+                previousHighWater: highWater,
+                previousBaseAnchor: anchor,
+                baselinePreparedDuration: 4_995,
+                baselineCompletedDuration: 4_925,
+                targetSliceDuration: 120
+            )
+            XCTAssertGreaterThan(step.completedUnits, highWater, "Progress stalled on heartbeat tick \(tick)")
+            XCTAssertLessThan(step.completedUnits, PhoneBackgroundTasks.progressScale)
+            highWater = step.completedUnits
+            anchor = step.baseAnchor
+        }
+
+        // Committing three 20s windows (4,925 -> 4,985) advances baseAnchor materially.
+        let batchAt4985 = try makeMultiHourBatch(preparedSeconds: 4_995, completedSeconds: 4_985)
+        let afterCommits = PhoneBackgroundTasks.computeContinuedProgressUnits(
+            batch: batchAt4985,
+            activeWorkInFlight: true,
+            advanceHeartbeat: false,
+            previousHighWater: highWater,
+            previousBaseAnchor: anchor,
+            baselinePreparedDuration: 4_995,
+            baselineCompletedDuration: 4_925,
+            targetSliceDuration: 120
+        )
+        XCTAssertGreaterThan(afterCommits.baseAnchor, 3_500)
+        XCTAssertGreaterThanOrEqual(afterCommits.completedUnits, highWater)
+    }
+
+    func testProactiveSliceCompletionEndsGrantAsSuccessUnlessSystemExpirationArrivesDuringStop() async throws {
+        let admitted1 = expectation(description: "Admitted 1")
+        let stopping1 = expectation(description: "Proactive stop barrier")
+        let completed1 = expectation(description: "Proactive completion")
+        let harness1 = GrantHarness(admitted: admitted1, stopping: stopping1)
+        var outcomes1: [(Bool, String?)] = []
+        let grant1 = TranscriptionTaskGrant(start: { await harness1.start($0) }, stop: { try await harness1.stop($0, $1) }) { success, failure in
+            outcomes1.append((success, failure))
+            completed1.fulfill()
+        }
+        let run1 = Task { await grant1.run() }
+        await fulfillment(of: [admitted1], timeout: 5)
+        await harness1.releaseAdmission()
+        await run1.value
+        grant1.completeSlice(reason: .systemEndedUnknown)
+        await fulfillment(of: [stopping1], timeout: 5)
+        XCTAssertTrue(outcomes1.isEmpty, "Proactive slice completion must wait for durable SQLite stop barrier")
+        await harness1.releaseStop()
+        await fulfillment(of: [completed1], timeout: 5)
+        XCTAssertEqual(outcomes1.count, 1)
+        XCTAssertTrue(outcomes1[0].0)
+        XCTAssertNil(outcomes1[0].1)
+        XCTAssertTrue(grant1.completedProactively)
+        XCTAssertEqual(grant1.endReason, .systemEndedUnknown)
+
+        // If system expiration arrives while proactive stop is still in flight, report expired (false).
+        let admitted2 = expectation(description: "Admitted 2")
+        let stopping2 = expectation(description: "Contested stop barrier")
+        let completed2 = expectation(description: "Contested completion")
+        let harness2 = GrantHarness(admitted: admitted2, stopping: stopping2)
+        var outcomes2: [(Bool, String?)] = []
+        let grant2 = TranscriptionTaskGrant(start: { await harness2.start($0) }, stop: { try await harness2.stop($0, $1) }) { success, failure in
+            outcomes2.append((success, failure))
+            completed2.fulfill()
+        }
+        let run2 = Task { await grant2.run() }
+        await fulfillment(of: [admitted2], timeout: 5)
+        await harness2.releaseAdmission()
+        await run2.value
+        grant2.completeSlice(reason: .systemEndedUnknown)
+        await fulfillment(of: [stopping2], timeout: 5)
+        grant2.expire(reason: .systemEndedUnknown)
+        await harness2.releaseStop()
+        await fulfillment(of: [completed2], timeout: 5)
+        XCTAssertEqual(outcomes2.count, 1)
+        XCTAssertFalse(outcomes2[0].0)
+        XCTAssertFalse(grant2.completedProactively)
+    }
+
+    func testProactiveSlicePolicyWaitsForCleanBoundaryOrHardSafetyDeadline() throws {
+        let sessionID = UUID(), epochID = UUID()
+        struct BatchWire: Encodable {
+            let id: UUID
+            let configurationFingerprint: String
+            let state: TranscriptionBatchState
+            let endReason: TranscriptionBatchEndReason?
+            let execution: TranscriptionBatchExecution?
+            let windowIDs: [String]
+            let coverage: [TranscriptionBatchCoverage]
+        }
+        func makeRunningBatch(totalSeconds: Int64, completedSeconds: Int64) throws -> TranscriptionBatch {
+            let wire = BatchWire(
+                id: UUID(),
+                configurationFingerprint: String(repeating: "c", count: 64),
+                state: .running,
+                endReason: nil,
+                execution: nil,
+                windowIDs: ["w1"],
+                coverage: [
+                    TranscriptionBatchCoverage(
+                        sessionID: sessionID,
+                        epochID: epochID,
+                        timebaseHz: 16_000,
+                        frozen: [try FrameRange(start: 0, count: totalSeconds * 16_000)],
+                        noSpeech: [],
+                        prepared: [try FrameRange(start: 0, count: totalSeconds * 16_000)],
+                        completed: completedSeconds > 0 ? [try FrameRange(start: 0, count: completedSeconds * 16_000)] : [],
+                        removed: []
+                    )
+                ]
+            )
+            return try JSONDecoder().decode(TranscriptionBatch.self, from: JSONEncoder().encode(wire))
+        }
+
+        let longBatch = try makeRunningBatch(totalSeconds: 9_613, completedSeconds: 5_005)
+        // Never stops in foreground.
+        XCTAssertFalse(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: longBatch, nativeInFlight: false, isAppInBackground: false,
+            backgroundElapsedSeconds: 200, backgroundCompletedDelta: 80, backgroundPreparedDelta: 0,
+            justCommittedWindow: true, thermalState: .nominal))
+        // Keeps running before soft limit.
+        XCTAssertFalse(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: longBatch, nativeInFlight: false, isAppInBackground: true,
+            backgroundElapsedSeconds: 90, backgroundCompletedDelta: 80, backgroundPreparedDelta: 0,
+            justCommittedWindow: true, thermalState: .nominal))
+        // Mid-inference at 108s waits for window commit rather than cutting off mid-window.
+        XCTAssertFalse(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: longBatch, nativeInFlight: true, isAppInBackground: true,
+            backgroundElapsedSeconds: 108, backgroundCompletedDelta: 80, backgroundPreparedDelta: 0,
+            justCommittedWindow: false, thermalState: .nominal))
+        // Immediately completes slice once window commits past soft limit.
+        XCTAssertTrue(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: longBatch, nativeInFlight: false, isAppInBackground: true,
+            backgroundElapsedSeconds: 108, backgroundCompletedDelta: 80, backgroundPreparedDelta: 0,
+            justCommittedWindow: true, thermalState: .nominal))
+        // Hard safety limit stops before iOS scheduler expiration even if mid-flight.
+        XCTAssertTrue(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: longBatch, nativeInFlight: true, isAppInBackground: true,
+            backgroundElapsedSeconds: 130, backgroundCompletedDelta: 20, backgroundPreparedDelta: 0,
+            justCommittedWindow: false, thermalState: .nominal))
+        // Nearly finished batch (<= 22s remaining) is allowed to finish its final window before hard limit.
+        let almostDoneBatch = try makeRunningBatch(totalSeconds: 120, completedSeconds: 104)
+        XCTAssertFalse(PhoneBackgroundTasks.shouldCompleteContinuedSliceProactively(
+            batch: almostDoneBatch, nativeInFlight: false, isAppInBackground: true,
+            backgroundElapsedSeconds: 108, backgroundCompletedDelta: 84, backgroundPreparedDelta: 0,
+            justCommittedWindow: true, thermalState: .nominal))
+    }
+
     private enum TestFailure: Error { case stopFailed }
 }
 

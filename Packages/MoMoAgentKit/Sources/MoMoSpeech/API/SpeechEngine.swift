@@ -685,7 +685,7 @@ public final class SpeechEngine: @unchecked Sendable {
                                 split.recognitionFingerprint = firstRaw.recognitionFingerprint
                                 split.speakers = detectedSpeakers
                                 split.speakerTurns = merged
-                                if !droppedCleanTurn {
+                                if !droppedCleanTurn || !backgroundCPUPacer.sceneForeground {
                                     return split
                                 }
                                 candidateSplit = split
@@ -965,8 +965,8 @@ public final class SpeechEngine: @unchecked Sendable {
             return try await withCheckedThrowingContinuation { continuation in
                 let executor = kind == .prepareDictation ? dictationQueue : kind == .prepare ? analysisQueue : queue
                 let isDictation = kind == .prepareDictation || kind == .dictate
-                let isForeground = foregroundPriority.withLock { $0 } && backgroundCPUPacer.sceneForeground
-                let qos: DispatchQoS = (isForeground || isDictation) ? .userInitiated : .utility
+                let elevatedPriority = foregroundPriority.withLock { $0 }
+                let qos: DispatchQoS = (elevatedPriority || isDictation) ? .userInitiated : .utility
                 let pacer = backgroundCPUPacer
                 executor.async(qos: qos) { [onDiagnostics] in
                     recorder.started()
