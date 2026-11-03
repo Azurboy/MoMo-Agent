@@ -66,6 +66,11 @@ enum PhoneComposition {
                 diagnosticsURL: support.appendingPathComponent("file-queue-diagnostic.json"),
                 receiveAudioBlock: { try await PhoneConnectivityTask.receiveAudioBlock($0, archive: archive) },
                 statusReplyProvider: { _ in try await archive.phoneStatus(sourceBuild: phoneBuild, refreshObservation: true) },
+                controlReplyProvider: { [weak receiver] message in
+                    let grant = PhoneConnectivityTask.beginSync()
+                    defer { grant.finish() }
+                    return await receiver?.inlineControlReply(for: message)
+                },
                 controlScopeID: archive.libraryInstanceID
             )
             receiver.attach(live)

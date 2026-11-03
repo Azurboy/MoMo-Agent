@@ -326,8 +326,10 @@ final class WatchRuntime {
     /// Reconcile durable receipts first; completed transfers also retry after a bounded acknowledgement wait.
     func resumeSynchronization(flushAudio: Bool = true) async {
         flushAudioBatch = flushAudioBatch || flushAudio
-        if flushAudio {
+        if flushAudio || transport.isReachable {
             replayReconciliationRequest = true
+        }
+        if flushAudio {
             reconciliationRequested = true
         }
         beginBackgroundConnectivity()
@@ -1561,38 +1563,31 @@ final class WatchRuntime {
             fileCursor = try await store.fileTransferPosition()
             fileCursorLoaded = true
         }
-        if transport.hasDueFileRetries {
-            fileCursor = 0
-        }
         let startingCursor = fileCursor
-        var scanned = 0
-        var submittedAny = false
-        outer: while scanned < maximumScanned {
-            let entries = try await store.pendingChunkBatch(after: fileCursor, through: admittedThrough)
-            guard grantID == startingGrant else { return }
-            guard !entries.isEmpty else {
-                fileCursor = 0
-                break
-            }
-            for entry in entries {
-                guard grantID == startingGrant else { return }
-                guard scanned < maximumScanned else { break outer }
-                switch try transport.transferFileResult(at: entry.chunk.audioURL, envelope: entry.chunk.envelope) {
-                case .submitted:
+        guard let outcome = try await scanFileBatch(
+            after: startingCursor,
+            maximumScanned: maximumScanned,
+            hasDueRetries: { transport.hasDueFileRetries },
+            sequenceOf: \.sequence,
+            loadPage: { cursor in
+                let entries = try await store.pendingChunkBatch(after: cursor, through: admittedThrough)
+                return grantID == startingGrant ? entries : nil
+            },
+            submit: { entry in
+                guard grantID == startingGrant else { return nil }
+                let result = try transport.transferFileResult(at: entry.chunk.audioURL, envelope: entry.chunk.envelope)
+                if result == .submitted {
                     try await store.fileReplaysScheduled([entry.chunk.envelope.manifest.chunkID])
-                    fileCursor = entry.sequence; scanned += 1; submittedAny = true
-                case .alreadySubmitted, .retryLater:
-                    fileCursor = entry.sequence; scanned += 1
-                case .deferred:
-                    break outer
                 }
+                return result
             }
-            if entries.count < 4 { break }
-        }
+        ) else { return }
+        fileCursor = outcome.cursor
         if fileCursor != startingCursor {
             try await store.saveFileTransferPosition(fileCursor)
         }
-        if submittedAny, scanned == maximumScanned {
+        if outcome.scanned == maximumScanned, !outcome.deferred,
+           outcome.submittedAny || (!connectivityGrant && !outcome.wrapped && transport.outstandingFileCount < LinkSubmissionState.maximumOutstandingFiles) {
             reconcileAgain = true
         }
     }

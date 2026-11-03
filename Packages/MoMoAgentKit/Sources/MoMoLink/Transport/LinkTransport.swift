@@ -221,6 +221,66 @@ public struct LinkSubmissionState: Sendable {
     }
 }
 
+public struct FileBatchScanOutcome: Sendable, Equatable {
+    public let cursor: Int64
+    public let scanned: Int
+    public let submittedAny: Bool
+    public let wrapped: Bool
+    public let deferred: Bool
+}
+
+/// Scans forward from `initialCursor` before wrapping once to `0` for due retries, preventing head-of-line starvation.
+public func scanFileBatch<Entry>(
+    isolation: isolated (any Actor)? = #isolation,
+    after initialCursor: Int64,
+    maximumScanned: Int,
+    pageSize: Int = 4,
+    hasDueRetries: () -> Bool,
+    sequenceOf: (Entry) -> Int64,
+    loadPage: (Int64) async throws -> [Entry]?,
+    submit: (Entry) async throws -> FileSubmissionResult?
+) async throws -> FileBatchScanOutcome? {
+    var cursor = initialCursor
+    var wrapped = cursor == 0
+    var scanned = 0
+    var submittedAny = false
+    var deferred = false
+    outer: while scanned < maximumScanned {
+        guard let entries = try await loadPage(cursor) else { return nil }
+        guard !entries.isEmpty else {
+            cursor = 0
+            if !wrapped, hasDueRetries() {
+                wrapped = true
+                continue outer
+            }
+            break
+        }
+        for entry in entries {
+            guard scanned < maximumScanned else { break outer }
+            guard let result = try await submit(entry) else { return nil }
+            switch result {
+            case .submitted:
+                cursor = sequenceOf(entry); scanned += 1; submittedAny = true
+            case .alreadySubmitted, .retryLater:
+                cursor = sequenceOf(entry); scanned += 1
+            case .deferred:
+                deferred = true
+                break outer
+            }
+        }
+        if entries.count < pageSize {
+            if !wrapped, hasDueRetries() {
+                cursor = 0
+                wrapped = true
+                continue outer
+            }
+            break
+        }
+    }
+    return FileBatchScanOutcome(cursor: cursor, scanned: scanned,
+        submittedAny: submittedAny, wrapped: wrapped, deferred: deferred)
+}
+
 public enum LinkWireFormat {
     public static let maximumControlBytes = 16 * 1024
 
@@ -268,5 +328,17 @@ public enum LinkWireFormat {
               let data = metadata["control"] as? Data else { throw LinkError.invalidMetadata }
         guard data.count <= maximumControlBytes else { throw LinkError.controlMessageTooLarge }
         return try WireJSON.decode(ControlMessage.self, from: data)
+    }
+
+    public static func controlReplyMetadata(preserved: Bool, reply: ControlMessage? = nil) throws -> [String: Any] {
+        guard preserved, let reply else { return ["control_preserved": preserved] }
+        var metadata = try controlMetadata(reply)
+        metadata["control_preserved"] = true
+        return metadata
+    }
+
+    public static func controlReplyMessage(_ metadata: [String: Any]) throws -> ControlMessage? {
+        guard metadata["control"] != nil else { return nil }
+        return try controlMessage(metadata)
     }
 }

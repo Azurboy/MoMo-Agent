@@ -53,6 +53,35 @@ final class PhoneReceiveCoordinator {
 
     func attach(_ transport: WatchConnectivityTransport) { self.transport = transport }
 
+    /// Answers interactive Watch control requests over `replyHandler` even while a staged companion update reports `companionNotInstalled`.
+    func inlineControlReply(for message: ControlMessage) async -> ControlMessage? {
+        guard case .reconcileRequest(let request) = message else { return nil }
+        if let transport { peerState = transport.peerState }
+        do {
+            let response = try await archive.receiveReconcileRequest(request)
+            if peerState == .available {
+                try? transport?.allowControlReplay(.reconcileResponse(response))
+            } else {
+                try await archive.markReconcileResponseSubmitted(messageID: response.messageID)
+            }
+            try? controls.remove(message)
+            return .reconcileResponse(response)
+        } catch ArchiveReconciliationError.receiverMismatch {
+            try? transport?.allowControlReplay(.receiverIdentity(identity))
+            try? controls.remove(message)
+            onStatusFailure(String(localized: "已忽略发给其他手机的对账请求，将发送本机接收身份。"))
+            return .receiverIdentity(identity)
+        } catch ArchiveReconciliationError.libraryMismatch {
+            try? transport?.allowControlReplay(.receiverIdentity(identity))
+            try? controls.remove(message)
+            onStatusFailure(String(localized: "手表的对账请求属于旧资料库，将发送当前资料库身份。"))
+            return .receiverIdentity(identity)
+        } catch {
+            logger.error("Inline reconcile reply deferred: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
     func receive(_ event: LinkEvent) async {
         if let transport { peerState = transport.peerState }
         switch event {

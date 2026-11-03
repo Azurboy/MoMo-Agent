@@ -670,6 +670,69 @@ final class PhoneReceiveStatusTests: XCTestCase {
         let pendingResponses = try await fixture.archive.pendingReconcileResponses()
         XCTAssertTrue(pendingResponses.isEmpty)
     }
+
+    func testInteractiveReconcileReplyDeliversReceiptsDuringStagedCompanionUpdate() async throws {
+        let fixture = try await Fixture()
+        let coordinator = fixture.coordinator()
+        let clock = SelectedWatchEventClock()
+        await coordinator.receive(.selectedWatchChanged(clock.select(
+            activation: .activated, peerState: .companionNotInstalled, directoryURL: nil)))
+
+        let phoneTransport = try WatchConnectivityTransport(
+            preserveFile: { _, _ in },
+            preserveControl: { try fixture.controls.preserve($0) },
+            event: { _ in },
+            controlReplyProvider: { [weak coordinator] message in
+                await coordinator?.inlineControlReply(for: message)
+            }
+        )
+        coordinator.attach(phoneTransport)
+
+        let watchInbox = try ControlInbox(directory: fixture.root.appendingPathComponent("WatchControlInbox", isDirectory: true))
+        let watchNotified = expectation(description: "watch control preserved")
+        watchNotified.expectedFulfillmentCount = 2
+        let watchTransport = try WatchConnectivityTransport(
+            preserveFile: { _, _ in },
+            preserveControl: { try watchInbox.preserve($0) },
+            event: { if case .controlPreserved = $0 { watchNotified.fulfill() } }
+        )
+
+        let request = try fixture.request()
+        let replied = expectation(description: "reconcile reply returned over interactive replyHandler")
+        phoneTransport.session(WCSession.default,
+            didReceiveMessage: try LinkWireFormat.controlMetadata(.reconcileRequest(request)),
+            replyHandler: { reply in
+                XCTAssertTrue(watchTransport.ingestInteractiveControlReply(reply))
+                replied.fulfill()
+            })
+        await fulfillment(of: [replied], timeout: 5.0)
+
+        let receivedOnWatch = try watchInbox.pending()
+        XCTAssertEqual(receivedOnWatch.count, 1)
+        guard case .reconcileResponse(let response) = try XCTUnwrap(receivedOnWatch.first) else {
+            return XCTFail("Expected ReconcileResponse in Watch ControlInbox")
+        }
+        XCTAssertTrue(try response.matches(request))
+        XCTAssertEqual(response.results.map(\.state), [.received(fixture.receipt)])
+        let pendingOnPhone = try await fixture.archive.pendingReconcileResponses()
+        XCTAssertTrue(pendingOnPhone.isEmpty, "Inline reply while companionNotInstalled must not leave unsubmitted responses spinning")
+        XCTAssertTrue(try fixture.controls.pending().isEmpty)
+
+        // Mismatched receiver during staged update also returns ReceiverIdentity inline.
+        let wrongReceiverRequest = try ReconcileRequest(
+            messageID: UUID(), sourceDeviceID: fixture.source,
+            receiverDeviceID: UUID(), libraryInstanceID: fixture.archive.libraryInstanceID,
+            items: request.items)
+        let identityReplied = expectation(description: "identity reply returned over interactive replyHandler")
+        phoneTransport.session(WCSession.default,
+            didReceiveMessage: try LinkWireFormat.controlMetadata(.reconcileRequest(wrongReceiverRequest)),
+            replyHandler: { reply in
+                XCTAssertTrue(watchTransport.ingestInteractiveControlReply(reply))
+                identityReplied.fulfill()
+            })
+        await fulfillment(of: [identityReplied, watchNotified], timeout: 5.0)
+        XCTAssertTrue(try watchInbox.pending().contains(.receiverIdentity(fixture.identity)))
+    }
 }
 
 private actor PhoneReceiptRecoverySleeper {
