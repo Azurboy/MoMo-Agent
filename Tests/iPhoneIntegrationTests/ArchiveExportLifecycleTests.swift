@@ -82,6 +82,44 @@ final class ArchiveExportLifecycleTests: XCTestCase {
         try await waitUntil { !controller.busy }
     }
 
+    func testShareSheetDismissalNeverBlocksHostCloseAndRecoversMissingExtensionCallback() async throws {
+        let (archive, recording) = try await makeRecording()
+        let controller = ArchiveExportController()
+        controller.start(recording: recording, content: .audio, archive: archive)
+        try await waitUntil { !controller.preparing }
+        let artifact = try XCTUnwrap(controller.presented)
+        XCTAssertTrue(controller.blocksHostDismissal)
+
+        // Simulate interactive dismissal or a third-party extension dismissing without completionWithItemsHandler.
+        controller.presentationDismissed(id: artifact.id, fallbackCleanupDelay: .milliseconds(80))
+        XCTAssertFalse(controller.blocksHostDismissal, "Host close button and swipe-down must re-enable as soon as the activity sheet closes")
+        try await waitUntil { !controller.busy }
+        XCTAssertFalse(artifact.fileURLs.contains { FileManager.default.fileExists(atPath: $0.path) })
+
+        // Also verify explicit host close reclaims staged files without blocking UI dismissal.
+        controller.start(recording: recording, content: .audio, archive: archive)
+        try await waitUntil { !controller.preparing }
+        let second = try XCTUnwrap(controller.presented)
+        controller.hostDidClose(graceDelay: .milliseconds(20))
+        XCTAssertFalse(controller.blocksHostDismissal)
+        try await waitUntil { !controller.busy }
+        XCTAssertFalse(second.fileURLs.contains { FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    func testSuccessfulShareSetsCompletedSuccessfullyOnlyWithoutError() async throws {
+        let (archive, recording) = try await makeRecording()
+        let controller = ArchiveExportController()
+        controller.start(recording: recording, content: .audio, archive: archive)
+        try await waitUntil { !controller.preparing }
+        let artifact = try XCTUnwrap(controller.presented)
+        XCTAssertFalse(controller.completedSuccessfully)
+        controller.activityCompleted(id: artifact.id, completed: true, errorMessage: nil)
+        controller.presentationDismissed(id: artifact.id)
+        try await waitUntil { !controller.busy }
+        XCTAssertTrue(controller.completedSuccessfully)
+        XCTAssertFalse(controller.blocksHostDismissal)
+    }
+
     private func makeRecording() async throws -> (ArchiveStore, RecordingSummary) {
         // The runner removes this workspace after the test host exits and closes SQLite handles.
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoExportLifecycle-\(UUID())")

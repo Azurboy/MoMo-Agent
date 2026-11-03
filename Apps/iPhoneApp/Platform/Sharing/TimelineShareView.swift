@@ -44,7 +44,7 @@ struct TimelineShareView: View {
                 } footer: {
                     Text("仅包含分享时已有的文字；按段落起始时间选取，保留完整段落。")
                 }
-                .disabled(export.busy)
+                .disabled(export.blocksHostDismissal)
 
                 Section {
                     Button {
@@ -65,19 +65,38 @@ struct TimelineShareView: View {
                     }
                 }
             }
+            .background {
+                ArchiveSharePresenter(
+                    artifact: export.presented,
+                    onCompleted: { [export] id, completed, error in
+                        export.activityCompleted(id: id, completed: completed, errorMessage: error)
+                    },
+                    onDismissed: { [export] id in
+                        export.presentationDismissed(id: id)
+                    }
+                )
+                .frame(width: 0, height: 0)
+            }
             .phoneSoftTopEdge()
             .navigationTitle("分享")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { export.cancelPreparation(); dismiss() }
-                        .disabled(export.busy && !export.preparing)
+                    Button("关闭") {
+                        export.hostDidClose()
+                        dismiss()
+                    }
+                    .disabled(export.presented != nil)
                 }
             }
-            .sheet(item: Binding(get: { export.presented }, set: { if $0 == nil { export.requestPresentationDismissal() } }),
-                   onDismiss: { export.presentationDismissed() }) { artifact in
-                ArchiveShareSheet(artifact: artifact) { [export] error in
-                    export.activityCompleted(id: artifact.id, errorMessage: error)
+            .onChange(of: export.blocksHostDismissal) { _, blocked in
+                if !blocked, export.completedSuccessfully, export.failure == nil {
+                    dismiss()
+                }
+            }
+            .onChange(of: export.completedSuccessfully) { _, succeeded in
+                if succeeded, !export.blocksHostDismissal, export.failure == nil {
+                    dismiss()
                 }
             }
             .alert("分享未完成", isPresented: Binding(get: { export.failure != nil }, set: { if !$0 { export.failure = nil } })) {
@@ -85,7 +104,7 @@ struct TimelineShareView: View {
             } message: { Text(export.failure ?? "") }
         }
         .presentationDetents([.medium, .large])
-        .interactiveDismissDisabled(export.busy)
-        .onDisappear { export.cancelPreparation() }
+        .interactiveDismissDisabled(export.blocksHostDismissal)
+        .onDisappear { export.hostDidClose() }
     }
 }

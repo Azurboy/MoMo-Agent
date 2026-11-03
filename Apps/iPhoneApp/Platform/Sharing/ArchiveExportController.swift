@@ -7,9 +7,14 @@ final class ArchiveExportController {
     private(set) var presented: ArchiveExport?
     private(set) var preparing = false
     private(set) var cleanupNeeded = false
+    private(set) var completedSuccessfully = false
     var failure: String?
     var busy: Bool { preparing || active != nil || awaitingDismissal }
+    /// Only active export preparation or an actively presented UIActivityViewController blocks closing the share sheet.
+    /// Background temp-file cleanup must never trap the user inside TimelineShareView.
+    var blocksHostDismissal: Bool { preparing || presented != nil }
     @ObservationIgnored private var preparation: Task<Void, Never>?
+    @ObservationIgnored private var fallbackCleanupTask: Task<Void, Never>?
     private var active: (archive: ArchiveStore, artifact: ArchiveExport)?
     private var awaitingDismissal = false
     @ObservationIgnored private var cleaning = false
@@ -30,7 +35,10 @@ final class ArchiveExportController {
 
     private func start(archive: ArchiveStore, prepare: @escaping @Sendable () async throws -> ArchiveExport) {
         guard !busy else { return }
+        fallbackCleanupTask?.cancel()
+        fallbackCleanupTask = nil
         preparing = true
+        completedSuccessfully = false
         failure = nil
         preparation = Task {
             var staged: ArchiveExport?
@@ -56,20 +64,55 @@ final class ArchiveExportController {
 
     func cancelPreparation() { preparation?.cancel() }
 
-    func activityCompleted(id: UUID, errorMessage: String?) {
+    func activityCompleted(id: UUID, completed: Bool = false, errorMessage: String?) {
         guard active?.artifact.id == id else { return }
+        fallbackCleanupTask?.cancel()
+        fallbackCleanupTask = nil
         presented = nil
+        if completed && errorMessage == nil {
+            completedSuccessfully = true
+        }
         if let errorMessage { failure = errorMessage }
         Task { await cleanActive() }
     }
 
     func requestPresentationDismissal() { presented = nil }
 
-    func presentationDismissed() {
+    func presentationDismissed(id: UUID? = nil, fallbackCleanupDelay: Duration = .seconds(15)) {
+        if let id, let activeID = active?.artifact.id, activeID != id { return }
         presented = nil
         awaitingDismissal = false
-        // Dismissing SwiftUI's sheet is not proof the selected extension finished reading.
-        // The UIKit completion callback owns cleanup, including cancellation. Cold start recovers a killed process.
+        // Dismissing the activity sheet is not proof a selected extension finished reading immediately.
+        // The UIKit completion callback owns immediate cleanup; a bounded fallback recovers extensions
+        // that dismiss without ever invoking completionWithItemsHandler.
+        if let currentID = active?.artifact.id {
+            fallbackCleanupTask?.cancel()
+            fallbackCleanupTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: fallbackCleanupDelay) } catch { return }
+                guard let self, self.active?.artifact.id == currentID else { return }
+                await self.cleanActive()
+            }
+        }
+    }
+
+    /// Invoked when the outer TimelineShareView closes so temporary files are reclaimed without blocking UI dismissal.
+    func hostDidClose(graceDelay: Duration = .seconds(5)) {
+        preparation?.cancel()
+        fallbackCleanupTask?.cancel()
+        fallbackCleanupTask = nil
+        presented = nil
+        awaitingDismissal = false
+        guard let pending = active else { return }
+        Task { @MainActor [weak self] in
+            if graceDelay > .zero {
+                try? await Task.sleep(for: graceDelay)
+            }
+            if let self, self.active?.artifact.id == pending.artifact.id {
+                await self.cleanActive()
+            } else {
+                try? await pending.archive.removeExport(pending.artifact)
+            }
+        }
     }
 
     func retryCleanup() { Task { await cleanActive() } }
