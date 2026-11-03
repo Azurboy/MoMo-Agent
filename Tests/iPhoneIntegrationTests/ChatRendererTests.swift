@@ -912,7 +912,7 @@ final class ChatRendererTests: XCTestCase {
             .init(id:"body",content:.text(markdown))
         ])])
         try await renderer.wait("document.querySelectorAll('table').length === 1 && document.querySelectorAll('.katex').length === 1")
-        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontSize === '14px' && getComputedStyle(document.querySelector('.prose')).fontWeight === '430' && getComputedStyle(document.querySelector('.prose')).lineHeight === '18px' && getComputedStyle(document.querySelector('.prose strong')).fontWeight === '600'")
+        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontSize === '16px' && getComputedStyle(document.querySelector('.prose')).fontWeight === '400' && getComputedStyle(document.querySelector('.prose')).lineHeight === '20px' && getComputedStyle(document.querySelector('.prose strong')).fontWeight === '600'")
         try await renderer.check("document.querySelectorAll('.process').length === 0 && document.querySelectorAll('.tool-card').length === 2")
         try await renderer.check("document.querySelector('.badge.failed').textContent === '失败'")
         try await renderer.check("document.querySelector('.user-bubble').textContent === '## **原样输入**'")
@@ -951,7 +951,7 @@ final class ChatRendererTests: XCTestCase {
         _ = try await renderer.web.evaluateJavaScript("document.querySelectorAll('details').forEach(node => node.open = false); window.scrollTo(0,0); true")
         await renderer.attach(to:self,name:"claude-aligned-rendering-light")
         renderer.render(previewMessages,dark:true)
-        try await renderer.wait("getComputedStyle(document.documentElement).backgroundColor === 'rgb(22, 22, 22)' && getComputedStyle(document.querySelector('.prose')).fontSize === '14px'")
+        try await renderer.wait("getComputedStyle(document.documentElement).backgroundColor === 'rgb(22, 22, 22)' && getComputedStyle(document.querySelector('.prose')).fontSize === '16px'")
         await renderer.attach(to:self,name:"claude-aligned-rendering-dark")
     }
 
@@ -998,7 +998,7 @@ final class ChatRendererTests: XCTestCase {
         try await renderer.check("document.querySelector('#announcer').textContent === '回复已完成'")
         try await renderer.check("!document.querySelector('[data-action=copy-reply]') && !document.querySelector('[data-action=copy-code]')")
         try await renderer.check("getComputedStyle(document.querySelector('.user-bubble')).backgroundColor !== getComputedStyle(document.querySelector('.assistant .prose')).backgroundColor")
-        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontFamily.includes('system') && getComputedStyle(document.querySelector('.prose')).fontSize === '14px' && getComputedStyle(document.querySelector('.prose')).lineHeight === '18px'")
+        try await renderer.check("getComputedStyle(document.querySelector('.prose')).fontFamily.includes('system') && getComputedStyle(document.querySelector('.prose')).fontSize === '16px' && getComputedStyle(document.querySelector('.prose')).lineHeight === '20px'")
         await renderer.attach(to:self,name:"streaming-completed-with-stable-blocks")
     }
 
@@ -1244,10 +1244,25 @@ final class ChatRendererTests: XCTestCase {
           const code = getComputedStyle(document.querySelector('.prose code'));
           const time = getComputedStyle(document.querySelector('.turn-timestamp > time'));
           return centered &&
-            userBubble.fontSize === '14px' && userBubble.fontWeight === '430' && userBubble.lineHeight === '18px' &&
+            userBubble.fontSize === '16px' && userBubble.fontWeight === '400' && userBubble.lineHeight === '20px' &&
+            prose.fontSize === '16px' && prose.fontWeight === '400' && prose.lineHeight === '20px' &&
+            strong.fontWeight === '600' && code.fontSize === '14px' &&
+            time.fontSize === '12px' && time.fontWeight === '400' && time.lineHeight === '16px';
+        })()
+        """)
+        try await renderer.check("""
+        (() => {
+          document.documentElement.toggleAttribute('data-desktop', true);
+          const userBubble = getComputedStyle(document.querySelector('.user-bubble'));
+          const prose = getComputedStyle(document.querySelector('.prose'));
+          const code = getComputedStyle(document.querySelector('.prose code'));
+          const time = getComputedStyle(document.querySelector('.turn-timestamp > time'));
+          const ok = userBubble.fontSize === '14px' && userBubble.fontWeight === '430' && userBubble.lineHeight === '18px' &&
             prose.fontSize === '14px' && prose.fontWeight === '430' && prose.lineHeight === '18px' &&
-            strong.fontWeight === '600' && code.fontSize === '13px' &&
+            code.fontSize === '13px' &&
             time.fontSize === '12px' && time.fontWeight === '430' && time.lineHeight === '16px';
+          document.documentElement.toggleAttribute('data-desktop', false);
+          return ok;
         })()
         """)
         let snapshot = ChatRenderSnapshot(sessionID: UUID(), messages: messages, busy: false)

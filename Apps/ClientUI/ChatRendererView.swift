@@ -64,6 +64,11 @@ struct ChatRendererView: View {
     // First send paints natively while WebKit starts; no network or rich renderer admission is required.
     private var plainTranscript: some View {
         let typeScale = fontSize / Double(PhoneTextStyle.body.size)
+        #if os(macOS)
+        let bubbleFontSize: CGFloat = 14
+        #else
+        let bubbleFontSize: CGFloat = 16
+        #endif
         let markers = snapshot.nativeTimestampMarkers()
         return GeometryReader { geometry in
             ScrollViewReader { reader in
@@ -86,8 +91,8 @@ struct ChatRendererView: View {
                                     HStack(alignment: .center, spacing: 8) {
                                         Spacer(minLength: 0)
                                         Text(text)
-                                            .font(.system(size: 14 * typeScale, weight: .regular))
-                                            .tracking(-0.14 * typeScale)
+                                            .font(.system(size: bubbleFontSize * typeScale, weight: .regular))
+                                            .tracking(-0.01 * bubbleFontSize * typeScale)
                                             .lineSpacing(2 * typeScale)
                                             .textSelection(.enabled)
                                             .foregroundStyle(MoMoPalette.canvas)
@@ -118,8 +123,8 @@ struct ChatRendererView: View {
                                         .padding(.leading, 10).padding(.vertical, 4)
                                 } else {
                                     Text(text)
-                                        .font(.system(size: 14 * typeScale, weight: .regular))
-                                        .tracking(-0.14 * typeScale)
+                                        .font(.system(size: bubbleFontSize * typeScale, weight: .regular))
+                                        .tracking(-0.01 * bubbleFontSize * typeScale)
                                         .lineSpacing(2 * typeScale)
                                         .textSelection(.enabled)
                                         .padding(.horizontal, 16).padding(.vertical, 10)

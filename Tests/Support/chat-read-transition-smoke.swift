@@ -29,7 +29,7 @@ Task { @MainActor in
             try await Task.sleep(for: .milliseconds(50))
         }
         var passed = true
-        for mode in ["light", "dark", "reduced-motion", "reading-history", "english"] {
+        for mode in ["light", "dark", "reduced-motion", "reading-history", "english", "desktop"] {
             let modeJSON = String(data: try JSONEncoder().encode(mode), encoding: .utf8)!
             _ = try await web.evaluateJavaScript("window.mode = \(modeJSON);" + #"""
             window.nowMs = new Date(2026, 10, 3, 15, 30, 0).getTime();
@@ -38,7 +38,7 @@ Task { @MainActor in
             window.message = (id,role,text,sentAtMs) => ({id,turnID:id,role,state:'complete',sentAtMs,blocks:[{id:id+':input',type:'text',text}]});
             window.fixture = {sessionID:mode,locale:mode==='english'?'en':'zh-Hans',nowMs,messages:[],busy:true,stopped:false,
               canRegenerate:false,contextState:'idle',waitingForReply:false,
-              appearance:{dark:mode==='dark',reduceMotion:mode==='reduced-motion',scale:1}};
+              appearance:{dark:mode==='dark',reduceMotion:mode==='reduced-motion',scale:1,desktopHeader:mode==='desktop'}};
             for(let i=0;i<16;i++) {
               const sentAtMs = (i < 8 ? yesterdayBaseMs : todayBaseMs) + (i % 8) * 60_000;
               fixture.messages.push(message('history-'+i,i%2?'assistant':'user','保留历史消息 '+i,sentAtMs));
@@ -91,7 +91,9 @@ Task { @MainActor in
             window.result = {mode:fixture.sessionID,maxShift,minOpacity,replays,removals,
               timestampCount:timestamps.length,
               sameTimestamps:timestamps.length===3 && timestamps.every((t,i)=>t===document.querySelectorAll('.turn-timestamp > time')[i] && t.getAttribute('datetime')===timestampISOs[i]),
-              typographyOK:getComputedStyle(bubbles[0]).fontSize==='14px' && getComputedStyle(bubbles[0]).fontWeight==='430' && getComputedStyle(bubbles[0]).lineHeight==='18px' && getComputedStyle(timestamps[0]).fontSize==='12px',
+              typographyOK:(mode==='desktop'
+                ? (getComputedStyle(bubbles[0]).fontSize==='14px' && getComputedStyle(bubbles[0]).fontWeight==='430' && getComputedStyle(bubbles[0]).lineHeight==='18px')
+                : (getComputedStyle(bubbles[0]).fontSize==='16px' && getComputedStyle(bubbles[0]).fontWeight==='400' && getComputedStyle(bubbles[0]).lineHeight==='20px')) && getComputedStyle(timestamps[0]).fontSize==='12px',
               sameRows:rows.every((n,i)=>n===document.querySelectorAll('.turn')[i]),
               sameBubbles:bubbles.every((n,i)=>n===document.querySelectorAll('.user-bubble,.prose')[i] && n.firstChild===textNodes[i]),
               sameReceipt:receipt!=null && receipt===rows.at(-1).querySelector('.read-receipt'),

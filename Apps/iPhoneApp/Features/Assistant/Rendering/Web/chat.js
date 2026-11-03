@@ -581,7 +581,9 @@
     document.documentElement.dataset.dark = String(snapshot.appearance.dark);
     document.documentElement.dataset.reduceMotion = String(reduced);
     document.documentElement.dataset.largeType = String(snapshot.appearance.scale > 1.4);
-    document.documentElement.toggleAttribute('data-desktop-edge', !!snapshot.appearance.desktopHeader && headerInset() > 0);
+    const isDesktop = !!snapshot.appearance.desktopHeader;
+    document.documentElement.toggleAttribute('data-desktop', isDesktop);
+    document.documentElement.toggleAttribute('data-desktop-edge', isDesktop && headerInset() > 0);
     document.documentElement.style.setProperty('--header-inset', headerInset() + 'px');
     document.documentElement.style.setProperty('--scale',Math.max(.8,Math.min(3.2,snapshot.appearance.scale)));
     renderTurns(first); first = false;
