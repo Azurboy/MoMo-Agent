@@ -585,8 +585,9 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
 
                 works_overview = await (await client.get("/momo/v1/conversation/works?limit=10", headers=auth)).json()
                 self.assertEqual([w["id"] for w in works_overview["active"]], ["superagent:t-live-worker"])
-                self.assertEqual([w["id"] for w in works_overview["recent"]], ["superagent:t-ended-old"])
-                self.assertEqual(works_overview["recent"][0]["state"], "dropped")
+                self.assertEqual(works_overview["recent"], [])
+                self.assertEqual([w["id"] for w in works_overview["skipped"]], ["superagent:t-ended-old"])
+                self.assertEqual(works_overview["skipped"][0]["state"], "dropped")
 
                 detail_resp = await client.get("/momo/v1/conversation/work/superagent%3At-live-worker", headers=auth)
                 self.assertEqual(detail_resp.status, 200)
@@ -666,11 +667,12 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 real_works_resp = await client.get("/momo/v1/conversation/works?limit=10", headers=auth)
                 self.assertEqual(real_works_resp.status, 200)
                 real_works = await real_works_resp.json()
-                self.assertEqual(len(real_works["recent"]), 1)
-                self.assertEqual(real_works["recent"][0]["id"], "superagent:t-real-dsh-explicit")
-                self.assertEqual(real_works["recent"][0]["origin_kind"], "proactive_transcript")
-                self.assertEqual(real_works["recent"][0]["origin_label"], "录音主动派发")
-                self.assertIsNotNone(real_works["recent"][0]["source_recorded_at"])
+                self.assertEqual(real_works["recent"], [])
+                self.assertEqual(len(real_works["skipped"]), 1)
+                self.assertEqual(real_works["skipped"][0]["id"], "superagent:t-real-dsh-explicit")
+                self.assertEqual(real_works["skipped"][0]["origin_kind"], "proactive_transcript")
+                self.assertEqual(real_works["skipped"][0]["origin_label"], "录音主动派发")
+                self.assertIsNotNone(real_works["skipped"][0]["source_recorded_at"])
 
                 real_detail_resp = await client.get(
                     "/momo/v1/conversation/work/superagent%3At-real-dsh-explicit", headers=auth

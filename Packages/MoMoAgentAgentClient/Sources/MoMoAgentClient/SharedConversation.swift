@@ -91,9 +91,17 @@ public struct ConversationWork: Codable, Sendable, Identifiable, Equatable {
 public struct ConversationWorkOverview: Codable, Sendable, Equatable {
     public let active: [ConversationWork]
     public let recent: [ConversationWork]
-    public init(active: [ConversationWork] = [], recent: [ConversationWork] = []) {
+    public let skipped: [ConversationWork]
+    public init(active: [ConversationWork] = [], recent: [ConversationWork] = [], skipped: [ConversationWork] = []) {
         self.active = active
         self.recent = recent
+        self.skipped = skipped
+    }
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.active = try container.decodeIfPresent([ConversationWork].self, forKey: .active) ?? []
+        self.recent = try container.decodeIfPresent([ConversationWork].self, forKey: .recent) ?? []
+        self.skipped = try container.decodeIfPresent([ConversationWork].self, forKey: .skipped) ?? []
     }
 }
 

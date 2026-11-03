@@ -434,6 +434,8 @@ struct AgentActiveTasksSheet: View {
     @State private var selectedWork: ConversationWork?
     @State private var overviewActive: [ConversationWork] = []
     @State private var overviewRecent: [ConversationWork] = []
+    @State private var overviewSkipped: [ConversationWork] = []
+    @State private var isSkippedExpanded = false
     @State private var loadedOverviewOnce = false
 
     private var snapshot: AgentActiveTasksSnapshot {
@@ -465,8 +467,19 @@ struct AgentActiveTasksSheet: View {
     private var recentItems: [AgentActiveTasksSnapshot.Item] {
         let activeIDs = Set(activeItems.map { $0.work.id })
         return overviewRecent
-            .filter { !activeIDs.contains($0.id) }
+            .filter { !activeIDs.contains($0.id) && $0.state != "dropped" }
             .map { AgentActiveTasksSnapshot.makeItem(from: $0, store: store, isRecent: true) }
+    }
+
+    private var skippedItems: [AgentActiveTasksSnapshot.Item] {
+        let activeIDs = Set(activeItems.map { $0.work.id })
+        var seen = Set<String>()
+        var combined: [ConversationWork] = []
+        for work in overviewSkipped + overviewRecent.filter({ $0.state == "dropped" }) {
+            guard !activeIDs.contains(work.id), seen.insert(work.id).inserted else { continue }
+            combined.append(work)
+        }
+        return combined.map { AgentActiveTasksSnapshot.makeItem(from: $0, store: store, isRecent: true) }
     }
 
     var body: some View {
@@ -491,7 +504,7 @@ struct AgentActiveTasksSheet: View {
 
     private var listSurface: some View {
         Group {
-            if activeItems.isEmpty && recentItems.isEmpty {
+            if activeItems.isEmpty && recentItems.isEmpty && skippedItems.isEmpty {
                 emptyState
             } else {
                 ScrollView {
@@ -508,13 +521,30 @@ struct AgentActiveTasksSheet: View {
                         }
                         if !recentItems.isEmpty {
                             VStack(alignment: .leading, spacing: 9) {
-                                sectionTitle("最近派发记录", count: nil)
+                                sectionTitle("最近派发记录", count: recentItems.count)
                                 ForEach(recentItems) { item in
                                     ActiveTaskItemRow(store: store, item: item) {
                                         selectedWork = item.work
                                     }
                                 }
                             }
+                        }
+                        if activeItems.isEmpty && recentItems.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(MoMoPalette.muted)
+                                    .accessibilityHidden(true)
+                                Text("当前没有正在进行或已执行的任务")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(MoMoPalette.muted)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 4)
+                            .padding(.top, 2)
+                        }
+                        if !skippedItems.isEmpty {
+                            skippedCategorySection
                         }
                     }
                     .padding(16)
@@ -542,11 +572,83 @@ struct AgentActiveTasksSheet: View {
         }
     }
 
+    private var skippedCategorySection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            sectionTitle("已归档分类", count: nil)
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    isSkippedExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "tray.2")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(MoMoPalette.muted)
+                        .frame(width: 28, height: 28)
+                        .background(MoMoPalette.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("核查跳过")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(MoMoPalette.ink)
+                            Text("\(skippedItems.count)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(MoMoPalette.muted)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(MoMoPalette.ink.opacity(0.07), in: Capsule())
+                        }
+                        if let latest = skippedItems.first {
+                            Text(isSkippedExpanded ? String(localized: "已核查无需执行的触发记录，点击收起") : "最新：\(latest.title)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(MoMoPalette.muted)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(MoMoPalette.muted.opacity(0.75))
+                        .rotationEffect(.degrees(isSkippedExpanded ? 90 : 0))
+                        .frame(width: 20, height: 28)
+                        .accessibilityHidden(true)
+                }
+                .padding(14)
+                .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 14))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(MoMoPalette.line, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("核查跳过，共 \(skippedItems.count) 项，\(isSkippedExpanded ? "已展开" : "点击展开")")
+            .accessibilityIdentifier("activeTasks.skippedCategory")
+
+            if isSkippedExpanded {
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(skippedItems) { item in
+                        ActiveTaskItemRow(store: store, item: item) {
+                            selectedWork = item.work
+                        }
+                    }
+                }
+                .padding(.leading, 10)
+            }
+        }
+    }
+
     private func refreshOverview() async {
         guard let store else { return }
         if let fetched = try? await store.fetchWorkOverview(limit: 15) {
             overviewActive = fetched.active
             overviewRecent = fetched.recent
+            overviewSkipped = fetched.skipped
         }
         loadedOverviewOnce = true
     }

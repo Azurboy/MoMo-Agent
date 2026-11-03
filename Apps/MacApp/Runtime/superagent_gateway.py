@@ -856,7 +856,7 @@ class SuperAgentGateway:
     def _fetch_dsh_snapshots(self) -> tuple[dict, list[dict], list[dict]]:
         state = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/state", timeout=4.0)
         open_resp = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/tickets?state=open&limit=30", timeout=4.0)
-        ended_resp = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/tickets?state=ended&limit=20", timeout=4.0)
+        ended_resp = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/tickets?state=ended&limit=40", timeout=4.0)
         decisions_resp = dsh_api_request(self.dsh_port, "GET", "/orchestrator/api/decisions?limit=40", timeout=4.0)
         seen_ids: set[str] = set()
         tickets: list[dict] = []
@@ -1827,6 +1827,16 @@ class SuperAgentGateway:
         ended_at = self._iso_to_epoch(ended_info.get("at")) if isinstance(ended_info, dict) else None
         updated_at = self._iso_to_epoch(ticket.get("updatedAt")) or ended_at or created_at
         raw_summary = str(ticket.get("summary") or "").strip() or None
+        raw_assignments = ticket.get("assignments")
+        if not raw_summary and isinstance(raw_assignments, list):
+            for assign in reversed(raw_assignments):
+                if isinstance(assign, dict) and isinstance(assign.get("report"), dict):
+                    rep_sum = str(assign["report"].get("summary") or "").strip()
+                    if rep_sum:
+                        raw_summary = rep_sum[:240]
+                        break
+        if not raw_summary and isinstance(ended_info, dict) and ended_info.get("reason"):
+            raw_summary = str(ended_info["reason"]).strip()[:240] or None
 
         return {
             "id": f"superagent:{tid}",
@@ -1870,7 +1880,7 @@ class SuperAgentGateway:
                 items.append(projected)
         return items
 
-    def recent_work(self, limit: int = 15) -> list[dict]:
+    def _ended_work_items(self) -> list[dict]:
         items: list[dict] = []
         for ticket in self._cached_tickets:
             if not isinstance(ticket, dict):
@@ -1879,6 +1889,14 @@ class SuperAgentGateway:
             if projected is not None:
                 items.append(projected)
         items.sort(key=lambda w: float(w.get("updated_at") or w.get("created_at") or 0.0), reverse=True)
+        return items
+
+    def recent_work(self, limit: int = 15) -> list[dict]:
+        items = [w for w in self._ended_work_items() if w.get("state") != "dropped"]
+        return items[: max(1, min(50, limit))]
+
+    def skipped_work(self, limit: int = 15) -> list[dict]:
+        items = [w for w in self._ended_work_items() if w.get("state") == "dropped"]
         return items[: max(1, min(50, limit))]
 
     @staticmethod
@@ -2401,7 +2419,11 @@ class SuperAgentGateway:
                         fetched = await asyncio.to_thread(self._fetch_dsh_snapshots)
                         self._apply_dsh_projections(*fetched)
                 return web.json_response(
-                    {"active": self.background_work(), "recent": self.recent_work(limit=limit)}
+                    {
+                        "active": self.background_work(),
+                        "recent": self.recent_work(limit=limit),
+                        "skipped": self.skipped_work(limit=limit),
+                    }
                 )
             if request.method == "GET" and suffix.startswith("/work/") and "/" not in suffix[len("/work/") :]:
                 if request.query:

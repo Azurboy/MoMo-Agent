@@ -807,8 +807,12 @@ import XCTest
         XCTAssertEqual(overview.active.first?.id, "superagent:t-live")
         XCTAssertEqual(overview.active.first?.originLabel, "录音主动派发")
         XCTAssertEqual(overview.recent.count, 1)
-        XCTAssertEqual(overview.recent.first?.state, "dropped")
+        XCTAssertEqual(overview.recent.first?.state, "completed")
         XCTAssertFalse(overview.recent.first?.isPending ?? true)
+        XCTAssertEqual(overview.skipped.count, 1)
+        XCTAssertEqual(overview.skipped.first?.id, "superagent:t-old")
+        XCTAssertEqual(overview.skipped.first?.state, "dropped")
+        XCTAssertFalse(overview.skipped.first?.isPending ?? true)
 
         let detail = try await store.fetchWorkDetail(id: "superagent:t-live")
         XCTAssertEqual(detail.ticketID, "t-live")
@@ -1012,6 +1016,16 @@ private actor SharedWire: AgentTransport {
                     "source_recorded_at": 1761897600.0
                 ]],
                 "recent": [[
+                    "id": "superagent:t-done",
+                    "state": "completed",
+                    "report_state": "reported",
+                    "title": "整理架构纪要",
+                    "execution_generation": 1,
+                    "cancellable": false,
+                    "origin_kind": "proactive_transcript",
+                    "origin_label": "录音主动派发"
+                ]],
+                "skipped": [[
                     "id": "superagent:t-old",
                     "state": "dropped",
                     "report_state": "reported",
