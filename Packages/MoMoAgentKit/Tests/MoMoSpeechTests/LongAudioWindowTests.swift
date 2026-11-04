@@ -102,6 +102,23 @@ struct LongAudioWindowTests {
         #expect(try FrameRange.union(windows.map(\.coreFrames)) == [FrameRange(start: 0, count: 640_000)])
     }
 
+    @Test func conversationalPauseBetweenSixteenAndTwentySecondsSplitsInsideSinglePassLimit() throws {
+        let input = try longAudioInput(frames: 320_000)
+        let planner = WindowPlanner(configuration: try SpeechConfiguration(), fingerprint: "test")
+        // Two speech runs spanning 18.0s total (0..<192,000 and 200,000..<288,000) with a 0.5s pause at 12.0s.
+        let windows = try planner.continuousWindows(
+            ranges: [0..<192_000, 200_000..<288_000],
+            input: input,
+            availableThrough: input.modelFrameCount,
+            tailClosed: true
+        )
+        #expect(windows.count == 2)
+        #expect(windows.allSatisfy { $0.modelCoreFrames.count <= 256_000 })
+        #expect(windows[0].modelCoreFrames.end == 196_000)
+        #expect(windows[1].modelCoreFrames.start == 196_000)
+        #expect(try FrameRange.union(windows.map(\.coreFrames)) == [FrameRange(start: 0, count: 292_800)])
+    }
+
     @Test func punctuationFollowsItsWordAcrossWindowBoundary() throws {
         let input = try longAudioInput(frames: 48_000)
         let planner = WindowPlanner(configuration: try SpeechConfiguration(), fingerprint: "test")

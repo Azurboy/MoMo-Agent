@@ -2,6 +2,13 @@
 #include "CancelToken.hpp"
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -84,12 +91,31 @@ inline float HalfBitsToFloat(uint16_t h) {
 }
 
 inline void ConvertHalfToFloatRaw(const uint16_t *src, float *dst, size_t n) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint16x8_t h = vld1q_u16(src + i);
+    float16x8_t fh = vreinterpretq_f16_u16(h);
+    vst1q_f32(dst + i, vcvt_f32_f16(vget_low_f16(fh)));
+    vst1q_f32(dst + i + 4, vcvt_f32_f16(vget_high_f16(fh)));
+  }
+  for (; i < n; ++i) {
+    dst[i] = HalfBitsToFloat(src[i]);
+  }
+#else
   for (size_t i = 0; i < n; ++i) {
     dst[i] = HalfBitsToFloat(src[i]);
   }
+#endif
 }
 
 inline uint16_t FloatToHalfBits(float f) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  __fp16 fh = static_cast<__fp16>(f);
+  uint16_t h = 0;
+  std::memcpy(&h, &fh, sizeof(h));
+  return h;
+#else
   uint32_t bits = 0;
   std::memcpy(&bits, &f, sizeof(uint32_t));
   uint32_t sign = (bits >> 16) & 0x8000u;
@@ -112,6 +138,25 @@ inline uint16_t FloatToHalfBits(float f) {
   if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
   return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) |
                                (rounded >> 13));
+#endif
+}
+
+inline void ConvertFloatToHalfRaw(const float *src, uint16_t *dst, size_t n) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    float16x4_t lo = vcvt_f16_f32(vld1q_f32(src + i));
+    float16x4_t hi = vcvt_f16_f32(vld1q_f32(src + i + 4));
+    vst1q_u16(dst + i, vreinterpretq_u16_f16(vcombine_f16(lo, hi)));
+  }
+  for (; i < n; ++i) {
+    dst[i] = FloatToHalfBits(src[i]);
+  }
+#else
+  for (size_t i = 0; i < n; ++i) {
+    dst[i] = FloatToHalfBits(src[i]);
+  }
+#endif
 }
 
 std::string ReadWholeFile(const std::string &path) {
@@ -1454,7 +1499,20 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     }
 
     auto rt = std::make_unique<MoMoFunASRNanoRuntime>();
-    const int32_t threads = std::clamp<int32_t>(num_threads, 1, 4);
+    int32_t max_perf_threads = 4;
+#if defined(__APPLE__)
+    int32_t perf_cores = 0;
+    size_t perf_cores_len = sizeof(perf_cores);
+    if (::sysctlbyname("hw.perflevel0.logicalcpu", &perf_cores,
+                       &perf_cores_len, nullptr, 0) == 0 &&
+        perf_cores >= 2) {
+      // Cap intra-op parallelism to homogeneous P-cores (e.g. 2 on iPhone 17 Pro,
+      // <=4 on Apple Silicon Mac) so every transformer op barrier avoids waiting on E-cores.
+      max_perf_threads = std::min<int32_t>(4, perf_cores);
+    }
+#endif
+    const int32_t threads =
+        std::clamp<int32_t>(std::min<int32_t>(num_threads, max_perf_threads), 1, 4);
 
     // FunASR-Nano uses DynamicQuantizeLinear + MatMulInteger in both encoder_adaptor
     // and llm. Running directly on ORT CPUExecutionProvider avoids CoreML EP's 362-node
@@ -1780,9 +1838,7 @@ int MoMoTranscribeFunASRNanoCancellable(
     Ort::Value enc_input{nullptr};
     if (runtime->enc_in_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       lfr_fp16.resize(lfr.size());
-      for (size_t i = 0; i < lfr.size(); ++i) {
-        lfr_fp16[i] = FloatToHalfBits(lfr[i]);
-      }
+      ConvertFloatToHalfRaw(lfr.data(), lfr_fp16.data(), lfr.size());
       enc_input = Ort::Value::CreateTensor(
           runtime->cpu_mem, lfr_fp16.data(),
           lfr_fp16.size() * sizeof(uint16_t), enc_in_shape.data(),
@@ -2119,12 +2175,66 @@ int MoMoTranscribeFunASRNanoCancellable(
       int64_t best_id = eos_id;
       float best_val = -1e30f;
       bool found = false;
-      for (int32_t v = 0; v < runtime->vocab_size; ++v) {
-        const float lv = logits_buf[static_cast<size_t>(v)];
-        if (std::isfinite(lv) && (!found || lv > best_val)) {
-          best_val = lv;
-          best_id = v;
-          found = true;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+      {
+        const int32_t nvec = runtime->vocab_size & ~15;
+        float32x4_t vmax0 = vdupq_n_f32(-std::numeric_limits<float>::infinity());
+        float32x4_t vmax1 = vmax0;
+        float32x4_t vmax2 = vmax0;
+        float32x4_t vmax3 = vmax0;
+        uint32x4_t nonfinite = vdupq_n_u32(0);
+        const uint32x4_t inf_exp = vdupq_n_u32(0x7F800000u);
+        for (int32_t v = 0; v < nvec; v += 16) {
+          float32x4_t x0 = vld1q_f32(logits_buf + v);
+          float32x4_t x1 = vld1q_f32(logits_buf + v + 4);
+          float32x4_t x2 = vld1q_f32(logits_buf + v + 8);
+          float32x4_t x3 = vld1q_f32(logits_buf + v + 12);
+          nonfinite = vorrq_u32(
+              nonfinite,
+              vorrq_u32(
+                  vorrq_u32(vcgeq_u32(vreinterpretq_u32_f32(vabsq_f32(x0)), inf_exp),
+                            vcgeq_u32(vreinterpretq_u32_f32(vabsq_f32(x1)), inf_exp)),
+                  vorrq_u32(vcgeq_u32(vreinterpretq_u32_f32(vabsq_f32(x2)), inf_exp),
+                            vcgeq_u32(vreinterpretq_u32_f32(vabsq_f32(x3)), inf_exp))));
+          vmax0 = vmaxq_f32(vmax0, x0);
+          vmax1 = vmaxq_f32(vmax1, x1);
+          vmax2 = vmaxq_f32(vmax2, x2);
+          vmax3 = vmaxq_f32(vmax3, x3);
+        }
+        bool all_finite = (vmaxvq_u32(nonfinite) == 0);
+        if (all_finite) {
+          float m = vmaxvq_f32(vmaxq_f32(vmaxq_f32(vmax0, vmax1),
+                                         vmaxq_f32(vmax2, vmax3)));
+          for (int32_t v = nvec; v < runtime->vocab_size; ++v) {
+            const float lv = logits_buf[static_cast<size_t>(v)];
+            if (!std::isfinite(lv)) {
+              all_finite = false;
+              break;
+            }
+            if (lv > m) m = lv;
+          }
+          if (all_finite && runtime->vocab_size > 0) {
+            best_val = m;
+            for (int32_t v = 0; v < runtime->vocab_size; ++v) {
+              if (logits_buf[static_cast<size_t>(v)] == m) {
+                best_id = v;
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (!found)
+#endif
+      {
+        for (int32_t v = 0; v < runtime->vocab_size; ++v) {
+          const float lv = logits_buf[static_cast<size_t>(v)];
+          if (std::isfinite(lv) && (!found || lv > best_val)) {
+            best_val = lv;
+            best_id = v;
+            found = true;
+          }
         }
       }
       for (auto it = saved_logits.rbegin(); it != saved_logits.rend(); ++it) {

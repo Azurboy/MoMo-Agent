@@ -1454,15 +1454,45 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(
       throw std::runtime_error("Missing speaker model path");
     }
     const int32_t threads = std::clamp<int32_t>(num_threads, 1, 6);
+    const bool requested_coreml =
+        provider && std::strncmp(provider, "coreml", 6) == 0;
+    std::string coreml_cache_root;
+    if (requested_coreml && provider[6] == ':') {
+      coreml_cache_root = provider + 7;
+      while (!coreml_cache_root.empty() &&
+             (coreml_cache_root.back() == '\n' ||
+              coreml_cache_root.back() == '\r')) {
+        coreml_cache_root.pop_back();
+      }
+      // SherpaOnnx passes "coreml:/path/to/file.config"; SpeakerRuntime passes
+      // "coreml:/path/to/dir". Strip trailing ".config" filename if present.
+      if (coreml_cache_root.size() > 7 &&
+          coreml_cache_root.compare(coreml_cache_root.size() - 7, 7, ".config") == 0) {
+        const size_t slash = coreml_cache_root.find_last_of('/');
+        if (slash != std::string::npos) {
+          coreml_cache_root.resize(slash);
+        }
+      }
+    }
+
+    auto make_cpu_seg_options = [&](GraphOptimizationLevel opt_level) {
+      Ort::SessionOptions opts;
+      opts.SetIntraOpNumThreads(threads);
+      opts.SetInterOpNumThreads(1);
+      opts.SetGraphOptimizationLevel(opt_level);
+      opts.AddConfigEntry("session.intra_op.allow_spinning", "0");
+      opts.AddConfigEntry("session.inter_op.allow_spinning", "0");
+      return opts;
+    };
+
     auto runtime = std::make_unique<MoMoSpeakerRuntime>();
-    Ort::SessionOptions options;
-    options.SetIntraOpNumThreads(threads);
-    options.SetInterOpNumThreads(1);
-    options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-    options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+    // When CoreML is requested, skip expensive ORT_ENABLE_ALL CPU graph fusions on
+    // the 135 MB DiariZen probe session; only build an optimized CPU session on fallback.
+    auto probe_opts = make_cpu_seg_options(
+        requested_coreml ? GraphOptimizationLevel::ORT_DISABLE_ALL
+                         : GraphOptimizationLevel::ORT_ENABLE_ALL);
     runtime->segmentation =
-        std::make_unique<Ort::Session>(runtime->env, segmentation, options);
+        std::make_unique<Ort::Session>(runtime->env, segmentation, probe_opts);
 
     Ort::AllocatorWithDefaultOptions allocator;
     auto metadata = runtime->segmentation->GetModelMetadata();
@@ -1520,27 +1550,6 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(
         runtime->perms.push_back(p);
       } while (
           std::next_permutation(p.begin(), p.begin() + runtime->num_speakers));
-    }
-
-    const bool requested_coreml =
-        provider && std::strncmp(provider, "coreml", 6) == 0;
-    std::string coreml_cache_root;
-    if (requested_coreml && provider[6] == ':') {
-      coreml_cache_root = provider + 7;
-      while (!coreml_cache_root.empty() &&
-             (coreml_cache_root.back() == '\n' ||
-              coreml_cache_root.back() == '\r')) {
-        coreml_cache_root.pop_back();
-      }
-      // SherpaOnnx passes "coreml:/path/to/file.config"; SpeakerRuntime passes
-      // "coreml:/path/to/dir". Strip trailing ".config" filename if present.
-      if (coreml_cache_root.size() > 7 &&
-          coreml_cache_root.compare(coreml_cache_root.size() - 7, 7, ".config") == 0) {
-        const size_t slash = coreml_cache_root.find_last_of('/');
-        if (slash != std::string::npos) {
-          coreml_cache_root.resize(slash);
-        }
-      }
     }
 
     // Upgrade segmentation (DiariZen WavLM / PyAnnote Community-1) to CoreML ANE
@@ -1613,7 +1622,13 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(
           }
         }
       } catch (...) {
-        // Keep the initialized CPU segmentation session on any CoreML error.
+        // Fallback below upgrades the probe session to ORT_ENABLE_ALL CPU.
+      }
+      if (!runtime->seg_uses_coreml) {
+        auto cpu_opts =
+            make_cpu_seg_options(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        runtime->segmentation =
+            std::make_unique<Ort::Session>(runtime->env, segmentation, cpu_opts);
       }
     }
 

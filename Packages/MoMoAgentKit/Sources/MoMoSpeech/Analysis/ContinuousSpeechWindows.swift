@@ -34,9 +34,15 @@ extension WindowPlanner {
                         if limit + contextPadding > end { return result }
                     } else if part.end + 32_000 > end || (part == speech.last && hasPendingSpeech) { return result }
                 }
-                let cut = part.end >= limit
-                    ? pauseCut(after: cursor, through: limit, ranges: ranges, energy: energy)
-                    : part.end
+                let cut: Int64
+                if part.end >= limit {
+                    cut = pauseCut(after: cursor, through: limit, ranges: ranges, energy: energy)
+                } else if part.end - cursor > 256_000,
+                          let pause = singlePassPauseCut(after: cursor, partEnd: part.end, ranges: ranges) {
+                    cut = pause
+                } else {
+                    cut = part.end
+                }
                 let core = try FrameRange(start: cursor, count: cut - cursor)
                 // A checkpoint in silence must not turn a new utterance into a
                 // continuation with extra leading audio. Only extend left when
@@ -52,6 +58,27 @@ extension WindowPlanner {
             }
         }
         return result
+    }
+
+    private func singlePassPauseCut(after start: Int64, partEnd: Int64,
+                                    ranges: [Range<Int64>]) -> Int64? {
+        let lower = start + configuration.maximumCoreFrames / 2
+        let singlePassLimit = start + 256_000
+        let target = start + configuration.maximumCoreFrames * 13 / 20
+        let pauses = zip(ranges, ranges.dropFirst()).compactMap { a, b -> (Int64, Int64)? in
+            let gap = b.lowerBound - a.upperBound
+            let middle = a.upperBound + gap / 2
+            guard gap >= 4_800,
+                  middle >= lower,
+                  middle <= singlePassLimit,
+                  partEnd - middle >= 48_000 else { return nil }
+            return (middle, gap)
+        }
+        return pauses.min(by: {
+            if ($0.1 >= 16_000) != ($1.1 >= 16_000) { return $0.1 >= 16_000 }
+            let a = abs($0.0 - target), b = abs($1.0 - target)
+            return a == b ? $0.0 < $1.0 : a < b
+        })?.0
     }
 
     private func pauseCut(after start: Int64, through limit: Int64,

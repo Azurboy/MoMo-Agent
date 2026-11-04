@@ -49,6 +49,13 @@ final class SequentialSpeechSamples {
         try reader.continueOperation(attempt: attempt, recorder: recorder, context: sourceContext)
         let discarded = min(range.start - start, Int64(buffer.count - readOffset))
         consume(Int(discarded))
+        if end < range.start {
+            try reader.skipToModelFrameIfNative16kMono(range.start)
+            if reader.emitted > end {
+                end = reader.emitted
+                start = end
+            }
+        }
         while end < range.end {
             guard let block = try reader.next() else { throw SpeechError.missingAudio }
             let blockStart = end
