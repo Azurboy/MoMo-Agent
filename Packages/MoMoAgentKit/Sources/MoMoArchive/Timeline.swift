@@ -40,8 +40,8 @@ extension ArchiveStore {
         timelineDayBuildCount += 1
         #endif
         let rootPrefix = rootURL.standardizedFileURL.path + "/"
-        let localStart = day.date(calendar: TimelineDay.calendar).timeIntervalSince1970
-        let localEnd = day.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let localStart = day.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let localEnd = day.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         let rows = try database.rows("""
             SELECT c.manifest FROM epochs e
             JOIN sessions s ON s.id=e.session_id

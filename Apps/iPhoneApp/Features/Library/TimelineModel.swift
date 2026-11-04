@@ -233,6 +233,24 @@ final class TimelineModel {
         if changed { onSelectedDayChanged?(day) }
     }
 
+    func handleDayBoundaryChanged() {
+        invalidationRevision &+= 1
+        discardPendingReads()
+        loadedRevisions.removeAll()
+        snapshots.removeAll()
+        listWindows.removeAll()
+        repeatedClockRanges.removeAll()
+        processingProgress.removeAll()
+        failures.removeAll()
+        earliestDay = nil
+        hasLoadedDateRange = false
+        let currentToday = TimelineDay(Date())
+        observedToday = currentToday
+        selectedDay = currentToday
+        days = [currentToday]
+        onSelectedDayChanged?(currentToday)
+    }
+
     func currentID(_ id: TimelineWindowID?) -> TimelineWindowID? {
         guard var current = id else { return nil }
         var visited: Set<TimelineWindowID> = []

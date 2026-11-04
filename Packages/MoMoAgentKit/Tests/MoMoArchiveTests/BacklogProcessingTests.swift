@@ -99,7 +99,7 @@ struct BacklogProcessingTests {
     @Test func dailyProgressClipsMidnightAndCountsNoSpeechAsProcessed() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = try fixture.store(), audio = wav(frames: 1_920_000)
-        let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-15T15:59:00Z"))
+        let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-15T23:59:00Z"))
         let manifest = try ChunkManifest(sessionID: fixture.sessionID, epochID: fixture.epochID, sourceDeviceID: fixture.deviceID,
             sourceBuild: "midnight-progress-test", sequence: 0, frames: FrameRange(start: 0, count: 1_920_000),
             timebaseHz: 16_000, wallClockAnchor: anchor, timezoneOffset: 28_800, codec: .pcmInt16, sampleRate: 16_000,

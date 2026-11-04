@@ -111,4 +111,41 @@ class ContextTests(unittest.TestCase):
         page = self.store.read_source(receipt['source_id'], receipt['source_revision'], refreshed[0]['offset'], refreshed[0]['end'] - refreshed[0]['offset'])
         self.assertEqual([spans[0]['text'], spans[1]['text']], [s['text'] for s in page['spans']])
 
+    def test_window_grouping_uses_default_eight_am_boundary_and_respects_custom_day_start_hour(self):
+        import datetime as dt, json
+        late_night = dt.datetime(2026, 11, 4, 23, 58, 0).timestamp()
+        after_midnight = dt.datetime(2026, 11, 5, 0, 2, 0).timestamp()
+        before_eight = dt.datetime(2026, 11, 5, 7, 58, 0).timestamp()
+        after_eight = dt.datetime(2026, 11, 5, 8, 2, 0).timestamp()
+        spans = [
+            dict(id=str(uuid.uuid4()), text='深夜十一点五十八还在讨论项目排期。', recorded_at=late_night),
+            dict(id=str(uuid.uuid4()), text='凌晨零点零二分继续同一段讨论。', recorded_at=after_midnight),
+            dict(id=str(uuid.uuid4()), text='早上七点五十八分的收尾补充。', recorded_at=before_eight),
+            dict(id=str(uuid.uuid4()), text='早上八点零二分进入新一天早会。', recorded_at=after_eight),
+        ]
+        payload = copy.deepcopy(self.payload)
+        payload.update(version=3, spans=spans, text_sha256=digest('\n'.join(s['text'] for s in spans)))
+        self.store.sync_source(payload)
+
+        # Default 08:00 boundary: 23:58 + 00:02 stay in one window; 07:58 vs 08:02 split across the 08:00 boundary.
+        windows = self.store.list_sources()['items'][0]['windows']
+        self.assertEqual(3, len(windows))
+        self.assertEqual(late_night, windows[0]['recorded_at'])
+        self.assertEqual(after_midnight, windows[0]['end_at'])
+        self.assertEqual(before_eight, windows[1]['recorded_at'])
+        self.assertEqual(before_eight, windows[1]['end_at'])
+        self.assertEqual(after_eight, windows[2]['recorded_at'])
+
+        # Custom 00:00 boundary: 23:58 vs 00:02 split at midnight; 07:58 + 08:02 stay together (4 min apart on same day).
+        cfg_file = Path(self.temporary.name) / 'runtime' / 'day-boundary.json'
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(json.dumps({'day_start_hour': 0}), encoding='utf-8')
+        windows_midnight = self.store.list_sources()['items'][0]['windows']
+        self.assertEqual(3, len(windows_midnight))
+        self.assertEqual(late_night, windows_midnight[0]['recorded_at'])
+        self.assertEqual(late_night, windows_midnight[0]['end_at'])
+        self.assertEqual(after_midnight, windows_midnight[1]['recorded_at'])
+        self.assertEqual(before_eight, windows_midnight[2]['recorded_at'])
+        self.assertEqual(after_eight, windows_midnight[2]['end_at'])
+
 if __name__=='__main__': unittest.main()

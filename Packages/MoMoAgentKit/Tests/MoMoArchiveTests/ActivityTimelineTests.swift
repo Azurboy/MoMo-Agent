@@ -255,15 +255,15 @@ struct ActivityTimelineTests {
     @Test func midnightMarkAppearsOnceAndUsesTheFollowingRecordingDay() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = try fixture.store()
-        let midnight = day.adding(days: 1).date(calendar: TimelineDay.calendar).addingTimeInterval(-28_800)
-        let manifest = try await receive(fixture, store: store, at: midnight.addingTimeInterval(-300))
+        let boundary = day.adding(days: 1).startDate(calendar: TimelineDay.calendar).addingTimeInterval(-28_800)
+        let manifest = try await receive(fixture, store: store, at: boundary.addingTimeInterval(-300))
         try await store.receiveMark(CaptureMark(sessionID: manifest.sessionID, epochID: manifest.epochID,
             sourceDeviceID: fixture.deviceID, sourceFrame: 300 * 16_000))
         let before = try await store.timelineDay(day)
         let after = try await store.timelineDay(day.adding(days: 1))
         #expect(before.flatMap(\.marks).isEmpty)
         #expect(after.flatMap(\.marks).count == 1)
-        #expect(after.flatMap(\.marks).first?.recordedAt == midnight)
+        #expect(after.flatMap(\.marks).first?.recordedAt == boundary)
         #expect(after.flatMap(\.marks).first?.playbackPosition(in: after.flatMap(\.sources)) == 0)
     }
 

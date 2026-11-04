@@ -10,6 +10,7 @@ public struct InsightTimelineCatalog: Sendable {
 struct InsightCatalogCache {
     let revision: UInt64
     let externalVersion: Int64
+    let dayStartHour: Int
     let sessions: [UUID: [TimelineDay: String]]
     let catalog: InsightTimelineCatalog
 }
@@ -19,11 +20,14 @@ extension ArchiveStore {
     public func insightTimelineCatalog() throws -> InsightTimelineCatalog {
         let external = try database.rows("PRAGMA data_version").first?.requireInt(0) ?? 0
         let revision = database.insightRevision
+        let startHour = TimelineDay.currentStartHour
         if !database.isInTransaction, let cache = insightCatalogCache,
-           cache.externalVersion == external, cache.revision == revision { return cache.catalog }
+           cache.externalVersion == external, cache.revision == revision,
+           cache.dayStartHour == startHour { return cache.catalog }
         var sessions: [UUID: [TimelineDay: String]]
         let changed: Set<UUID>
-        if !database.isInTransaction, let cache = insightCatalogCache, cache.externalVersion == external,
+        if !database.isInTransaction, let cache = insightCatalogCache,
+           cache.externalVersion == external, cache.dayStartHour == startHour,
            let updates = try database.changedInsightSessions() {
             sessions = cache.sessions
             changed = updates
@@ -32,7 +36,7 @@ extension ArchiveStore {
             changed = Set(try database.rows("SELECT id FROM sessions WHERE deleted=0").map { try $0.requireUUID(0) })
         }
         for id in changed {
-            sessions[id] = try insightDayRevisions(sessionID: id)
+            sessions[id] = try insightDayRevisions(sessionID: id, startHour: startHour)
             #if DEBUG
             insightCatalogSessionBuildCount += 1
             #endif
@@ -48,13 +52,14 @@ extension ArchiveStore {
         let catalog = InsightTimelineCatalog(revision: ContentHash.sha256(Data(identity.utf8)), days: days,
                                              dayRevisions: dayRevisions)
         if !database.isInTransaction {
-            insightCatalogCache = .init(revision: revision, externalVersion: external, sessions: sessions, catalog: catalog)
+            insightCatalogCache = .init(revision: revision, externalVersion: external, dayStartHour: startHour,
+                                        sessions: sessions, catalog: catalog)
             database.acknowledgeInsightChanges()
         }
         return catalog
     }
 
-    private func insightDayRevisions(sessionID: UUID) throws -> [TimelineDay: String]? {
+    private func insightDayRevisions(sessionID: UUID, startHour: Int) throws -> [TimelineDay: String]? {
         guard let session = try database.rows("SELECT generation,projection_blocked FROM sessions WHERE id=? AND deleted=0", [.text(sessionID.uuidString)]).first else { return nil }
         let scope = "\(try session.requireInt(0))/\(try session.requireInt(1))"
         var parts: [TimelineDay: [String]] = [:]
@@ -64,13 +69,13 @@ extension ArchiveStore {
             let base = manifest.wallClockAnchor.addingTimeInterval(Double(manifest.timezoneOffset))
             let start = base.addingTimeInterval(Double(frames.start) / manifest.timebaseHz)
             let end = base.addingTimeInterval(Double(frames.end) / manifest.timebaseHz - 0.001)
-            var day = TimelineDay(start, calendar: TimelineDay.calendar)
-            let last = TimelineDay(max(start, end), calendar: TimelineDay.calendar)
+            var day = TimelineDay(start, calendar: TimelineDay.calendar, startHour: startHour)
+            let last = TimelineDay(max(start, end), calendar: TimelineDay.calendar, startHour: startHour)
             while day <= last {
                 if clip {
                     // Catalog identity uses nearest frames so Date rounding cannot dirty yesterday.
-                    let lower = max(frames.start, Int64((day.date(calendar: TimelineDay.calendar).timeIntervalSince(base) * manifest.timebaseHz).rounded()))
-                    let upper = min(frames.end, Int64((day.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince(base) * manifest.timebaseHz).rounded()))
+                    let lower = max(frames.start, Int64((day.startDate(calendar: TimelineDay.calendar, startHour: startHour).timeIntervalSince(base) * manifest.timebaseHz).rounded()))
+                    let upper = min(frames.end, Int64((day.adding(days: 1).startDate(calendar: TimelineDay.calendar, startHour: startHour).timeIntervalSince(base) * manifest.timebaseHz).rounded()))
                     parts[day, default: []].append("\(value)/\(lower)/\(upper)")
                 } else { parts[day, default: []].append(value) }
                 day = day.adding(days: 1)

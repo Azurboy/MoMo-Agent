@@ -78,13 +78,14 @@ struct PhoneUITestConfiguration {
         let bytes = try Data(contentsOf: audioURL)
         let offset = TimeZone.current.secondsFromGMT()
         let now = Date().timeIntervalSince1970
-        // Keep all three synthetic windows in the selected day, including runs just after midnight.
-        let earliestBase = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 + 3_600
+        // Keep all synthetic windows in the selected recording day, including runs between midnight and dayStartHour.
+        let todayDay = TimelineDay(Date())
+        let earliestBase = todayDay.startDate().timeIntervalSince1970 + 3_600
         let base = max(earliestBase, floor((now + Double(offset)) / 1_800) * 1_800 - Double(offset) - 1_800)
         let inputs: [(Double, String)] = remoteFixture ? [(base, "下周五给小林发方案。方案需要包含手机采集和 Mac 执行的分工。聚餐还没有定，先不要安排。")] : timelineScrollFixture ? (8...19).map {
-            (Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 + Double($0) * 3_600,
+            (todayDay.date().timeIntervalSince1970 + Double($0) * 3_600,
              "第 \($0) 时的测试录音，用于验证时间轴顺序和阅读位置。")
-        } + [(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 - 3_600,
+        } + [(todayDay.adding(days: -1).date().timeIntervalSince1970 + 23 * 3_600,
                "昨天的测试录音，用于验证切换日期后今天的阅读位置。")]: [
             (base + 30, "第一段记录讨论了时间线的设计，应该按时间归组，保留原始录音。"),
             (base + 300, "第二段记录接着讨论播放器，点进同一时段就能读文字和回听原音。"),

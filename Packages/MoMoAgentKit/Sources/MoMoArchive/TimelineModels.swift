@@ -3,22 +3,43 @@ import MoMoContracts
 
 /// A calendar date, independent of the phone's current UTC offset.
 public struct TimelineDay: Codable, Hashable, Comparable, Sendable, Identifiable {
+    public static let defaultStartHour = DayStartBoundary.defaultHour
+    public static let startHourRange = DayStartBoundary.hourRange
+    public static let startHourDefaultsKey = DayStartBoundary.defaultsKey
+    public static var currentStartHour: Int { DayStartBoundary.currentHour }
+    public static func setCurrentStartHour(_ hour: Int, defaults: UserDefaults? = .standard) {
+        DayStartBoundary.setCurrentHour(hour, defaults: defaults)
+    }
+
     public let year: Int
     public let month: Int
     public let day: Int
     public var id: String { "\(year)-\(month)-\(day)" }
 
-    public init(_ date: Date, calendar: Calendar = .current) {
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+    public init(_ date: Date, calendar: Calendar = .current, startHour: Int = TimelineDay.currentStartHour) {
+        let anchor = DayStartBoundary.logicalDayStart(for: date, calendar: calendar, startHour: startHour)
+        let parts = calendar.dateComponents([.year, .month, .day], from: anchor)
         year = parts.year!; month = parts.month!; day = parts.day!
     }
 
+    /// Literal calendar date without applying `startHour` (e.g. from a graphical calendar picker).
+    public init(calendarDate: Date, calendar: Calendar = .current) {
+        let parts = calendar.dateComponents([.year, .month, .day], from: calendarDate)
+        year = parts.year!; month = parts.month!; day = parts.day!
+    }
+
+    /// Calendar midnight (`00:00`) for display formatting and calendar controls.
     public func date(calendar: Calendar = .current) -> Date {
         calendar.date(from: DateComponents(year: year, month: month, day: day))!
     }
 
+    /// Start instant of this recording day (`08:00` by default).
+    public func startDate(calendar: Calendar = .current, startHour: Int = TimelineDay.currentStartHour) -> Date {
+        DayStartBoundary.boundaryStart(forCalendarDay: date(calendar: calendar), calendar: calendar, startHour: startHour)
+    }
+
     public func adding(days: Int) -> Self {
-        Self(Self.calendar.date(byAdding: .day, value: days, to: date(calendar: Self.calendar))!, calendar: Self.calendar)
+        Self(calendarDate: Self.calendar.date(byAdding: .day, value: days, to: date(calendar: Self.calendar))!, calendar: Self.calendar)
     }
 
     public static func < (lhs: Self, rhs: Self) -> Bool {

@@ -87,7 +87,7 @@ struct InsightCatalogTests {
         return try ManifestEnvelope(manifest: ChunkManifest(sessionID: m.sessionID, epochID: m.epochID,
             sourceDeviceID: m.sourceDeviceID, sourceBuild: "cross-day-test", sequence: Int64(index),
             frames: FrameRange(start: Int64(index * 1_600), count: 1_600), timebaseHz: 16_000,
-            wallClockAnchor: Date(timeIntervalSince1970: 86_399.9), timezoneOffset: 0,
+            wallClockAnchor: Date(timeIntervalSince1970: 86_400 + Double(TimelineDay.currentStartHour) * 3_600 - 0.1), timezoneOffset: 0,
             codec: m.codec, sampleRate: m.sampleRate, channels: m.channels, decodedFrameCount: 1_600,
             byteCount: m.byteCount, audioSHA256: m.audioSHA256, sourceKind: .fixture))
     }

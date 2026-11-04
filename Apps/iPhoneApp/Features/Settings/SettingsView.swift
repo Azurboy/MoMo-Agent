@@ -95,6 +95,13 @@ struct SettingsView: View {
                         }.accessibilityIdentifier("settings.storage")
                     }
                 }
+                PhoneSettingsSection(title: "高级设置") {
+                    PhoneSettingsSurface {
+                        NavigationLink { DayStartSettingsView(settings: speechSettings) } label: {
+                            PhoneSettingsLinkRow(title: "每天起点", symbol: "clock", value: speechSettings.dayStartHourLabel)
+                        }.accessibilityIdentifier("settings.advanced.dayStartHour")
+                    }
+                }
                 Button {
                     versionTapCount += 1
                     if versionTapCount == 7 { versionTapCount = 0; previewingWelcome = true }
@@ -153,5 +160,51 @@ private struct PhoneNotificationSettings: View {
             }.padding(24)
         }.phonePageSurface().navigationTitle("通知").navigationBarTitleDisplayMode(.inline)
             .task { await notifications.refresh() }
+    }
+}
+
+private struct DayStartSettingsView: View {
+    let settings: PhoneSpeechSettings
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("每天起点").phoneText(.body)
+                        Spacer(minLength: 16)
+                        Picker("每天起点", selection: Binding(
+                            get: { settings.dayStartHour },
+                            set: { settings.selectDayStartHour($0) }
+                        )) {
+                            ForEach(Array(PhoneSpeechSettings.dayStartHourRange), id: \.self) { hour in
+                                Text(DayStartBoundary.label(for: hour)).monospacedDigit().tag(hour)
+                            }
+                        }
+                        .labelsHidden()
+                        .tint(MoMoPalette.ink)
+                        .accessibilityIdentifier("settings.advanced.dayStartHour.picker")
+                    }
+                    Text("早于该时间的凌晨录音会归入前一天。默认 08:00。")
+                        .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                    Button("恢复默认") {
+                        settings.selectDayStartHour(PhoneSpeechSettings.defaultDayStartHour)
+                    }
+                    .buttonStyle(PhoneActionButtonStyle())
+                    .disabled(settings.dayStartHour == PhoneSpeechSettings.defaultDayStartHour)
+                    .accessibilityIdentifier("settings.advanced.dayStartHour.reset")
+                }
+                .padding(18).background(MoMoPalette.surface, in: RoundedRectangle(cornerRadius: 20))
+                Text("修改后立即重排时间线日期归属，已有录音和文字保留。")
+                    .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                if let failure = settings.failure {
+                    Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                }
+            }
+            .padding(24)
+        }
+        .phonePageSurface()
+        .navigationTitle("每天起点")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

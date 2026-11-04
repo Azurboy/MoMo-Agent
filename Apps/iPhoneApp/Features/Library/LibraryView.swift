@@ -390,7 +390,8 @@ struct LibraryView: View {
                         .accessibilityIdentifier("timeline.calendar.empty")
                     Button("今天") { choose(TimelineDay(Date())) }.frame(minHeight: 44)
                 case .known(let bounds):
-                    let dates = bounds.lowerBound.date()...Date()
+                    let upperDate = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: bounds.upperBound.date()) ?? bounds.upperBound.date()
+                    let dates = bounds.lowerBound.date()...upperDate
                     DatePicker(String(localized: "选择日期"), selection: Binding(get: {
                         min(max(dateDraft, dates.lowerBound), dates.upperBound)
                     }, set: { dateDraft = $0 }), in: dates, displayedComponents: .date)
@@ -410,7 +411,7 @@ struct LibraryView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") {
                         if case .known(let bounds) = dateRange {
-                            choose(min(max(TimelineDay(dateDraft), bounds.lowerBound), bounds.upperBound))
+                            choose(min(max(TimelineDay(calendarDate: dateDraft), bounds.lowerBound), bounds.upperBound))
                         } else { choose(TimelineDay(Date())) }
                     }.disabled(dateRange.isUnknown).accessibilityIdentifier("timeline.calendar.done")
                 }

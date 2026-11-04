@@ -14,14 +14,22 @@ struct DesktopTranscriptWindow: Identifiable {
 
 struct DesktopSources: View {
     @Bindable var model: DesktopModel
-    @State private var day = Calendar.current.startOfDay(for: Date())
-    @State private var observedToday = Calendar.current.startOfDay(for: Date())
+    @State private var day = DayStartBoundary.logicalDayStart(for: Date())
+    @State private var observedToday = DayStartBoundary.logicalDayStart(for: Date())
     @State private var selectedID: String?
     @State private var query = ""
     @State private var searching = false
     @State private var choosingDate = false
     private let calendar = Calendar.current
     private static let clockFormat = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
+
+    private func logicalDay(for date: Date) -> Date {
+        DayStartBoundary.logicalDayStart(for: date, calendar: calendar, startHour: model.dayStartHour)
+    }
+
+    private var logicalToday: Date {
+        logicalDay(for: Date())
+    }
 
     private var ordered: [DesktopTranscriptWindow] {
         model.sources.flatMap { source -> [DesktopTranscriptWindow] in
@@ -50,7 +58,7 @@ struct DesktopSources: View {
             if !query.isEmpty {
                 return (item.summary ?? item.preview ?? "").localizedStandardContains(query)
             }
-            return item.recordedAt.map { calendar.isDate(Date(timeIntervalSince1970: $0), inSameDayAs: day) } ?? false
+            return item.recordedAt.map { calendar.isDate(logicalDay(for: Date(timeIntervalSince1970: $0)), inSameDayAs: day) } ?? false
         }
     }
 
@@ -60,9 +68,13 @@ struct DesktopSources: View {
 
     private var earliest: Date {
         min(
-            ordered.compactMap(\.recordedAt).min().map { calendar.startOfDay(for: Date(timeIntervalSince1970: $0)) } ?? day,
-            calendar.startOfDay(for: Date())
+            ordered.compactMap(\.recordedAt).min().map { logicalDay(for: Date(timeIntervalSince1970: $0)) } ?? calendar.startOfDay(for: day),
+            logicalToday
         )
+    }
+
+    private var latestSelectableDay: Date {
+        max(earliest, max(logicalToday, calendar.startOfDay(for: day)))
     }
 
     var body: some View {
@@ -90,16 +102,28 @@ struct DesktopSources: View {
         }
         .background(MoMoPalette.canvas)
         .task {
+            let initialToday = logicalToday
+            if day != initialToday && calendar.isDate(day, inSameDayAs: observedToday) {
+                day = initialToday
+            }
+            observedToday = initialToday
             await model.loadContext()
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(8)) } catch { break }
-                let today = calendar.startOfDay(for: Date())
+                let today = logicalToday
                 if today != observedToday {
                     if calendar.isDate(day, inSameDayAs: observedToday) { day = today }
                     observedToday = today
                 }
                 await model.loadContext(silent: true)
             }
+        }
+        .onChange(of: model.dayStartHour) {
+            let today = logicalToday
+            if calendar.isDate(day, inSameDayAs: observedToday) || day > today {
+                day = today
+            }
+            observedToday = today
         }
         .onChange(of: ordered.map { $0.id + $0.source.revision }) {
             if selectedID != nil && selected == nil { selectedID = nil }
@@ -153,8 +177,8 @@ struct DesktopSources: View {
                             description: Text(query.isEmpty ? "手机同步的录音稿会按日期出现在这里。" : "搜索范围为已同步的摘要与原文片段。")
                         )
                         if query.isEmpty, let latest = ordered.last?.recordedAt,
-                           !calendar.isDate(Date(timeIntervalSince1970: latest), inSameDayAs: day) {
-                            Button("查看最近的转录") { day = calendar.startOfDay(for: Date(timeIntervalSince1970: latest)) }
+                           !calendar.isDate(logicalDay(for: Date(timeIntervalSince1970: latest)), inSameDayAs: day) {
+                            Button("查看最近的转录") { day = logicalDay(for: Date(timeIntervalSince1970: latest)) }
                         }
                     }
                     if model.contextLoading { ProgressView("正在读取记录").padding(24) }
@@ -174,16 +198,16 @@ struct DesktopSources: View {
                 }.frame(maxWidth: .infinity, minHeight: 44)
             }.popover(isPresented: $choosingDate) {
                 VStack(spacing: 14) {
-                    DatePicker("选择日期", selection: $day, in: earliest...Date(), displayedComponents: .date).datePickerStyle(.graphical)
+                    DatePicker("选择日期", selection: $day, in: earliest...latestSelectableDay, displayedComponents: .date).datePickerStyle(.graphical)
                     HStack {
-                        Button("今天") { day = calendar.startOfDay(for: Date()); query = ""; choosingDate = false }
+                        Button("今天") { day = logicalToday; query = ""; choosingDate = false }
                         Spacer()
                         Button("完成") { query = ""; choosingDate = false }
                     }
                 }.padding(20).frame(width: 300)
             }
             Button { moveDay(1) } label: { Image(systemName: "chevron.right").frame(width: 36, height: 44) }
-                .disabled(calendar.isDateInToday(day) || !query.isEmpty).accessibilityLabel("后一天")
+                .disabled(calendar.isDate(day, inSameDayAs: logicalToday) || day >= logicalToday || !query.isEmpty).accessibilityLabel("后一天")
             Button { searching.toggle(); if !searching { query = "" } } label: {
                 Image(systemName: searching ? "xmark" : "magnifyingglass").frame(width: 36, height: 44)
             }.accessibilityLabel(searching ? "关闭搜索" : "搜索转录")
@@ -196,9 +220,13 @@ struct DesktopSources: View {
 
     private func dayTitle(_ date: Date) -> String {
         let monthDay = date.formatted(.dateTime.locale(AppLanguage.current.locale).month().day())
-        if calendar.isDateInToday(date) { return String(localized: "今天 · \(monthDay)") }
-        if calendar.isDateInYesterday(date) { return String(localized: "昨天 · \(monthDay)") }
-        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) { return monthDay }
+        let today = logicalToday
+        if calendar.isDate(date, inSameDayAs: today) { return String(localized: "今天 · \(monthDay)") }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: today),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return String(localized: "昨天 · \(monthDay)")
+        }
+        if calendar.isDate(date, equalTo: today, toGranularity: .year) { return monthDay }
         return date.formatted(.dateTime.locale(AppLanguage.current.locale).year().month().day())
     }
 

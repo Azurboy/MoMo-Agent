@@ -17,13 +17,15 @@ final class TimelineDateNavigationTests: XCTestCase {
         let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
         let day = TimelineDay(Date())
         let model = TimelineModel(archive: archive, configurationFingerprint: nil)
-        try await receive(archive, root: root, at: day.date().addingTimeInterval(9 * 3_600), offset: 0)
+        let firstAt = day.date().addingTimeInterval(9 * 3_600)
+        try await receive(archive, root: root, at: firstAt, offset: TimeZone.current.secondsFromGMT(for: firstAt))
         await model.load(day)
         let initialBuilds = await archive.timelineDayBuildCount
         for _ in 0..<8 { await model.refresh() }
         let unchangedBuilds = await archive.timelineDayBuildCount
         XCTAssertEqual(unchangedBuilds, initialBuilds, "Status refreshes must not rebuild unchanged date content.")
-        try await receive(archive, root: root, at: day.date().addingTimeInterval(11 * 3_600), offset: 0)
+        let secondAt = day.date().addingTimeInterval(11 * 3_600)
+        try await receive(archive, root: root, at: secondAt, offset: TimeZone.current.secondsFromGMT(for: secondAt))
         await model.refresh()
         let changedBuilds = await archive.timelineDayBuildCount
         XCTAssertEqual(changedBuilds, initialBuilds + 1)
@@ -36,7 +38,8 @@ final class TimelineDateNavigationTests: XCTestCase {
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
         let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
         let day = TimelineDay(Date()), model = TimelineModel(archive: archive, configurationFingerprint: nil)
-        try await receive(archive, root: root, at: day.date().addingTimeInterval(9 * 3_600), offset: 0)
+        let at = day.date().addingTimeInterval(9 * 3_600)
+        try await receive(archive, root: root, at: at, offset: TimeZone.current.secondsFromGMT(for: at))
         let baseline = await archive.timelineDayBuildCount
         let entered = expectation(description: "Archive busy before navigation")
         let release = DispatchSemaphore(value: 0)
@@ -65,7 +68,8 @@ final class TimelineDateNavigationTests: XCTestCase {
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
         let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
         let day = TimelineDay(Date()), model = TimelineModel(archive: archive, configurationFingerprint: nil)
-        try await receive(archive, root: root, at: day.date().addingTimeInterval(9 * 3_600), offset: 0)
+        let at = day.date().addingTimeInterval(9 * 3_600)
+        try await receive(archive, root: root, at: at, offset: TimeZone.current.secondsFromGMT(for: at))
         let windows = try await archive.timelineDay(day)
         let id = try XCTUnwrap(windows.first?.id)
         let baseline = await archive.timelineDayBuildCount
@@ -173,7 +177,7 @@ final class TimelineDateNavigationTests: XCTestCase {
         let yesterday = base.addingTimeInterval(-12 * 3_600)
         try await receive(archive, root: root, at: yesterday, offset: TimeZone.current.secondsFromGMT(for: yesterday))
         for hour in hours {
-            let at = base.addingTimeInterval(Double(hour) * 3_600)
+            let at = base.addingTimeInterval(Double(hour) * 3_600 + (hour == 8 ? 600 : 0))
             try await receive(archive, root: root, at: at, offset: TimeZone.current.secondsFromGMT(for: at))
         }
         let model = LibraryModel(archive: archive, configurationFingerprint: nil)
@@ -254,7 +258,7 @@ final class TimelineDateNavigationTests: XCTestCase {
                 // Late audio joins each visible group and changes its start/identity.
                 // This exercises the production reading-position replacement path.
                 for hour in hours {
-                    let at = base.addingTimeInterval(Double(hour) * 3_600 - Double(cycle + 1) * 30)
+                    let at = base.addingTimeInterval(Double(hour) * 3_600 + (hour == 8 ? 600 : 0) - Double(cycle + 1) * 30)
                     try await receive(archive, root: root, at: at, offset: TimeZone.current.secondsFromGMT(for: at))
                 }
                 await model.refresh()
@@ -518,6 +522,46 @@ final class TimelineDateNavigationTests: XCTestCase {
 
         _ = try await waitForSingleAlignedPane(stage: "recover-from-mid-page-split")
         XCTAssertEqual(model.timeline.selectedDay, today)
+    }
+
+    func testConfigurableDayStartBoundaryRegroupsEarlyMorningRecordingsImmediately() async throws {
+        let root = temporaryRoot()
+        addTeardownBlock {
+            DayStartBoundary.setCurrentHour(DayStartBoundary.defaultHour)
+            try FileManager.default.removeItem(at: root)
+        }
+        DayStartBoundary.setCurrentHour(8)
+        let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
+        let calendar = Calendar.current
+        let baseDate = calendar.startOfDay(for: Date().addingTimeInterval(-3 * 86_400))
+        let precedingDay = TimelineDay(calendarDate: baseDate, calendar: calendar)
+        let calendarDay = precedingDay.adding(days: 1)
+        let earlyMorningAt = calendarDay.date(calendar: calendar).addingTimeInterval(2 * 3_600 + 1_800) // 02:30
+        let offset = TimeZone.current.secondsFromGMT(for: earlyMorningAt)
+        try await receive(archive, root: root, at: earlyMorningAt, offset: offset, frames: 960_000)
+
+        let model = LibraryModel(archive: archive, configurationFingerprint: nil)
+        await model.refresh()
+        await model.timeline.load(precedingDay)
+        await model.timeline.load(calendarDay)
+        XCTAssertFalse(model.timeline.snapshots[precedingDay, default: []].isEmpty, "At 08:00 boundary, 02:30 belongs to the preceding day.")
+        XCTAssertTrue(model.timeline.snapshots[calendarDay, default: []].isEmpty, "At 08:00 boundary, 02:30 does not appear on the new calendar day.")
+
+        DayStartBoundary.setCurrentHour(0)
+        model.timeline.handleDayBoundaryChanged()
+        await model.refresh()
+        await model.timeline.load(precedingDay)
+        await model.timeline.load(calendarDay)
+        XCTAssertTrue(model.timeline.snapshots[precedingDay, default: []].isEmpty, "At 00:00 boundary, 02:30 no longer belongs to the preceding day.")
+        XCTAssertFalse(model.timeline.snapshots[calendarDay, default: []].isEmpty, "At 00:00 boundary, 02:30 moves to its literal calendar day.")
+
+        DayStartBoundary.setCurrentHour(8)
+        model.timeline.handleDayBoundaryChanged()
+        await model.refresh()
+        await model.timeline.load(precedingDay)
+        await model.timeline.load(calendarDay)
+        XCTAssertFalse(model.timeline.snapshots[precedingDay, default: []].isEmpty)
+        XCTAssertTrue(model.timeline.snapshots[calendarDay, default: []].isEmpty)
     }
 
     private func checkReceivedAudioProgress(dayOffset: Int) async throws {

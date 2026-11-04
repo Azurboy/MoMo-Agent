@@ -16,9 +16,10 @@ struct TimelineShareView: View {
         self.archive = archive
         self.configurationFingerprint = configurationFingerprint
         // Seed only when this date's share sheet opens; editing stays local to the sheet.
-        _start = State(initialValue: day.date())
+        let dayStart = day.startDate()
+        _start = State(initialValue: dayStart)
         let currentMinute = Calendar.current.dateInterval(of: .minute, for: Date())!.start
-        _end = State(initialValue: min(day.adding(days: 1).date(), currentMinute))
+        _end = State(initialValue: max(dayStart.addingTimeInterval(60), min(day.adding(days: 1).startDate(), currentMinute)))
     }
 
     var body: some View {

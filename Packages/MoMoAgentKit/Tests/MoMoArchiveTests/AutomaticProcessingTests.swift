@@ -234,8 +234,8 @@ struct AutomaticProcessingTests {
     @Test func sameEpochCanFinishTodayBeforeYesterdayAndPreservesReplayFloorAcrossReopen() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = try fixture.store()
-        let midnight = calendar.startOfDay(for: now)
-        let anchor = midnight.addingTimeInterval(-0.05)
+        let boundary = TimelineDay(now, calendar: calendar).startDate(calendar: calendar)
+        let anchor = boundary.addingTimeInterval(-0.05)
         _ = try await ingest(fixture, into: store, anchor: anchor)
         let second = try await ingest(fixture, into: store, anchor: anchor, start: 1_600, sequence: 1)
         try await store.applyReceipt(ReceiptApplied(receipt: #require(await store.pendingReceipts().first { $0.chunkID == second.manifest.chunkID })))
@@ -336,13 +336,13 @@ struct AutomaticProcessingTests {
     @Test func recordedTimezoneAndMidnightGraceDeterminePriority() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let envelope = try fixture.envelope(), frames = envelope.manifest.frames
-        let midnight = calendar.startOfDay(for: now)
-        let policy = ProcessingDatePolicy(now: midnight.addingTimeInterval(60), calendar: calendar)
-        let recent = try manifest(fixture, anchor: midnight.addingTimeInterval(-60), offset: 0)
+        let boundary = TimelineDay(now, calendar: calendar).startDate(calendar: calendar)
+        let policy = ProcessingDatePolicy(now: boundary.addingTimeInterval(60), calendar: calendar)
+        let recent = try manifest(fixture, anchor: boundary.addingTimeInterval(-60), offset: 0)
         #expect(policy.priority(frames, manifest: recent) == 0)
-        let old = try manifest(fixture, anchor: midnight.addingTimeInterval(-3_600), offset: 0)
+        let old = try manifest(fixture, anchor: boundary.addingTimeInterval(-3_600), offset: 0)
         #expect(policy.priority(frames, manifest: old) == 1)
-        let localToday = try manifest(fixture, anchor: midnight.addingTimeInterval(-3_600), offset: 28_800)
+        let localToday = try manifest(fixture, anchor: boundary.addingTimeInterval(-3_600), offset: 28_800)
         #expect(policy.priority(frames, manifest: localToday) == 0)
     }
 
