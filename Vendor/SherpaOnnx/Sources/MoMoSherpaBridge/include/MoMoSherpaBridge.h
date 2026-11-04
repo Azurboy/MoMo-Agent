@@ -31,6 +31,7 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     const char *embedding_path, const char *tokenizer_dir,
     int32_t num_threads, char *error, size_t error_capacity);
 void MoMoDestroyFunASRNanoRuntime(MoMoFunASRNanoRuntime *runtime);
+int32_t MoMoGetFunASRNanoAcceleratorMask(const MoMoFunASRNanoRuntime *runtime);
 // Returns 1 on success, -2 if cancelled, 0 on error.
 int MoMoTranscribeFunASRNano(
     MoMoFunASRNanoRuntime *runtime, const float *samples, int32_t sample_count,
