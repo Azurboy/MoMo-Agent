@@ -125,4 +125,43 @@ struct InboxHandoffTests {
         #expect(try await store.pendingReceipts() == [receipt])
         #expect(try await store.recordings().count == 1)
     }
+
+    @Test func duplicateVerifiedDeliveriesCoalesceOntoSinglePendingInboxEntry() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+        let envelope = try fixture.envelope()
+        let first = try fixture.deliver(envelope, to: store)
+        let second = try fixture.deliver(envelope, to: store)
+        let third = try fixture.deliver(envelope, to: store)
+        #expect(first.id == envelope.manifest.chunkID)
+        #expect(second.id == first.id)
+        #expect(third.id == first.id)
+        #expect(try store.inbox.pendingItems().count == 1)
+        guard case .accepted(let receipt) = try await store.commitReceivedChunk(first) else {
+            Issue.record("Expected coalesced inbox item to commit cleanly"); return
+        }
+        #expect(receipt.matches(envelope))
+        #expect(try store.inbox.pendingItems().isEmpty)
+    }
+
+    @Test func startupCleanupCollapsesLegacyRandomUUIDDuplicatesWithoutTouchingCorruptCopies() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let inboxRoot = fixture.root.appendingPathComponent("legacy-inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inboxRoot, withIntermediateDirectories: true)
+        let envelope = try fixture.envelope()
+        for _ in 0..<4 {
+            let dup = inboxRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: dup, withIntermediateDirectories: true)
+            try envelope.manifestData.write(to: dup.appendingPathComponent("manifest.json"))
+            try Data(envelope.manifestSHA256.utf8).write(to: dup.appendingPathComponent("manifest.sha256"))
+            try fixture.audio.write(to: dup.appendingPathComponent("audio"))
+        }
+        let custodian = try InboxCustodian(rootURL: inboxRoot)
+        let pending = try custodian.pendingItems()
+        #expect(pending.count == 1)
+        #expect(custodian.pendingItem(chunkID: envelope.manifest.chunkID)?.id == pending.first?.id)
+        #expect(custodian.pendingItem(manifestSHA256: envelope.manifestSHA256)?.id == pending.first?.id)
+    }
 }

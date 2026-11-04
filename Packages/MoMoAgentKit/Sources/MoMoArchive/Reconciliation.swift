@@ -87,7 +87,12 @@ extension ArchiveStore {
     private func reconcileState(_ item: ReconcileChunkIdentity, sourceDeviceID: UUID) throws -> ReconcileItemState {
         let session = try database.rows("SELECT source_device,deleted FROM sessions WHERE id=?", [.text(item.sessionID.uuidString)]).first
         if let session, session.string(0) != sourceDeviceID.uuidString { return .conflict }
-        let chunk = try database.rows("SELECT session_id,manifest,manifest_hash,audio_hash,relative_path,retention FROM chunks WHERE id=?", [.text(item.chunkID.uuidString)]).first
+        var chunk = try database.rows("SELECT session_id,manifest,manifest_hash,audio_hash,relative_path,retention FROM chunks WHERE id=?", [.text(item.chunkID.uuidString)]).first
+        if chunk == nil, session?.integer(1) != 1,
+           let pending = inbox.pendingItem(chunkID: item.chunkID) ?? inbox.pendingItem(manifestSHA256: item.manifestSHA256) {
+            _ = try? commitReceivedChunk(pending)
+            chunk = try database.rows("SELECT session_id,manifest,manifest_hash,audio_hash,relative_path,retention FROM chunks WHERE id=?", [.text(item.chunkID.uuidString)]).first
+        }
         if let chunk {
             guard chunk.string(0) == item.sessionID.uuidString,
                   chunk.string(2) == item.manifestSHA256, chunk.string(3) == item.audioSHA256 else { return .conflict }

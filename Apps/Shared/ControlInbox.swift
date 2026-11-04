@@ -19,11 +19,27 @@ final class ControlInbox: Sendable {
     private func preserveLocked(_ message: ControlMessage) throws {
         let data = try WireJSON.encode(message)
         guard data.count <= 16_384 else { throw ControlInboxError.oversizedMessage }
-        let destination = fileURL(for: message)
-        if FileManager.default.fileExists(atPath: destination.path) {
+        let id = Self.messageID(for: message)
+        let rank = Self.priorityRank(for: message)
+        let destination = Self.prefixedFileURL(in: directory, rank: rank, id: id)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
             guard try Data(contentsOf: destination) == data else { throw ControlInboxError.conflictingMessage }
             Self.applyProtection(to: destination)
             return
+        }
+        let legacy = Self.legacyFileURL(in: directory, id: id)
+        if fm.fileExists(atPath: legacy.path) {
+            guard try Data(contentsOf: legacy) == data else { throw ControlInboxError.conflictingMessage }
+            try fm.moveItem(at: legacy, to: destination)
+            Self.applyProtection(to: destination)
+            return
+        }
+        for otherRank in 0...3 where otherRank != rank {
+            let conflicting = Self.prefixedFileURL(in: directory, rank: otherRank, id: id)
+            if fm.fileExists(atPath: conflicting.path) {
+                throw ControlInboxError.conflictingMessage
+            }
         }
         try data.write(to: destination, options: Self.atomicWriteOptions)
         Self.applyProtection(to: destination)
@@ -75,56 +91,147 @@ final class ControlInbox: Sendable {
         }
     }
 
-    private struct RankedEntry {
+    private enum ParsedFilename {
+        case prefixed(rank: Int, idString: String)
+        case legacy(idString: String)
+        case invalid
+    }
+
+    private struct PendingSlot {
         let rank: Int
-        let filename: String
-        let sortKey: String
-        let message: ControlMessage
+        let idString: String
+        let idFilename: String
+        let url: URL
+        let predecoded: ControlMessage?
+    }
+
+    private static func parseFilename(_ filename: String) -> ParsedFilename {
+        guard filename.hasSuffix(".json") else { return .invalid }
+        let stem = String(filename.dropLast(5))
+        let utf8 = Array(stem.utf8)
+        if utf8.count == 39,
+           utf8[0] == UInt8(ascii: "p"),
+           utf8[1] >= UInt8(ascii: "0"), utf8[1] <= UInt8(ascii: "3"),
+           utf8[2] == UInt8(ascii: "-") {
+            let rank = Int(utf8[1] - UInt8(ascii: "0"))
+            let idPart = String(decoding: utf8.dropFirst(3), as: UTF8.self)
+            if let uuid = UUID(uuidString: idPart), uuid.uuidString == idPart {
+                return .prefixed(rank: rank, idString: idPart)
+            }
+            return .invalid
+        }
+        if utf8.count == 36, let uuid = UUID(uuidString: stem), uuid.uuidString == stem {
+            return .legacy(idString: stem)
+        }
+        return .invalid
+    }
+
+    private static func readAndValidateMessage(
+        at path: URL,
+        expectedIDString: String,
+        expectedRank: Int?
+    ) throws -> ControlMessage {
+        var info = stat()
+        guard lstat(path.path, &info) == 0,
+              (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              info.st_size <= 16_384 else {
+            throw ControlInboxError.oversizedMessage
+        }
+        let message = try WireJSON.decode(ControlMessage.self, from: Data(contentsOf: path))
+        guard messageID(for: message).uuidString == expectedIDString else {
+            throw ControlInboxError.conflictingMessage
+        }
+        if let expectedRank, priorityRank(for: message) != expectedRank {
+            throw ControlInboxError.conflictingMessage
+        }
+        return message
     }
 
     private func loadPendingLocked(limit: Int?, after cursor: String?) throws -> ControlInboxBatch {
         pruneExpiredQuarantineLocked()
-        var valid: [RankedEntry] = []
+        var slots: [PendingSlot] = []
         var failures: [String] = []
-        let paths = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let fm = FileManager.default
+        let paths = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
+        slots.reserveCapacity(paths.count)
         for path in paths {
-            do {
-                var info = stat()
-                guard lstat(path.path, &info) == 0,
-                      (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
-                      info.st_size <= 16_384 else {
-                    throw ControlInboxError.oversizedMessage
+            let filename = path.lastPathComponent
+            switch Self.parseFilename(filename) {
+            case .prefixed(let rank, let idString):
+                slots.append(PendingSlot(
+                    rank: rank,
+                    idString: idString,
+                    idFilename: "\(idString).json",
+                    url: path,
+                    predecoded: nil
+                ))
+            case .legacy(let idString):
+                do {
+                    let message = try Self.readAndValidateMessage(at: path, expectedIDString: idString, expectedRank: nil)
+                    let rank = Self.priorityRank(for: message)
+                    let migrated = directory.appendingPathComponent("p\(rank)-\(idString).json")
+                    let resolvedURL: URL
+                    if !fm.fileExists(atPath: migrated.path), (try? fm.moveItem(at: path, to: migrated)) != nil {
+                        Self.applyProtection(to: migrated)
+                        resolvedURL = migrated
+                    } else {
+                        resolvedURL = path
+                    }
+                    slots.append(PendingSlot(
+                        rank: rank,
+                        idString: idString,
+                        idFilename: "\(idString).json",
+                        url: resolvedURL,
+                        predecoded: message
+                    ))
+                } catch {
+                    quarantineCorruptFileLocked(path)
+                    failures.append(String(localized: "设备同步消息 \(path.deletingPathExtension().lastPathComponent) 无法读取。"))
                 }
-                let message = try WireJSON.decode(ControlMessage.self, from: Data(contentsOf: path))
-                let filename = path.lastPathComponent
-                guard filename == fileURL(for: message).lastPathComponent else {
-                    throw ControlInboxError.conflictingMessage
-                }
-                let rank = Self.priorityRank(for: message)
-                valid.append(RankedEntry(rank: rank, filename: filename, sortKey: "\(rank):\(filename)", message: message))
-            } catch {
+            case .invalid:
                 quarantineCorruptFileLocked(path)
                 failures.append(String(localized: "设备同步消息 \(path.deletingPathExtension().lastPathComponent) 无法读取。"))
             }
         }
 
-        valid.sort { lhs, rhs in
+        slots.sort { lhs, rhs in
             if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
-            return lhs.filename < rhs.filename
+            return lhs.idFilename < rhs.idFilename
         }
 
-        let remaining = valid.filter { entry in
-            Self.isAfterCursor(entryRank: entry.rank, filename: entry.filename, cursor: cursor)
+        let remainingSlots = slots.filter { slot in
+            Self.isAfterCursor(entryRank: slot.rank, filename: slot.idFilename, cursor: cursor)
         }
-        let selected = Array(remaining.prefix(limit ?? remaining.count))
+
+        var selected: [(sortKey: String, message: ControlMessage)] = []
+        if let limit { selected.reserveCapacity(limit) }
+        var hasMore = false
+
+        for (index, slot) in remainingSlots.enumerated() {
+            if let limit, selected.count >= limit {
+                hasMore = index < remainingSlots.count
+                break
+            }
+            do {
+                let message = try slot.predecoded ?? Self.readAndValidateMessage(
+                    at: slot.url,
+                    expectedIDString: slot.idString,
+                    expectedRank: slot.rank
+                )
+                selected.append((sortKey: "\(slot.rank):\(slot.idFilename)", message: message))
+            } catch {
+                quarantineCorruptFileLocked(slot.url)
+                failures.append(String(localized: "设备同步消息 \(slot.url.deletingPathExtension().lastPathComponent) 无法读取。"))
+            }
+        }
+
         return ControlInboxBatch(
             messages: selected.map(\.message),
             failures: failures,
             scannedThrough: selected.last?.sortKey,
-            hasMore: remaining.count > selected.count
+            hasMore: hasMore
         )
     }
 
@@ -157,10 +264,17 @@ final class ControlInbox: Sendable {
         let bytes = Array(cursor.utf8)
         if bytes.count > 2, bytes[1] == UInt8(ascii: ":"), bytes[0] >= UInt8(ascii: "0"), bytes[0] <= UInt8(ascii: "9") {
             let rank = Int(bytes[0] - UInt8(ascii: "0"))
-            let filename = String(decoding: bytes.dropFirst(2), as: UTF8.self)
-            return (rank, filename)
+            let rawName = String(decoding: bytes.dropFirst(2), as: UTF8.self)
+            return (rank, normalizeCursorFilename(rawName))
         }
-        return (nil, cursor)
+        return (nil, normalizeCursorFilename(cursor))
+    }
+
+    private static func normalizeCursorFilename(_ raw: String) -> String {
+        if case .prefixed(_, let idString) = parseFilename(raw) {
+            return "\(idString).json"
+        }
+        return raw
     }
 
     private func quarantineCorruptFileLocked(_ path: URL) {
@@ -199,28 +313,45 @@ final class ControlInbox: Sendable {
 
     func remove(_ message: ControlMessage) throws {
         try lock.withLock {
-            let path = fileURL(for: message)
-            guard FileManager.default.fileExists(atPath: path.path) else { return }
-            guard try Data(contentsOf: path) == WireJSON.encode(message) else { throw ControlInboxError.conflictingMessage }
-            try FileManager.default.removeItem(at: path)
+            let id = Self.messageID(for: message)
+            let rank = Self.priorityRank(for: message)
+            let fm = FileManager.default
+            let preferred = Self.prefixedFileURL(in: directory, rank: rank, id: id)
+            let legacy = Self.legacyFileURL(in: directory, id: id)
+            let target: URL
+            if fm.fileExists(atPath: preferred.path) {
+                target = preferred
+            } else if fm.fileExists(atPath: legacy.path) {
+                target = legacy
+            } else {
+                return
+            }
+            guard try Data(contentsOf: target) == WireJSON.encode(message) else { throw ControlInboxError.conflictingMessage }
+            try fm.removeItem(at: target)
         }
     }
 
-    private func fileURL(for message: ControlMessage) -> URL {
-        let id: UUID
+    private static func messageID(for message: ControlMessage) -> UUID {
         switch message {
-        case .receiverIdentity(let value): id = value.messageID
-        case .epochEnded(let value): id = value.messageID
-        case .epochInterrupted(let value): id = value.messageID
-        case .captureMark(let value): id = value.messageID
-        case .receipt(let value): id = value.messageID
-        case .receiptApplied(let value): id = value.messageID
-        case .deleteSession(let value): id = value.messageID
-        case .deleteApplied(let value): id = value.messageID
-        case .reconcileRequest(let value): id = value.messageID
-        case .reconcileResponse(let value): id = value.messageID
+        case .receiverIdentity(let value): return value.messageID
+        case .epochEnded(let value): return value.messageID
+        case .epochInterrupted(let value): return value.messageID
+        case .captureMark(let value): return value.messageID
+        case .receipt(let value): return value.messageID
+        case .receiptApplied(let value): return value.messageID
+        case .deleteSession(let value): return value.messageID
+        case .deleteApplied(let value): return value.messageID
+        case .reconcileRequest(let value): return value.messageID
+        case .reconcileResponse(let value): return value.messageID
         }
-        return directory.appendingPathComponent(id.uuidString).appendingPathExtension("json")
+    }
+
+    private static func prefixedFileURL(in directory: URL, rank: Int, id: UUID) -> URL {
+        directory.appendingPathComponent("p\(rank)-\(id.uuidString).json")
+    }
+
+    private static func legacyFileURL(in directory: URL, id: UUID) -> URL {
+        directory.appendingPathComponent(id.uuidString).appendingPathExtension("json")
     }
 
     private static var atomicWriteOptions: Data.WritingOptions {

@@ -1,5 +1,13 @@
+import Darwin
 import Foundation
 import MoMoContracts
+
+struct VerifiedChunkAudioStamp: Equatable {
+    let audio: FileStatStamp
+    let manifest: FileStatStamp
+    let audioSHA256: String
+    let manifestSHA256: String
+}
 
 public struct ReceiptOutboxEntry: Sendable {
     public let sequence: Int64
@@ -33,6 +41,7 @@ public actor ArchiveStore {
     var compactedBytesPendingVacuum: Int64 = 0
     var verifiedRecordingFilesCache: [UUID: VerifiedRecordingFilesEntry] = [:]
     var verifiedRecordingFilesDataVersion: Int64 = -1
+    var verifiedChunkAudioStamps: [UUID: VerifiedChunkAudioStamp] = [:]
     var voiceprintBankCache: VoiceprintBankCache?
     var pendingSpeakerRematchSessionIDs: Set<UUID> = []
     #if DEBUG
@@ -127,11 +136,30 @@ public actor ArchiveStore {
         }
     }
 
-    public func commitReceivedChunk(_ item: InboxItem) throws -> ReceiveResult {
-        try commitReceivedChunk(item, preverifiedAudioSHA256: nil)
+    public func hasCommittedPresentChunk(id: UUID) -> Bool {
+        ((try? database.rows("SELECT 1 FROM chunks WHERE id=? AND retention='present' LIMIT 1", [.text(id.uuidString)]).isEmpty) == false)
     }
 
-    func commitReceivedChunk(_ item: InboxItem, preverifiedAudioSHA256: String?) throws -> ReceiveResult {
+    public nonisolated static func quickInboxChunkIdentity(_ item: InboxItem) -> UUID? {
+        try? loadEnvelopeFromDisk(item).manifest.chunkID
+    }
+
+    public nonisolated static func preverifyInboxItem(_ item: InboxItem) -> (chunkID: UUID, manifestSHA256: String, audioSHA256: String)? {
+        guard let envelope = try? loadEnvelopeFromDisk(item) else { return nil }
+        let manifest = envelope.manifest
+        guard manifest.representation == .full else { return nil }
+        let temporaryAudio = item.directoryURL.appendingPathComponent("audio")
+        guard FileManager.default.fileExists(atPath: temporaryAudio.path),
+              let size = try? temporaryAudio.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              Int64(size) == manifest.byteCount,
+              (try? ContentHash.sha256(fileAt: temporaryAudio)) == manifest.audioSHA256,
+              (try? validateAudio(at: temporaryAudio, manifest: manifest)) != nil else {
+            return nil
+        }
+        return (manifest.chunkID, envelope.manifestSHA256, manifest.audioSHA256)
+    }
+
+    public func commitReceivedChunk(_ item: InboxItem, preverifiedAudioSHA256: String? = nil) throws -> ReceiveResult {
         guard item.directoryURL.deletingLastPathComponent().standardizedFileURL.path == inbox.rootURL.standardizedFileURL.path,
               item.directoryURL.lastPathComponent == item.id.uuidString else {
             throw ArchiveError.invalidInbox
@@ -198,6 +226,13 @@ public actor ArchiveStore {
             envelope: envelope,
             target: target,
             skipSourceAudioValidation: preverifiedAudioSHA256 == manifest.audioSHA256 && files.fileExists(atPath: item.directoryURL.appendingPathComponent("audio").path)
+        )
+        recordVerifiedChunkAudioStamp(
+            chunkID: manifest.chunkID,
+            audioURL: target,
+            manifestURL: target.appendingPathExtension("manifest.json"),
+            audioSHA256: manifest.audioSHA256,
+            manifestSHA256: envelope.manifestSHA256
         )
         #if DEBUG && os(macOS)
         receiveBoundaryObserver?(.originalsStoredBeforeCommit)
@@ -315,7 +350,16 @@ public actor ArchiveStore {
                 pathsSafe = false
             }
             let isValid: Bool
-            if pathsSafe {
+            let stampedBeforeCheck = pathsSafe && hasVerifiedChunkAudioStamp(
+                chunkID: envelope.manifest.chunkID,
+                audioURL: audioURL,
+                manifestURL: manifestURL,
+                audioSHA256: envelope.manifest.audioSHA256,
+                manifestSHA256: envelope.manifestSHA256
+            )
+            if stampedBeforeCheck {
+                isValid = true
+            } else if pathsSafe {
                 let worker = Task.detached(priority: .userInitiated) {
                     try Self.checkStoredAudioHashes(
                         audioURL: audioURL,
@@ -342,10 +386,20 @@ public actor ArchiveStore {
             }
             if live.integer(1) == 0, live.string(0) == "present" {
                 if isValid {
+                    if !stampedBeforeCheck {
+                        recordVerifiedChunkAudioStamp(
+                            chunkID: envelope.manifest.chunkID,
+                            audioURL: audioURL,
+                            manifestURL: manifestURL,
+                            audioSHA256: envelope.manifest.audioSHA256,
+                            manifestSHA256: envelope.manifestSHA256
+                        )
+                    }
                     if live.integer(2) == 0 {
                         entries.append(ReceiptOutboxEntry(sequence: rowSequence, receipt: try WireJSON.decode(Receipt.self, from: payloadData)))
                     }
                 } else {
+                    verifiedChunkAudioStamps.removeValue(forKey: envelope.manifest.chunkID)
                     try database.execute("UPDATE chunks SET retention='missing_unexpected' WHERE id=? AND retention='present'", [.text(envelope.manifest.chunkID.uuidString)])
                     verifiedRecordingFilesCache.removeValue(forKey: envelope.manifest.sessionID)
                 }
@@ -492,6 +546,13 @@ public actor ArchiveStore {
             return deletion
         }
         verifiedRecordingFilesCache.removeValue(forKey: id)
+        if let deletedChunks = try? database.rows("SELECT id FROM chunks WHERE session_id=?", [.text(id.uuidString)]) {
+            for row in deletedChunks {
+                if let chunkID = try? row.requireUUID(0) {
+                    verifiedChunkAudioStamps.removeValue(forKey: chunkID)
+                }
+            }
+        }
         transcriptBlockPrefixCache.removeValue(forKey: id)
         speakerObservationEvidenceCache.removeValue(forKey: id)
         speakerObservationSessionOrder.removeAll { $0 == id }
@@ -664,6 +725,53 @@ public actor ArchiveStore {
         guard let row = try database.rows("SELECT payload FROM receipt_outbox WHERE chunk_id=?", [.text(id.uuidString)]).first else { throw ArchiveError.invalidInbox }
         return try WireJSON.decode(Receipt.self, from: row.requireData(0))
     }
+    nonisolated static func readVerifiedChunkStamps(audioURL: URL, manifestURL: URL) -> (audio: FileStatStamp, manifest: FileStatStamp)? {
+        guard let audio = FileStatStamp.read(at: audioURL),
+              let manifest = FileStatStamp.read(at: manifestURL),
+              (audio.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+              (manifest.mode & UInt16(S_IFMT)) == UInt16(S_IFREG) else {
+            return nil
+        }
+        return (audio, manifest)
+    }
+
+    func hasVerifiedChunkAudioStamp(
+        chunkID: UUID,
+        audioURL: URL,
+        manifestURL: URL,
+        audioSHA256: String,
+        manifestSHA256: String
+    ) -> Bool {
+        guard let cached = verifiedChunkAudioStamps[chunkID],
+              cached.audioSHA256 == audioSHA256,
+              cached.manifestSHA256 == manifestSHA256,
+              let live = Self.readVerifiedChunkStamps(audioURL: audioURL, manifestURL: manifestURL),
+              cached.audio == live.audio,
+              cached.manifest == live.manifest else {
+            return false
+        }
+        return true
+    }
+
+    func recordVerifiedChunkAudioStamp(
+        chunkID: UUID,
+        audioURL: URL,
+        manifestURL: URL,
+        audioSHA256: String,
+        manifestSHA256: String
+    ) {
+        guard let live = Self.readVerifiedChunkStamps(audioURL: audioURL, manifestURL: manifestURL) else { return }
+        if verifiedChunkAudioStamps.count >= 4_096, verifiedChunkAudioStamps[chunkID] == nil {
+            verifiedChunkAudioStamps.removeAll(keepingCapacity: true)
+        }
+        verifiedChunkAudioStamps[chunkID] = VerifiedChunkAudioStamp(
+            audio: live.audio,
+            manifest: live.manifest,
+            audioSHA256: audioSHA256,
+            manifestSHA256: manifestSHA256
+        )
+    }
+
     func validStoredAudio(_ url: URL, envelope: ManifestEnvelope) throws -> Bool {
         #if DEBUG
         audioContentValidationCount += 1
@@ -671,14 +779,39 @@ public actor ArchiveStore {
         let manifestURL = url.appendingPathExtension("manifest.json")
         try validateRecordingPath(url)
         try validateRecordingPath(manifestURL)
-        return try Self.checkStoredAudioHashes(
+        let chunkID = envelope.manifest.chunkID
+        if hasVerifiedChunkAudioStamp(
+            chunkID: chunkID,
+            audioURL: url,
+            manifestURL: manifestURL,
+            audioSHA256: envelope.manifest.audioSHA256,
+            manifestSHA256: envelope.manifestSHA256
+        ) {
+            return true
+        }
+        let valid = try Self.checkStoredAudioHashes(
             audioURL: url,
             manifestURL: manifestURL,
             audioSHA256: envelope.manifest.audioSHA256,
             manifestSHA256: envelope.manifestSHA256
         )
+        if valid {
+            recordVerifiedChunkAudioStamp(
+                chunkID: chunkID,
+                audioURL: url,
+                manifestURL: manifestURL,
+                audioSHA256: envelope.manifest.audioSHA256,
+                manifestSHA256: envelope.manifestSHA256
+            )
+        } else {
+            verifiedChunkAudioStamps.removeValue(forKey: chunkID)
+        }
+        return valid
     }
-    func removeInbox(_ item: InboxItem) throws { try files.removeItem(at: item.directoryURL) }
+    func removeInbox(_ item: InboxItem) throws {
+        try files.removeItem(at: item.directoryURL)
+        inbox.noteRemoved(itemID: item.id)
+    }
     func recordingDirectory(manifest: ChunkManifest) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)

@@ -12,6 +12,8 @@ public struct FileTransferAttempt: Codable, Sendable, Equatable {
     public var outstanding: Bool
     public var cancellationRequestedAt: Date?
     public var retryNotBefore: Date?
+    public var completedAt: Date? = nil
+    public var receiptWaitDelay: TimeInterval? = nil
 }
 
 public struct FileTransferObservation: Sendable {
@@ -42,6 +44,33 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
     public mutating func resetPeer() {
         controlGeneration = UUID()
         acceptsLegacyControlCallbacks = false
+        clearCompletedSubmissions()
+    }
+
+    public mutating func clearCompletedSubmissions(chunkIDs: [UUID]? = nil) {
+        if let chunkIDs {
+            for id in chunkIDs {
+                guard var entry = attempts[id] else { continue }
+                entry.completedAt = nil
+                entry.receiptWaitDelay = nil
+                if !entry.outstanding && entry.cancellationRequestedAt == nil && entry.retryNotBefore == nil {
+                    attempts.removeValue(forKey: id)
+                } else {
+                    attempts[id] = entry
+                }
+            }
+            return
+        }
+        for id in Array(attempts.keys) {
+            guard var entry = attempts[id] else { continue }
+            entry.completedAt = nil
+            entry.receiptWaitDelay = nil
+            if !entry.outstanding && entry.cancellationRequestedAt == nil && entry.retryNotBefore == nil {
+                attempts.removeValue(forKey: id)
+            } else {
+                attempts[id] = entry
+            }
+        }
     }
 
     public mutating func bindControlScope(_ scopeID: UUID) {
@@ -104,6 +133,11 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
                 if id != preservingAudioBlockChunkID {
                     attempts.removeValue(forKey: id)
                 }
+            } else if old?.cancellationRequestedAt == nil, let completedAt = old?.completedAt {
+                let retentionBudget = max(Self.lease, old?.receiptWaitDelay ?? Self.lease)
+                if now.timeIntervalSince(completedAt) >= retentionBudget {
+                    attempts.removeValue(forKey: id)
+                }
             } else if old?.cancellationRequestedAt == nil, let progressAt = old?.lastProgressAt,
                       now.timeIntervalSince(progressAt) >= Self.lease {
                 attempts.removeValue(forKey: id)
@@ -125,10 +159,12 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
 
     public mutating func begin(_ envelope: ManifestEnvelope, now: Date) throws -> UUID {
         guard try canAdmit(envelope, now: now) else { throw LinkError.fileAttemptNotReady }
+        let priorWaitDelay = attempts[envelope.manifest.chunkID]?.receiptWaitDelay
         let attemptID = UUID()
         attempts[envelope.manifest.chunkID] = FileTransferAttempt(chunkID: envelope.manifest.chunkID,
             manifestSHA256: envelope.manifestSHA256, attemptID: attemptID, startedAt: now,
-            lastProgressAt: now, completedUnits: 0, outstanding: true)
+            lastProgressAt: now, completedUnits: 0, outstanding: true,
+            completedAt: nil, receiptWaitDelay: priorWaitDelay)
         return attemptID
     }
 
@@ -162,9 +198,18 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
         return current.attemptID == attemptID && current.cancellationRequestedAt == nil
     }
 
-    public mutating func finish(chunkID: UUID, attemptID: UUID?) {
+    public mutating func finish(chunkID: UUID, attemptID: UUID?, succeededAt: Date? = nil) {
         guard attempts[chunkID]?.attemptID == attemptID else { return }
         attempts[chunkID]?.outstanding = false
+        if let succeededAt {
+            let waitDuration = attempts[chunkID]?.receiptWaitDelay.map {
+                min(LinkSubmissionState.maximumReceiptWaitDelay, $0 * 2)
+            } ?? LinkSubmissionState.initialReceiptWaitDelay
+            attempts[chunkID]?.completedAt = succeededAt
+            attempts[chunkID]?.receiptWaitDelay = waitDuration
+        } else {
+            attempts[chunkID]?.completedAt = nil
+        }
     }
 
     public mutating func confirm(chunkID: UUID) { attempts.removeValue(forKey: chunkID) }
