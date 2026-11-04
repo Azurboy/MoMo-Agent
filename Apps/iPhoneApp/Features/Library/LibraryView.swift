@@ -38,6 +38,7 @@ struct LibraryView: View {
     @State private var dateDraft = Date()
     @State private var pendingDay: TimelineDay?
     @State private var page = ScrollPosition(idType: TimelineDay.self)
+    @State private var isPagerStuck = false
     @State private var selectedWindow: TimelineDestination?
     @State private var recordingID: UUID?
     @State private var navigationFailure: String?
@@ -122,7 +123,9 @@ struct LibraryView: View {
         .task { page.scrollTo(id: timeline.selectedDay, anchor: .leading); await refresh() }
         .task(id: timeline.selectedDay) { await timeline.load(timeline.selectedDay) }
         .onChange(of: page.viewID(type: TimelineDay.self)) { _, day in
-            if let day { timeline.select(day) }
+            guard readingStates.isPagerSettled, page.isPositionedByUser,
+                  let day, readingStates.alignedDay(in: timeline.days) == day else { return }
+            timeline.select(day)
         }
         .onChange(of: dateRange) {
             if let pendingDay, !dateRange.isUnknown { select(pendingDay) }
@@ -318,15 +321,51 @@ struct LibraryView: View {
             .scrollIndicators(.hidden)
             .frame(width: geometry.size.width, height: geometry.size.height)
             .accessibilityIdentifier("timeline.dayPager")
-            .onScrollGeometryChange(for: TimelinePagerLayout.self) {
-                TimelinePagerLayout(viewportWidth: $0.containerSize.width, contentWidth: $0.contentSize.width)
-            } action: { _, layout in
-                guard layout.viewportWidth > 0, layout.contentWidth >= layout.viewportWidth else { return }
-                page.scrollTo(id: timeline.selectedDay, anchor: .leading)
+            .onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting {
+                    readingStates.pagerPhase = phase
+                    readingStates.pagerInteracted = true
+                } else if phase == .idle {
+                    commitSettledDay()
+                    readingStates.pagerPhase = .idle
+                } else {
+                    readingStates.pagerPhase = phase
+                }
+                updatePagerStuckState()
+            }
+            .onScrollGeometryChange(for: TimelinePagerSnapshot.self) {
+                TimelinePagerSnapshot($0)
+            } action: { old, snapshot in
+                readingStates.snapshot = snapshot
+                let layoutChanged = old.viewportWidth != snapshot.viewportWidth
+                    || old.contentWidth != snapshot.contentWidth
+                if layoutChanged, snapshot.viewportWidth > 0, snapshot.contentWidth >= snapshot.viewportWidth {
+                    if readingStates.isPagerSettled {
+                        readingStates.pendingDaysSync = false
+                        page.scrollTo(id: timeline.selectedDay, anchor: .leading)
+                    } else {
+                        readingStates.pendingDaysSync = true
+                    }
+                }
+                updatePagerStuckState()
             }
             .onChange(of: timeline.days, initial: true) {
                 // Older dates can be inserted before the current page after the archive loads.
+                guard readingStates.isPagerSettled else {
+                    readingStates.pendingDaysSync = true
+                    return
+                }
+                readingStates.pendingDaysSync = false
                 page.scrollTo(id: timeline.selectedDay, anchor: .leading)
+            }
+            .task(id: isPagerStuck) {
+                guard isPagerStuck else { return }
+                do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                guard readingStates.isMisalignedWhileIdle else {
+                    isPagerStuck = false
+                    return
+                }
+                snapMisalignedPager()
             }
         }
     }
@@ -429,6 +468,44 @@ struct LibraryView: View {
         }
     }
 
+    private func updatePagerStuckState() {
+        let stuck = readingStates.isMisalignedWhileIdle
+        if isPagerStuck != stuck { isPagerStuck = stuck }
+    }
+
+    private func commitSettledDay() {
+        let wasUserSwipe = readingStates.pagerInteracted
+        readingStates.pagerInteracted = false
+        if wasUserSwipe {
+            let target = readingStates.nearestDay(in: timeline.days)
+                ?? page.viewID(type: TimelineDay.self).flatMap({ timeline.days.contains($0) ? $0 : nil })
+                ?? timeline.selectedDay
+            timeline.select(target)
+        }
+        if readingStates.pendingDaysSync {
+            readingStates.pendingDaysSync = false
+            page.scrollTo(id: timeline.selectedDay, anchor: .leading)
+        }
+    }
+
+    private func snapMisalignedPager() {
+        let target: TimelineDay
+        if readingStates.pagerInteracted || page.isPositionedByUser {
+            readingStates.pagerInteracted = false
+            target = readingStates.nearestDay(in: timeline.days)
+                ?? page.viewID(type: TimelineDay.self).flatMap({ timeline.days.contains($0) ? $0 : nil })
+                ?? timeline.selectedDay
+            timeline.select(target)
+        } else {
+            target = timeline.selectedDay
+        }
+        readingStates.pendingDaysSync = false
+        isPagerStuck = false
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) {
+            page.scrollTo(id: target, anchor: .leading)
+        }
+    }
+
     private func select(_ day: TimelineDay) {
         guard dateRange.canRequest(day) else { pendingDay = nil; return }
         guard !dateRange.isUnknown else {
@@ -438,6 +515,7 @@ struct LibraryView: View {
         }
         pendingDay = nil
         let adjacent = day == timeline.selectedDay.adding(days: 1) || day == timeline.selectedDay.adding(days: -1)
+        readingStates.pagerInteracted = false
         timeline.select(day)
         withAnimation(reduceMotion || !adjacent ? nil : .smooth(duration: 0.25)) {
             page.scrollTo(id: day, anchor: .leading)
@@ -459,19 +537,68 @@ struct LibraryView: View {
 
 private struct LibraryTimelineSearch: Equatable { let query: String; let revision: UInt64 }
 
-private struct TimelinePagerLayout: Equatable {
-    let viewportWidth: CGFloat
-    let contentWidth: CGFloat
+private struct TimelinePagerSnapshot: Equatable {
+    var viewportWidth: CGFloat = 0
+    var contentWidth: CGFloat = 0
+    var nearestIndex: Int = 0
+    var isAligned = true
+
+    init() {}
+
+    init(_ geometry: ScrollGeometry) {
+        let width = geometry.containerSize.width
+        let content = geometry.contentSize.width
+        self.viewportWidth = width
+        self.contentWidth = content
+        guard width > 1, content >= width else {
+            self.nearestIndex = 0
+            self.isAligned = true
+            return
+        }
+        let offset = geometry.contentOffset.x + geometry.contentInsets.leading
+        let maxOffset = max(0, content - width)
+        let clampedIndex = max(0, Int((min(max(offset, 0), maxOffset) / width).rounded()))
+        let alignedOffset = CGFloat(clampedIndex) * width
+        self.nearestIndex = clampedIndex
+        self.isAligned = offset >= -1.5 && offset <= maxOffset + 1.5 && abs(offset - alignedOffset) <= 1.5
+    }
 }
 
 // Each mounted day observes only its own scroll position. The store keeps positions when pages unmount.
 @MainActor private final class TimelineDayReadingStates {
     private var values: [TimelineDay: TimelineDayReadingState] = [:]
+    var pagerPhase: ScrollPhase = .idle
+    var pagerInteracted = false
+    var pendingDaysSync = false
+    var snapshot = TimelinePagerSnapshot()
+
+    var isPagerSettled: Bool {
+        pagerPhase == .idle && !pagerInteracted
+    }
+
+    var isMisalignedWhileIdle: Bool {
+        pagerPhase == .idle
+            && snapshot.viewportWidth > 1
+            && snapshot.contentWidth >= snapshot.viewportWidth
+            && !snapshot.isAligned
+    }
+
     func state(for day: TimelineDay) -> TimelineDayReadingState {
         if let state = values[day] { return state }
         let state = TimelineDayReadingState()
         values[day] = state
         return state
+    }
+
+    func nearestDay(in days: [TimelineDay]) -> TimelineDay? {
+        guard !days.isEmpty, snapshot.viewportWidth > 1 else { return nil }
+        let index = min(max(snapshot.nearestIndex, 0), days.count - 1)
+        return days[index]
+    }
+
+    func alignedDay(in days: [TimelineDay]) -> TimelineDay? {
+        guard snapshot.isAligned else { return nil }
+        return nearestDay(in: days)
     }
 }
 
