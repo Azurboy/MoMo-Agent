@@ -52,6 +52,10 @@
 	<string>允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>允许 MoMo 与「备忘录」「提醒事项」「日历」协作，帮你读取、记录和整理备忘与待办。</string>
+	<key>NSLocationUsageDescription</key>
+	<string>允许 MoMo 在生成分时段记忆手账插画时关联所在街区或地点名称，仅保存在本机。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>允许 MoMo 在生成分时段记忆手账插画时关联所在街区或地点名称，仅保存在本机。</string>
 	<key>MoMoDataFolder</key>
 	<string>$(MOMO_MAC_DATA_FOLDER)</string>
 	<key>MoMoLocalPort</key>

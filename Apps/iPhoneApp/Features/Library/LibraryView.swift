@@ -35,6 +35,7 @@ struct LibraryView: View {
     @State private var searching = false
     @State private var choosingDate = false
     @State private var sharingDay: TimelineDay?
+    @State private var journalDay: TimelineDay?
     @State private var dateDraft = Date()
     @State private var pendingDay: TimelineDay?
     @State private var page = ScrollPosition(idType: TimelineDay.self)
@@ -99,6 +100,15 @@ struct LibraryView: View {
                 requestWatchStatus: requestWatchStatus)
         }
         .toolbar {
+            if Self.makeJournalInput(for: timeline.selectedDay, timeline: timeline) != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { journalDay = timeline.selectedDay } label: {
+                        Image(systemName: "photo.artframe")
+                    }
+                    .accessibilityLabel("每日记忆手账")
+                    .accessibilityIdentifier("timeline.journal")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { sharingDay = timeline.selectedDay } label: {
                     Label("分享", systemImage: "square.and.arrow.up").labelStyle(.titleAndIcon)
@@ -116,6 +126,11 @@ struct LibraryView: View {
         .sheet(isPresented: $choosingDate) { datePicker }
         .sheet(item: $sharingDay) { day in
             TimelineShareView(day: day, archive: model.archive, configurationFingerprint: timeline.configurationFingerprint)
+        }
+        .sheet(item: $journalDay) { day in
+            if let input = Self.makeJournalInput(for: day, timeline: timeline) {
+                DailyMemoryJournalSheet(input: input)
+            }
         }
         .alert("资料暂不可用", isPresented: Binding(get: { navigationFailure != nil }, set: { if !$0 { navigationFailure = nil } })) {
             Button("好", role: .cancel) { navigationFailure = nil }
@@ -307,6 +322,8 @@ struct LibraryView: View {
                     ForEach(timeline.days) { day in
                         TimelineDayPage(day: day, timeline: timeline, reading: readingStates.state(for: day),
                             transcription: transcription, speechFailure: speechFailure, dateRange: dateRange,
+                            journalInput: Self.makeJournalInput(for: day, timeline: timeline),
+                            openJournal: { journalDay = day },
                             refresh: refresh, open: { selectedWindow = $0 })
                             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                             .id(day)
@@ -534,6 +551,39 @@ struct LibraryView: View {
             }
         }
     }
+
+    fileprivate static func makeJournalInput(for day: TimelineDay, timeline: TimelineModel) -> DailyJournalInput? {
+        let windows = timeline.listWindows[day] ?? []
+        guard !windows.isEmpty else { return nil }
+        var segments: [DailyJournalSegment] = []
+        for window in windows {
+            guard window.paragraphs.contains(where: \.hasReadableText) else { continue }
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(secondsFromGMT: window.id.timezoneOffset) ?? .current
+            let hour = cal.component(.hour, from: window.id.start)
+            let ts = window.id.start.timeIntervalSince1970
+            if let summary = timeline.summary(for: window) {
+                let clean = MarkdownDocument.plainTextPreview(summary)
+                if !clean.isEmpty {
+                    segments.append(DailyJournalSegment(hour: hour, duration: window.speechDuration, text: clean, isSummary: true, timestamp: ts))
+                    continue
+                }
+            }
+            let preview = TimelinePresentation.preview(window, summary: nil)
+            if !preview.isEmpty {
+                segments.append(DailyJournalSegment(hour: hour, duration: window.speechDuration, text: preview, isSummary: false, timestamp: ts))
+            }
+        }
+        guard !segments.isEmpty else { return nil }
+        let key = String(format: "%04d-%02d-%02d", day.year, day.month, day.day)
+        let input = DailyJournalInput(
+            dayKey: key,
+            dateLabel: TimelineDate.day(day),
+            dayStartHour: TimelineDay.currentStartHour,
+            segments: segments
+        )
+        return input.hasReadableContent ? input : nil
+    }
 }
 
 private struct LibraryTimelineSearch: Equatable { let query: String; let revision: UInt64 }
@@ -615,6 +665,8 @@ private struct TimelineDayPage: View {
     let transcription: TranscriptionSnapshot?
     let speechFailure: String?
     let dateRange: TimelineDateRange
+    let journalInput: DailyJournalInput?
+    let openJournal: () -> Void
     let refresh: () async -> Void
     let open: (TimelineDestination) -> Void
 
@@ -652,6 +704,10 @@ private struct TimelineDayPage: View {
                         }
                     }
                     .id(window.id)
+                }
+                if let journalInput, !windows.isEmpty {
+                    DailyMemoryJournalBanner(input: journalInput, openSheet: openJournal)
+                        .padding(.top, 8)
                 }
                 if let failure = timeline.failures[day] {
                     Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
