@@ -77,11 +77,11 @@ extension RecordingStore {
         do {
             saved = try reconciliationRequest(id: response.requestID)
         } catch RecordingReconciliationError.unknownRequest {
-            guard let receiver = try boundReceiver() else { throw RecordingError.receiverNotBound }
-            if receiver.deviceID != response.receiverDeviceID || receiver.libraryInstanceID != response.libraryInstanceID {
-                var result = RecordingReconciliationOutcome(); result.ignored = true; return result
-            }
-            throw RecordingReconciliationError.unknownRequest
+            guard try boundReceiver() != nil else { throw RecordingError.receiverNotBound }
+            // Pruned historical or superseded request responses are never the active round's request
+            // (pruneHistoricalLedger always preserves reconciliation_round.request_id). Ignore cleanly
+            // so duplicate WatchConnectivity transferUserInfo replies never poison ControlInbox.
+            var result = RecordingReconciliationOutcome(); result.ignored = true; return result
         }
         guard try response.matches(saved.request) else { throw RecordingReconciliationError.responseMismatch }
         guard let receiver = try boundReceiver() else { throw RecordingError.receiverNotBound }
@@ -90,7 +90,10 @@ extension RecordingStore {
             var result = RecordingReconciliationOutcome(); result.ignored = true; return result
         }
         if saved.processed { var result = RecordingReconciliationOutcome(); result.ignored = true; return result }
-        guard try reconciliationRound()?.requestID == response.requestID else { throw RecordingReconciliationError.responseMismatch }
+        guard try reconciliationRound()?.requestID == response.requestID else {
+            try database.execute("UPDATE reconciliation_requests SET processed=1 WHERE id=?", [.text(response.requestID.uuidString)])
+            var result = RecordingReconciliationOutcome(); result.ignored = true; return result
+        }
         var outcome = RecordingReconciliationOutcome()
         var deletedSessions: Set<UUID> = []
         for result in response.results {
@@ -102,7 +105,7 @@ extension RecordingStore {
             }
         }
         for result in response.results {
-            guard let chunk = try chunk(id: result.chunkID) else { throw RecordingError.missingChunk(result.chunkID) }
+            guard let chunk = try chunk(id: result.chunkID) else { continue }
             if chunk.state == .deleted || deletedSessions.contains(chunk.envelope.manifest.sessionID) { continue }
             switch result.state {
             case .received(let receipt):
@@ -114,6 +117,7 @@ extension RecordingStore {
                     }
                 }
                 catch RecordingError.receiptNeedsReconciliation { outcome.requiresFreshRequest = true }
+                catch RecordingError.deletedSession, RecordingError.missingChunk { continue }
             case .unknown:
                 if try chunk.state != .ready || hasPersistedReceipt(chunkID: result.chunkID) {
                     try holdReceipts(chunkID: result.chunkID, requestID: response.requestID)
@@ -295,7 +299,7 @@ extension RecordingStore {
         now: Date = Date(),
         retentionInterval: TimeInterval = 14 * 86_400,
         minimumRetainedChunks: Int = 512,
-        retainedProcessedRequests: Int = 8,
+        retainedProcessedRequests: Int = 128,
         batchLimit: Int = 128
     ) throws -> Int {
         guard now.timeIntervalSince1970.isFinite, retentionInterval >= 0,

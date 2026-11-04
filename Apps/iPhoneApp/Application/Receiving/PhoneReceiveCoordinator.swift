@@ -59,11 +59,11 @@ final class PhoneReceiveCoordinator {
         if let transport { peerState = transport.peerState }
         do {
             let response = try await archive.receiveReconcileRequest(request)
-            if peerState == .available {
-                try? transport?.allowControlReplay(.reconcileResponse(response))
-            } else {
-                try await archive.markReconcileResponseSubmitted(messageID: response.messageID)
-            }
+            // Interactive replyHandler directly delivers the ReconcileResponse to Watch; marking it
+            // submitted prevents reconcile() from flooding WatchConnectivity transferUserInfo with
+            // hundreds of duplicate responses ahead of outbound receipts. If the reply is lost in
+            // transit, Watch retains its reconciliation_round.request_id and retries the request.
+            try await archive.markReconcileResponseSubmitted(messageID: response.messageID)
             try? controls.remove(message)
             return .reconcileResponse(response)
         } catch ArchiveReconciliationError.receiverMismatch {
