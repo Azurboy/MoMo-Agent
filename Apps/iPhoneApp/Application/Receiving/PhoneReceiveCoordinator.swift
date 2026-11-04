@@ -340,19 +340,43 @@ final class PhoneReceiveCoordinator {
                 }
             } catch { onFailure(String(localized: "无法读取设备同步消息：\(error.localizedDescription)")) }
             do {
-                var receivedSinceNotification = 0
-                // Yield Archive between files and wake processing before a large inbox is exhausted.
-                for item in try await archive.listPendingInboxItems() {
+                let inboxPageLimit = 64
+                let listed = try await archive.listPendingInboxItems(limit: inboxPageLimit + 1)
+                if listed.count > inboxPageLimit {
+                    requested = true
+                }
+                var notifiedFirstAccepted = false
+                var lastChangedNotificationUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+                var processedInPage = 0
+                // Process bounded pages and yield between files so outbound receipts/reconcile responses
+                // and live transcription are never starved behind a large duplicate inbox.
+                for item in listed.prefix(inboxPageLimit) {
                     guard !Task.isCancelled else { return }
                     do {
-                        switch try await archive.commitReceivedChunk(item) {
+                        let candidateChunkID = ArchiveStore.quickInboxChunkIdentity(item)
+                        let preverifiedAudioSHA256: String?
+                        if let candidateChunkID, !(await archive.hasCommittedPresentChunk(id: candidateChunkID)) {
+                            let preverified = await Task.detached(priority: .userInitiated) {
+                                ArchiveStore.preverifyInboxItem(item)
+                            }.value
+                            preverifiedAudioSHA256 = preverified?.audioSHA256
+                        } else {
+                            preverifiedAudioSHA256 = nil
+                        }
+                        switch try await archive.commitReceivedChunk(item, preverifiedAudioSHA256: preverifiedAudioSHA256) {
                         case .missing:
                             contentsChanged = true
                             onFailure(String(localized: "已接收的原音文件缺失，请在资料库检查。"))
                         case .accepted(let receipt), .restored(let receipt):
                             contentsChanged = true
-                            receivedSinceNotification += 1
                             onAudioReceived(receipt.chunkID)
+                            let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+                            if !notifiedFirstAccepted || nowUptime - lastChangedNotificationUptime >= 1.5 {
+                                notifiedFirstAccepted = true
+                                lastChangedNotificationUptime = nowUptime
+                                await onChanged()
+                                contentsChanged = false
+                            }
                         case .duplicate, .deleted, .expired, .noLongerPending: break
                         }
                     } catch {
@@ -360,10 +384,9 @@ final class PhoneReceiveCoordinator {
                         contentsChanged = true
                         onFailure(String(localized: "音频尚未接收完成：\(error.localizedDescription)"))
                     }
-                    if receivedSinceNotification == 4 {
-                        await onChanged()
-                        contentsChanged = false
-                        receivedSinceNotification = 0
+                    processedInPage += 1
+                    if processedInPage % 8 == 0 {
+                        await Task.yield()
                     }
                 }
             } catch { onFailure(String(localized: "音频收件处理未完成：\(error.localizedDescription)")) }

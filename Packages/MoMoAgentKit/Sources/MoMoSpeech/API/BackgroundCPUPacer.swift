@@ -71,6 +71,7 @@ final class BackgroundCPUPacer: @unchecked Sendable {
     private var tokens: Double
     private var lastWallSeconds: Double
     private var lastCPUSeconds: Double
+    private var activeOperations = 0
 
     private var maxCapacity: Double
     private var initialBackgroundBurst: Double
@@ -155,6 +156,31 @@ final class BackgroundCPUPacer: @unchecked Sendable {
         condition.unlock()
     }
 
+    /// Marks the start of an active SpeechEngine operation so CPU spent by non-speech threads
+    /// while SpeechEngine was idle does not pre-drain the background token bucket.
+    func beginOperation() {
+        condition.lock()
+        defer { condition.unlock() }
+        if activeOperations == 0, !isForeground {
+            let nowWall = Self.monotonicSeconds()
+            let dt = max(0, nowWall - lastWallSeconds)
+            lastWallSeconds = nowWall
+            lastCPUSeconds = Self.processCPUSeconds()
+            tokens = min(maxCapacity, tokens + dt * refillRate)
+        }
+        activeOperations += 1
+    }
+
+    func endOperation() {
+        condition.lock()
+        defer { condition.unlock() }
+        guard activeOperations > 0 else { return }
+        if !isForeground {
+            updateBucketLocked()
+        }
+        activeOperations -= 1
+    }
+
     /// Returns `true` if `attempt` was cancelled; sleeps in bounded slices when background CPU debt exists.
     func paceIfNeeded(attempt: SpeechAttempt) -> Bool {
         if attempt.cancellationUptimeNanoseconds != nil { return true }
@@ -192,7 +218,8 @@ final class BackgroundCPUPacer: @unchecked Sendable {
         let dcpu = max(0, nowCPU - lastCPUSeconds)
         lastWallSeconds = nowWall
         lastCPUSeconds = nowCPU
-        tokens = min(maxCapacity, tokens + dt * refillRate - dcpu)
+        let debtFloor = min(initialBackgroundBurst, -1.5 * refillRate)
+        tokens = max(debtFloor, min(maxCapacity, tokens + dt * refillRate - dcpu))
     }
 
     static func monotonicSeconds() -> Double {

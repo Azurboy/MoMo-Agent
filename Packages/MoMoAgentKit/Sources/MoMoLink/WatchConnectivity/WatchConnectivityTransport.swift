@@ -42,6 +42,8 @@ private struct FileQueueDiagnostic: Encodable {
     private let controlScopeID: UUID?
     private var attemptJournalFailure: TransportFailure?
     private var attemptJournalNeedsSave = true
+    private var coalescedAttemptsDirty = false
+    private var coalescedAttemptsFlushTask: Task<Void, Never>?
     private var receivedStatuses = LinkStatusReceiveState()
     private var publishedStatuses = LinkStatusReceiveState()
     private var lastStatusRequest: TimeInterval = -.infinity
@@ -110,6 +112,7 @@ private struct FileQueueDiagnostic: Encodable {
         controlSubmissions.allowReplay()
         interactiveControls.allowReplay()
         submissions.allowFileReplay()
+        submissions.seedCompletedFromLedger(fileAttempts)
         activation = .activating
         submissions.update(activation: .activating, isReachable: false)
         session.activate()
@@ -128,6 +131,7 @@ private struct FileQueueDiagnostic: Encodable {
         try recoverAttemptsIfNeeded()
         var next = fileAttempts
         next.resetPeer()
+        attemptJournalNeedsSave = true
         try saveAttempts(next)
         controlSubmissions = LinkControlSubmissionState()
         interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 4)
@@ -137,15 +141,30 @@ private struct FileQueueDiagnostic: Encodable {
         try controlSubmissions.allowReplay(message)
         try interactiveControls.allowReplay(message)
     }
-    public func allowFileReplay() { submissions.allowFileReplay() }
-    public func allowFileReplay(chunkIDs: [UUID]) { submissions.allowFileReplay(chunkIDs: chunkIDs) }
+    public func allowFileReplay() {
+        submissions.allowFileReplay()
+        var next = fileAttempts
+        next.clearCompletedSubmissions()
+        if next != fileAttempts {
+            try? saveAttempts(next, immediate: false)
+        }
+    }
+    public func allowFileReplay(chunkIDs: [UUID]) {
+        guard !chunkIDs.isEmpty else { return }
+        submissions.allowFileReplay(chunkIDs: chunkIDs)
+        var next = fileAttempts
+        next.clearCompletedSubmissions(chunkIDs: chunkIDs)
+        if next != fileAttempts {
+            try? saveAttempts(next, immediate: false)
+        }
+    }
     public func confirmFileDelivery(_ receipt: Receipt) throws {
         try recoverAttemptsIfNeeded()
         let transfers = session.activationState == .activated ? try refreshOutstanding() : []
         try submissions.confirmFileDelivery(receipt)
         var next = fileAttempts
         next.confirm(chunkID: receipt.chunkID)
-        try saveAttempts(next)
+        try saveAttempts(next, immediate: false)
         if audioBlockChunkID == receipt.chunkID { cancelAudioBlockTransfer() }
         if resumableAudioBlockChunkID == receipt.chunkID { resumableAudioBlockChunkID = nil }
         for (transfer, envelope) in transfers where envelope.manifest.chunkID == receipt.chunkID {
@@ -317,7 +336,9 @@ private struct FileQueueDiagnostic: Encodable {
         guard peerState == .available else { return (.deferred, .deferred) }
         guard session.activationState == .activated else { throw LinkError.notActivated }
         try recoverAttemptsIfNeeded()
-        try saveAttempts(fileAttempts) // Persist the peer epoch before reserving or enqueueing an attempt.
+        if attemptJournalNeedsSave {
+            try saveAttempts(fileAttempts, immediate: true) // Persist the peer epoch before reserving or enqueueing an attempt.
+        }
         var metadata = try LinkWireFormat.controlMetadata(message)
         metadata["control_generation"] = controlGeneration.uuidString
         let routes = try reserveControlRoutes(message,
@@ -491,21 +512,52 @@ private struct FileQueueDiagnostic: Encodable {
                 transfer.cancel() // A persisted cancellation can outlive process death.
             }
         }
-        if next != fileAttempts { try saveAttempts(next) }
+        if next != fileAttempts { try saveAttempts(next, immediate: false) }
         try submissions.reconcile(transfers.map(\.1))
         persistQueueDiagnostic(transfers)
         return transfers
     }
 
-    private func saveAttempts(_ next: FileAttemptLedger) throws {
+    private func saveAttempts(_ next: FileAttemptLedger, immediate: Bool = true) throws {
         // A journal error pauses sync admission, never capture or receipt persistence in the recording store.
         if let attemptJournalFailure { throw attemptJournalFailure }
-        guard attemptJournalNeedsSave || next != fileAttempts else { return }
+        if !immediate && !attemptJournalNeedsSave {
+            guard next != fileAttempts else { return }
+            fileAttempts = next
+            guard attemptsURL != nil else { return }
+            coalescedAttemptsDirty = true
+            if coalescedAttemptsFlushTask == nil {
+                coalescedAttemptsFlushTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    self?.flushCoalescedAttempts()
+                }
+            }
+            return
+        }
+        coalescedAttemptsFlushTask?.cancel()
+        coalescedAttemptsFlushTask = nil
+        guard attemptJournalNeedsSave || coalescedAttemptsDirty || next != fileAttempts else { return }
         if let attemptsURL {
             try FileAttemptJournal.save(next, at: attemptsURL)
         }
         fileAttempts = next
         attemptJournalNeedsSave = false
+        coalescedAttemptsDirty = false
+    }
+
+    private func flushCoalescedAttempts() {
+        coalescedAttemptsFlushTask = nil
+        guard coalescedAttemptsDirty, attemptJournalFailure == nil else { return }
+        do {
+            if let attemptsURL {
+                try FileAttemptJournal.save(fileAttempts, at: attemptsURL)
+            }
+            attemptJournalNeedsSave = false
+            coalescedAttemptsDirty = false
+        } catch {
+            attemptJournalFailure = TransportFailure(error)
+            event(.failed(TransportFailure(error)))
+        }
     }
 
     private func recoverAttemptsIfNeeded() throws {
@@ -513,6 +565,9 @@ private struct FileQueueDiagnostic: Encodable {
     }
 
     private func loadAttempts() throws {
+        coalescedAttemptsFlushTask?.cancel()
+        coalescedAttemptsFlushTask = nil
+        coalescedAttemptsDirty = false
         if let attemptsURL {
             let loaded = try FileAttemptJournal.load(at: attemptsURL)
             fileAttempts = loaded.ledger
@@ -526,6 +581,7 @@ private struct FileQueueDiagnostic: Encodable {
             fileAttempts.bindControlScope(controlScopeID)
             if prior != fileAttempts { attemptJournalNeedsSave = true }
         }
+        submissions.seedCompletedFromLedger(fileAttempts)
         attemptJournalFailure = nil
     }
 
@@ -914,8 +970,8 @@ private struct FileQueueDiagnostic: Encodable {
                     return
                 }
                 var next = self.fileAttempts
-                next.finish(chunkID: envelope.manifest.chunkID, attemptID: attemptID)
-                do { try self.saveAttempts(next) }
+                next.finish(chunkID: envelope.manifest.chunkID, attemptID: attemptID, succeededAt: failure == nil ? Date() : nil)
+                do { try self.saveAttempts(next, immediate: false) }
                 catch { self.event(.failed(TransportFailure(error))) }
                 let deliveryFailed = self.submissions.didFinish(chunkID: envelope.manifest.chunkID, failed: failure != nil)
                 if let failure, deliveryFailed {

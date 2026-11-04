@@ -190,3 +190,19 @@ import MoMoContracts
     #expect(cache.take(batchWindows[12]) == nil)
     #expect(cache.take(batchWindows[13]) == nil)
 }
+
+@Test func backgroundCPUPacerIgnoresIdleNonSpeechCPUBetweenOperations() {
+    let pacer = BackgroundCPUPacer(initiallyForeground: false, maxCapacity: 4.0, initialBackgroundBurst: 0.2, refillRate: 0.65)
+    // Burn CPU while SpeechEngine has zero active operations (simulating Watch sync / SQLite work).
+    var acc = 0.0
+    for i in 1..<250_000 {
+        acc += Double(i).squareRoot()
+    }
+    #expect(acc > 0)
+    pacer.beginOperation()
+    defer { pacer.endOperation() }
+    let attempt = SpeechAttempt()
+    let started = ContinuousClock.now
+    #expect(!pacer.paceIfNeeded(attempt: attempt))
+    #expect(started.duration(to: ContinuousClock.now) < .milliseconds(50))
+}

@@ -11,9 +11,13 @@ final class AutomaticBackgroundSubmissionTests: XCTestCase {
         for state in [ProcessInfo.ThermalState.nominal, .fair, .serious] {
             XCTAssertTrue(PhoneBackgroundTasks.allowsProcessing(lowPower: false, thermalState: state))
             XCTAssertFalse(PhoneBackgroundTasks.allowsProcessing(lowPower: true, thermalState: state))
+            XCTAssertNil(PhoneBackgroundTasks.processingConstraint(foreground: true, lowPower: true, thermalState: state))
+            XCTAssertEqual(PhoneBackgroundTasks.processingConstraint(foreground: false, lowPower: true, thermalState: state), .lowPower)
         }
         XCTAssertFalse(PhoneBackgroundTasks.allowsProcessing(lowPower: false, thermalState: .critical))
         XCTAssertFalse(PhoneBackgroundTasks.allowsProcessing(lowPower: true, thermalState: .critical))
+        XCTAssertEqual(PhoneBackgroundTasks.processingConstraint(foreground: true, lowPower: false, thermalState: .critical), .thermalPressure)
+        XCTAssertEqual(PhoneBackgroundTasks.processingConstraint(foreground: true, lowPower: true, thermalState: .critical), .thermalPressure)
     }
 
     func testResourceReasonExplainsHistoryDeferralWithoutRelabelingActiveWork() {

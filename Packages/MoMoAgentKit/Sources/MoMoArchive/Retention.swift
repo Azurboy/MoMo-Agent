@@ -208,6 +208,7 @@ extension ArchiveStore {
         let url = rootURL.appendingPathComponent(relativePath)
         try validateRecordingPath(url)
         if files.fileExists(atPath: url.path) { try files.removeItem(at: url) }
+        verifiedChunkAudioStamps.removeValue(forKey: chunkID)
         try database.execute("UPDATE chunks SET retention='expired' WHERE id=?", [.text(chunkID.uuidString)])
     }
 }

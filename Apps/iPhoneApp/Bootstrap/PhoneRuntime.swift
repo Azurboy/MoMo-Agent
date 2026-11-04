@@ -254,20 +254,30 @@ final class PhoneRuntime {
             if self.isForeground { Task { await self.resumeAutomaticTranscription() } }
         }
         backgroundTasks?.onResourceConditionsChanged = { [weak self] allowed in
-            let constraint = PhoneBackgroundTasks.currentProcessingConstraint
-            self?.syncSpeechExecutionMode()
-            if allowed { self?.requestSpeechWarmup() }
+            guard let self else { return }
+            let foregroundAllowed = PhoneBackgroundTasks.resourcesAllowProcessing(foreground: self.isForeground)
+            let effectiveConstraint = PhoneBackgroundTasks.currentProcessingConstraint(foreground: self.isForeground)
+            self.syncSpeechExecutionMode()
+            if foregroundAllowed { self.requestSpeechWarmup() }
             else {
-                self?.speechWarmup?.cancel()
-                self?.receivedAudioTranscription?.expire(reason: .interrupted)
+                self.speechWarmup?.cancel()
             }
-            Task {
-                if !allowed, let self, !self.isForeground {
+            if !allowed {
+                self.receivedAudioTranscription?.expire(reason: .interrupted)
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                let sceneForeground = self.isForeground
+                let sceneAllowed = sceneForeground
+                    ? PhoneBackgroundTasks.resourcesAllowProcessing(foreground: true)
+                    : allowed
+                let sceneConstraint = PhoneBackgroundTasks.currentProcessingConstraint(foreground: sceneForeground)
+                if !allowed, !sceneForeground {
                     await self.transcription?.suspendForSystem()
                     self.transcriptionContinuation?.finish()
                 }
-                await self?.transcription?.setAnalysisPrefetchEnabled(allowed)
-                await self?.transcription?.setHistoricalWorkAllowed(allowed, constraint: constraint)
+                await self.transcription?.setAnalysisPrefetchEnabled(sceneAllowed)
+                await self.transcription?.setHistoricalWorkAllowed(sceneAllowed, constraint: sceneConstraint ?? effectiveConstraint)
             }
         }
         library.timeline.onSelectedDayChanged = { [weak self] day in
@@ -305,10 +315,15 @@ final class PhoneRuntime {
 
     private func archiveChanged() async {
         let initialSnapshot = await transcription?.snapshot()
-        if let fingerprint = speechFingerprint,
+        let summary: LivePriorityWorkSummary?
+        if let fingerprint = speechFingerprint {
+            summary = try? await archive.livePriorityWorkSummary(configurationFingerprint: fingerprint)
+        } else {
+            summary = nil
+        }
+        if let summary,
            let handle = initialSnapshot?.execution ?? transcriptionSnapshot?.execution,
-           handle.batchExecution != nil,
-           let summary = try? await archive.livePriorityWorkSummary(configurationFingerprint: fingerprint) {
+           handle.batchExecution != nil {
             let shouldInterleave = handle.origin == .continuedProcessing
                 ? summary.hasHotLiveWork
                 : summary.hasAnyPriorityWork
@@ -316,7 +331,11 @@ final class PhoneRuntime {
                 await transcription?.requestPriorityInterleaving(execution: handle)
             }
         }
-        await transcription?.requestWork()
+        if let summary, summary.hasHotLiveWork {
+            await transcription?.onHotLiveWorkArrived(foreground: isForeground, ultraHot: summary.hasUltraHotLiveWork)
+        } else {
+            await transcription?.requestWork()
+        }
         await backgroundTasks?.scheduleAutomatic()
         if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
         let currentSnapshot = await transcription?.snapshot()
@@ -447,9 +466,10 @@ final class PhoneRuntime {
             Task.detached(priority: .utility) { await archive.repairFileProtectionIfNeeded() }
         }
         requestSpeechWarmup()
-        await transcription?.setAnalysisPrefetchEnabled(PhoneBackgroundTasks.resourcesAllowProcessing)
-        await transcription?.setHistoricalWorkAllowed(PhoneBackgroundTasks.resourcesAllowProcessing,
-            constraint: PhoneBackgroundTasks.currentProcessingConstraint)
+        let foregroundAllowed = PhoneBackgroundTasks.resourcesAllowProcessing(foreground: true)
+        await transcription?.setAnalysisPrefetchEnabled(foregroundAllowed)
+        await transcription?.setHistoricalWorkAllowed(foregroundAllowed,
+            constraint: PhoneBackgroundTasks.currentProcessingConstraint(foreground: true))
         if !ready {
             receivedAudioTranscription?.expire(reason: .interrupted)
             await start()
@@ -498,7 +518,13 @@ final class PhoneRuntime {
         guard isForeground else { return }
         isForeground = false
         pendingForegroundBatchFlush = false
-        Task { await transcription?.setFocusedDay(nil) }
+        let bgAllowed = PhoneBackgroundTasks.resourcesAllowProcessing(foreground: false)
+        let bgConstraint = PhoneBackgroundTasks.currentProcessingConstraint(foreground: false)
+        Task { [transcription] in
+            await transcription?.setFocusedDay(nil)
+            await transcription?.setAnalysisPrefetchEnabled(bgAllowed)
+            await transcription?.setHistoricalWorkAllowed(bgAllowed, constraint: bgConstraint)
+        }
         remoteAgent.leavingForeground()
         if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
            !activeSystemTaskRunning, backgroundTasks?.hasActiveContinuedGrant != true {
@@ -564,7 +590,7 @@ final class PhoneRuntime {
 
     /// Model preparation never participates in the archive/UI startup barrier.
     private func requestSpeechWarmup() {
-        guard isForeground, PhoneBackgroundTasks.resourcesAllowProcessing, let speech,
+        guard isForeground, PhoneBackgroundTasks.resourcesAllowProcessing(foreground: true), let speech,
               !speechWarmed, speechWarmup == nil, Date() >= speechWarmupRetryAt else { return }
         modelStatus = .preparing
         speechWarmup = Task(priority: .utility) { [weak self, speech] in
@@ -618,17 +644,19 @@ final class PhoneRuntime {
                     await transcription.requestWork()
                     continue
                 }
-                let hasUrgentLiveWork: Bool
+                let prioritySummary: LivePriorityWorkSummary?
                 if let speechFingerprint {
-                    hasUrgentLiveWork = (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speechFingerprint)) ?? false
+                    prioritySummary = try? await archive.livePriorityWorkSummary(configurationFingerprint: speechFingerprint)
                 } else {
-                    hasUrgentLiveWork = false
+                    prioritySummary = nil
                 }
+                let hasUrgentLiveWork = prioritySummary?.hasHotLiveWork ?? false
+                let shouldInterleaveSameDay = prioritySummary?.hasAnyPriorityWork ?? false
                 if let requestedID = requestedTranscriptionBatchID {
                     if let requestedBatch = batches.first(where: { $0.id == requestedID }) {
                         if !hasUrgentLiveWork, (requestedBatch.state == .ready || requestedBatch.state == .paused) {
                             if requestedBatch.state == .paused { _ = try await transcription.resumeBatch(id: requestedID) }
-                            _ = try await transcription.startBatch(id: requestedID, origin: .foreground) { [weak self] completion in
+                            let handle = try await transcription.startBatch(id: requestedID, origin: .foreground) { [weak self] completion in
                                 Task { @MainActor in
                                     guard let self else { return }
                                     if completion.reason == .completed, self.requestedTranscriptionBatchID == requestedID {
@@ -639,6 +667,9 @@ final class PhoneRuntime {
                                     await self.resumeAutomaticTranscription()
                                 }
                             }
+                            if shouldInterleaveSameDay {
+                                await transcription.requestPriorityInterleaving(execution: handle)
+                            }
                             continue
                         }
                     } else {
@@ -648,9 +679,12 @@ final class PhoneRuntime {
                 }
                 if !hasUrgentLiveWork, let batch = batches.first(where: { isBatchAutomaticallyResumable($0) }) {
                     if batch.state == .paused { _ = try await transcription.resumeBatch(id: batch.id) }
-                    _ = try await transcription.startBatch(id: batch.id, origin: .foreground) { [weak self] completion in
+                    let handle = try await transcription.startBatch(id: batch.id, origin: .foreground) { [weak self] completion in
                         guard completion.reason == .completed || completion.reason == .userPaused else { return }
                         Task { @MainActor in await self?.resumeAutomaticTranscription() }
+                    }
+                    if shouldInterleaveSameDay {
+                        await transcription.requestPriorityInterleaving(execution: handle)
                     }
                 } else { await transcription.requestWork() }
             } catch { speechFailure = String(localized: "自动转写暂未恢复，音频已保留。重新打开 App 后会再试。") }

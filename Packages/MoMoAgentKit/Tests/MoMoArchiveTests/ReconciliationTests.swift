@@ -323,6 +323,22 @@ struct ReconciliationTests {
         #expect(pendingExpiry.messageID != response.messageID)
     }
 
+    @Test func stagedPendingInboxItemReconcilesAsReceivedImmediately() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let receiver = UUID(), store = try archive(fixture, receiver: receiver)
+        let envelope = try fixture.envelope()
+        // Stage into Inbox without calling commitReceivedChunk yet (simulating Watch reconcile arriving ahead of inbox drain).
+        _ = try fixture.deliver(envelope, to: store)
+        let req = try request(store, fixture: fixture, receiver: receiver, envelopes: [envelope])
+        let response = try await store.receiveReconcileRequest(req)
+        guard case .received(let receipt) = response.results.first?.state else {
+            Issue.record("Expected uncommitted Inbox item to commit on demand and return .received"); return
+        }
+        #expect(receipt.matches(envelope))
+        #expect(try store.inbox.pendingItems().isEmpty)
+    }
+
     private func archive(_ fixture: Fixture, receiver: UUID) throws -> ArchiveStore {
         try ArchiveStore(rootURL: fixture.root.appendingPathComponent("Library"), receiverDeviceID: receiver)
     }

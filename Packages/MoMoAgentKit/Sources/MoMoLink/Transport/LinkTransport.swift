@@ -56,6 +56,8 @@ public struct TransportFailure: Error, Sendable, Equatable {
 /// Tracks only system transport work; durable retry and deletion belong to the stores.
 public struct LinkSubmissionState: Sendable {
     public static let maximumOutstandingFiles = 4
+    public static let initialReceiptWaitDelay: TimeInterval = 120
+    public static let maximumReceiptWaitDelay: TimeInterval = 1_800
     public private(set) var activation: LinkActivation = .inactive
     public private(set) var isReachable = false
     private var outstanding: [UUID: (hash: String, count: Int)] = [:]
@@ -66,7 +68,7 @@ public struct LinkSubmissionState: Sendable {
     private var retryBackoffs: [UUID: LinkRetryBackoff] = [:]
     private struct ReceiptWait: Sendable {
         var deadline: TimeInterval?
-        var delay: TimeInterval = 120
+        var delay: TimeInterval = LinkSubmissionState.initialReceiptWaitDelay
     }
     private var awaitingReceipts: [UUID: ReceiptWait] = [:]
     public var hasRetryableFiles: Bool { !retryNotBefore.isEmpty || awaitingReceipts.values.contains { $0.deadline != nil } }
@@ -102,6 +104,30 @@ public struct LinkSubmissionState: Sendable {
         for id in chunkIDs {
             submitted.removeValue(forKey: id)
             requestedReplays.insert(id)
+        }
+    }
+    /// Restores completed transport attempts that are still awaiting formal application receipts across restarts.
+    public mutating func seedCompletedFromLedger(
+        _ ledger: FileAttemptLedger,
+        nowWallClock: Date = Date(),
+        nowUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        for (id, attempt) in ledger.attempts {
+            guard !attempt.outstanding,
+                  attempt.cancellationRequestedAt == nil,
+                  let completedAt = attempt.completedAt,
+                  outstanding[id] == nil else { continue }
+            let waitDuration = min(
+                Self.maximumReceiptWaitDelay,
+                max(Self.initialReceiptWaitDelay, attempt.receiptWaitDelay ?? Self.initialReceiptWaitDelay)
+            )
+            let elapsed = max(0, nowWallClock.timeIntervalSince(completedAt))
+            guard elapsed < waitDuration else { continue }
+            submitted[id] = attempt.manifestSHA256
+            awaitingReceipts[id] = ReceiptWait(
+                deadline: nowUptime + (waitDuration - elapsed),
+                delay: min(Self.maximumReceiptWaitDelay, waitDuration * 2)
+            )
         }
     }
     /// Cancellation retires only this system attempt. The store still owns its pending original.
@@ -211,7 +237,7 @@ public struct LinkSubmissionState: Sendable {
         guard var wait = awaitingReceipts[chunkID], wait.deadline == nil else { return }
         // System completion alone cannot prove durable phone ingestion. Bound retries without duplicating live transfers.
         wait.deadline = now + wait.delay
-        wait.delay = min(300, wait.delay * 2)
+        wait.delay = min(Self.maximumReceiptWaitDelay, wait.delay * 2)
         awaitingReceipts[chunkID] = wait
     }
 

@@ -52,12 +52,20 @@ public struct ReconcileRequest: Codable, Equatable, Sendable {
 
     public init(messageID: UUID = UUID(), sourceDeviceID: UUID, receiverDeviceID: UUID,
                 libraryInstanceID: UUID, items: [ReconcileChunkIdentity]) throws {
+        try self.init(messageID: messageID, sourceDeviceID: sourceDeviceID, receiverDeviceID: receiverDeviceID,
+                      libraryInstanceID: libraryInstanceID, items: items, validateEncodedSize: true)
+    }
+
+    private init(messageID: UUID, sourceDeviceID: UUID, receiverDeviceID: UUID,
+                 libraryInstanceID: UUID, items: [ReconcileChunkIdentity], validateEncodedSize: Bool) throws {
         guard !items.isEmpty, items.count <= ReconciliationLimits.maximumItems,
               Set(items.map(\.chunkID)).count == items.count else { throw ContractError.invalidField("reconcile_items") }
         self.messageID = messageID; self.sourceDeviceID = sourceDeviceID
         self.receiverDeviceID = receiverDeviceID; self.libraryInstanceID = libraryInstanceID; self.items = items
-        guard try WireJSON.encode(self).count <= ReconciliationLimits.maximumEncodedBytes else {
-            throw ContractError.invalidField("reconcile_request_bytes")
+        if validateEncodedSize {
+            guard try WireJSON.encode(self).count <= ReconciliationLimits.maximumEncodedBytes else {
+                throw ContractError.invalidField("reconcile_request_bytes")
+            }
         }
     }
 
@@ -66,7 +74,7 @@ public struct ReconcileRequest: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(messageID: c.decode(UUID.self, forKey: .messageID), sourceDeviceID: c.decode(UUID.self, forKey: .sourceDeviceID),
                       receiverDeviceID: c.decode(UUID.self, forKey: .receiverDeviceID), libraryInstanceID: c.decode(UUID.self, forKey: .libraryInstanceID),
-                      items: c.decode([ReconcileChunkIdentity].self, forKey: .items))
+                      items: c.decode([ReconcileChunkIdentity].self, forKey: .items), validateEncodedSize: false)
     }
 }
 
@@ -103,6 +111,13 @@ public struct ReconcileResponse: Codable, Equatable, Sendable {
 
     public init(messageID: UUID = UUID(), requestID: UUID, requestSHA256: String, sourceDeviceID: UUID,
                 receiverDeviceID: UUID, libraryInstanceID: UUID, results: [ReconcileResult]) throws {
+        try self.init(messageID: messageID, requestID: requestID, requestSHA256: requestSHA256,
+                      sourceDeviceID: sourceDeviceID, receiverDeviceID: receiverDeviceID,
+                      libraryInstanceID: libraryInstanceID, results: results, validateEncodedSize: true)
+    }
+
+    private init(messageID: UUID, requestID: UUID, requestSHA256: String, sourceDeviceID: UUID,
+                 receiverDeviceID: UUID, libraryInstanceID: UUID, results: [ReconcileResult], validateEncodedSize: Bool) throws {
         guard ContentHash.isValid(requestSHA256), !results.isEmpty, results.count <= ReconciliationLimits.maximumItems,
               Set(results.map(\.chunkID)).count == results.count else { throw ContractError.invalidField("reconcile_results") }
         for result in results {
@@ -115,8 +130,10 @@ public struct ReconcileResponse: Codable, Equatable, Sendable {
         self.messageID = messageID; self.requestID = requestID; self.requestSHA256 = requestSHA256
         self.sourceDeviceID = sourceDeviceID; self.receiverDeviceID = receiverDeviceID
         self.libraryInstanceID = libraryInstanceID; self.results = results
-        guard try WireJSON.encode(self).count <= ReconciliationLimits.maximumEncodedBytes else {
-            throw ContractError.invalidField("reconcile_response_bytes")
+        if validateEncodedSize {
+            guard try WireJSON.encode(self).count <= ReconciliationLimits.maximumEncodedBytes else {
+                throw ContractError.invalidField("reconcile_response_bytes")
+            }
         }
     }
 
@@ -147,6 +164,6 @@ public struct ReconcileResponse: Codable, Equatable, Sendable {
         try self.init(messageID: c.decode(UUID.self, forKey: .messageID), requestID: c.decode(UUID.self, forKey: .requestID),
                       requestSHA256: c.decode(String.self, forKey: .requestSHA256), sourceDeviceID: c.decode(UUID.self, forKey: .sourceDeviceID),
                       receiverDeviceID: c.decode(UUID.self, forKey: .receiverDeviceID), libraryInstanceID: c.decode(UUID.self, forKey: .libraryInstanceID),
-                      results: c.decode([ReconcileResult].self, forKey: .results))
+                      results: c.decode([ReconcileResult].self, forKey: .results), validateEncodedSize: false)
     }
 }

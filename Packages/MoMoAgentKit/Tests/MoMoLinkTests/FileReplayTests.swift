@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import MoMoContracts
-import MoMoLink
+@testable import MoMoLink
 
 struct FileReplayTests {
     @Test func missingApplicationReceiptRetriesWithBackoffButNeverDuplicatesAnOutstandingFile() throws {
@@ -18,8 +18,39 @@ struct FileReplayTests {
         #expect(try state.reserve(file, now: 1_360) == .alreadySubmitted)
         #expect(try state.reserve(file, now: 1_361) == .submitted)
         state.didFinish(chunkID: id, now: 1_362)
-        #expect(try state.reserve(file, now: 1_661) == .alreadySubmitted)
-        #expect(try state.reserve(file, now: 1_662) == .submitted)
+        #expect(try state.reserve(file, now: 1_841) == .alreadySubmitted)
+        #expect(try state.reserve(file, now: 1_842) == .submitted)
+        state.didFinish(chunkID: id, now: 1_843)
+        #expect(try state.reserve(file, now: 2_802) == .alreadySubmitted)
+        #expect(try state.reserve(file, now: 2_803) == .submitted)
+        state.didFinish(chunkID: id, now: 2_804)
+        #expect(try state.reserve(file, now: 4_603) == .alreadySubmitted)
+        #expect(try state.reserve(file, now: 4_604) == .submitted)
+        state.didFinish(chunkID: id, now: 4_605)
+        #expect(try state.reserve(file, now: 6_404) == .alreadySubmitted)
+        #expect(try state.reserve(file, now: 6_405) == .submitted)
+    }
+
+    @Test func completedAttemptPersistsAcrossRestartUntilReceiptDeadlineOrExplicitReplay() throws {
+        let file = try makeEnvelope(), id = file.manifest.chunkID
+        let start = Date(timeIntervalSince1970: 10_000)
+        var ledger = FileAttemptLedger()
+        let attemptID = try ledger.begin(file, now: start)
+        ledger.finish(chunkID: id, attemptID: attemptID, succeededAt: start.addingTimeInterval(5))
+        let persisted = try JSONDecoder().decode(FileAttemptLedger.self, from: JSONEncoder().encode(ledger))
+
+        var restarted = LinkSubmissionState()
+        restarted.update(activation: .activated, isReachable: false)
+        restarted.seedCompletedFromLedger(persisted, nowWallClock: start.addingTimeInterval(25), nowUptime: 500)
+        // 120s receipt wait minus 20s elapsed => 100s remaining (deadline at uptime 600).
+        #expect(try restarted.reserve(file, now: 599) == .alreadySubmitted)
+        #expect(try restarted.reserve(file, now: 600) == .submitted)
+
+        var explicit = LinkSubmissionState()
+        explicit.update(activation: .activated, isReachable: true)
+        explicit.seedCompletedFromLedger(persisted, nowWallClock: start.addingTimeInterval(10), nowUptime: 100)
+        explicit.allowFileReplay(chunkIDs: [id])
+        #expect(try explicit.reserve(file, now: 101) == .submitted)
     }
 
     @Test func disappearingSystemTransferStillGetsAnApplicationReceiptDeadline() throws {
