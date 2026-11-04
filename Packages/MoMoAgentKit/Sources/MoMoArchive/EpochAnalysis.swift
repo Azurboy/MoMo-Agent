@@ -341,11 +341,16 @@ extension ArchiveStore {
         try validateRetryScope(sessionID: sessionID, expectedGeneration: expectedGeneration)
         let filter = sessionID.map { SQLValue.text($0.uuidString) } ?? .null
         let selected = selectedWindowID.map(SQLValue.text) ?? .null
-        let passes: [Bool] = (focusedDay != nil && selectedWindowID == nil) ? [true, false] : [false]
-        let policy = focusedDay != nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
+        let policy = selectedWindowID == nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
+        let tierPasses: [Int?]
+        if let policy {
+            tierPasses = (focusedDay != nil && focusedDay != policy.today) ? [0, 1, 2, 3] : [0, 2, 3]
+        } else {
+            tierPasses = [nil]
+        }
         var epochManifestCache: [UUID: ChunkManifest?] = [:]
-        func matchesFocusedDay(_ window: ArchiveAnalysisWindow) throws -> Bool {
-            guard let focusedDay, let policy else { return false }
+        func windowTier(_ window: ArchiveAnalysisWindow) throws -> Int {
+            guard let policy else { return 0 }
             let manifest: ChunkManifest?
             if let cached = epochManifestCache[window.epochID] {
                 manifest = cached
@@ -358,26 +363,33 @@ extension ArchiveStore {
                 epochManifestCache[window.epochID] = loaded
                 manifest = loaded
             }
-            guard let manifest else { return false }
-            return policy.overlapsDay(focusedDay, frames: window.coreFrames, manifest: manifest)
+            guard let manifest else { return 2 }
+            return policy.freshnessTier(window.coreFrames, manifest: manifest, focusedDay: focusedDay)
         }
-        for preferFocusedOnly in passes {
+        for targetTier in tierPasses {
+            var cursorRecordedAt: Double?
             var cursorRowID: Int64 = 0
             while true {
+                let cursorRecVal: SQLValue = cursorRecordedAt.map(SQLValue.double) ?? .null
                 let candidates = try database.rows("""
-                    SELECT w.rowid,w.descriptor,w.generation FROM analysis_windows w
+                    SELECT w.rowid,w.descriptor,w.generation,s.recorded_at FROM analysis_windows w
                     JOIN sessions s ON s.id=w.session_id
                     WHERE w.state='pending' AND w.configuration_hash=? AND s.deleted=0 AND s.projection_blocked=0 AND w.generation=s.generation
-                      AND (? IS NULL OR s.id=?) AND (? IS NULL OR w.id=?) AND w.rowid > ?
-                    ORDER BY w.rowid LIMIT 64
-                    """, [.text(configurationFingerprint), filter, filter, selected, selected, .integer(cursorRowID)])
+                      AND (? IS NULL OR s.id=?) AND (? IS NULL OR w.id=?)
+                      AND (? IS NULL OR s.recorded_at < ? OR (s.recorded_at = ? AND w.rowid > ?))
+                    ORDER BY s.recorded_at DESC, w.rowid ASC LIMIT 64
+                    """, [
+                        .text(configurationFingerprint), filter, filter, selected, selected,
+                        cursorRecVal, cursorRecVal, cursorRecVal, .integer(cursorRowID)
+                    ])
                 guard !candidates.isEmpty else { break }
                 for row in candidates {
                     cursorRowID = try row.requireInt(0)
+                    cursorRecordedAt = row.double(3) ?? row.integer(3).map(Double.init) ?? 0
                     let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: row.requireData(1))
-                    if passes.count == 2 {
-                        let isFocused = try matchesFocusedDay(window)
-                        if preferFocusedOnly != isFocused { continue }
+                    if let targetTier {
+                        let tier = try windowTier(window)
+                        if tier != targetTier { continue }
                     }
                     if let sources, !sources.contains(where: { $0.epochID == window.epochID && $0.sessionID == window.sessionID && $0.frames.start < window.coreFrames.end && $0.frames.end > window.coreFrames.start }) { continue }
                     if let batchExecution {

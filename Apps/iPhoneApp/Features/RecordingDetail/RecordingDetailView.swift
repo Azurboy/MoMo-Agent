@@ -13,6 +13,7 @@ struct RecordingDetailView: View {
     let discuss: (SourceReference) -> Void
     var onSpeakersChanged: (() async -> Void)? = nil
     var resolveFiles: ((RecordingFileIssue, RecordingFileRecoveryAction) async throws -> Void)? = nil
+    var requestWatchStatus: (() -> Void)? = nil
     #if DEBUG
     var readingPositionObserver: (@MainActor (RecordingReadingDiagnostic) -> Void)? = nil
     #endif
@@ -64,12 +65,12 @@ struct RecordingDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("transcript.date")
                         if let coverage {
-                            Text("已收到内容 \(Duration.seconds(coverage.receivedDuration).formatted(.time(pattern: .minuteSecond)))")
-                                .phoneText(.history).foregroundStyle(MoMoPalette.muted)
+                            Text("已收到内容 \(Self.formatCoverageDuration(coverage.receivedDuration, reference: coverage.receivedDuration))")
+                                .phoneText(.history).monospacedDigit().foregroundStyle(MoMoPalette.muted)
                                 .accessibilityIdentifier("transcript.received")
                         }
                         if let status = processingStatus {
-                            Text(status).phoneText(.history).foregroundStyle(MoMoPalette.muted)
+                            Text(status).phoneText(.history).monospacedDigit().foregroundStyle(MoMoPalette.muted)
                                 .accessibilityIdentifier("transcript.status")
                         }
                     }.padding(.bottom, 14)
@@ -77,7 +78,7 @@ struct RecordingDetailView: View {
                 Section {
                         if let badge = completionBadge {
                             Label(badge, systemImage: isProcessing ? "waveform" : "checkmark")
-                                .phoneText(.metadata).foregroundStyle(isProcessing ? MoMoPalette.muted : MoMoPalette.success)
+                                .phoneText(.metadata).monospacedDigit().foregroundStyle(isProcessing ? MoMoPalette.muted : MoMoPalette.success)
                                 .padding(.horizontal, 12).padding(.vertical, 8)
                                 .background(isProcessing ? MoMoPalette.surface : MoMoPalette.successBackground, in: Capsule())
                                 .accessibilityIdentifier("transcript.progress")
@@ -178,8 +179,8 @@ struct RecordingDetailView: View {
                     if isProcessing {
                         HStack(alignment: .center, spacing: 10) {
                             ProgressView().accessibilityHidden(true)
-                            Text("后面的文字会继续出现在这里。")
-                                .phoneText(.history).foregroundStyle(MoMoPalette.muted)
+                            Text(trailingProgressPrompt)
+                                .phoneText(.history).monospacedDigit().foregroundStyle(MoMoPalette.muted)
                         }.frame(maxWidth: .infinity).padding(.vertical, 12)
                     }
                 } else {
@@ -270,6 +271,7 @@ struct RecordingDetailView: View {
         }
         .accessibilityIdentifier("transcript.scroll")
         .phonePageSurface()
+        .watchStatusRefresh(requestWatchStatus)
         .navigationTitle("录音")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
@@ -321,6 +323,7 @@ struct RecordingDetailView: View {
             }
         }
         .task(id: loadIdentity) { await load() }
+        .task(id: coverageRefreshToken) { await refreshLiveCoverageIfNeeded() }
     }
 
     private func rememberVisibleParagraph() {
@@ -453,18 +456,60 @@ struct RecordingDetailView: View {
         recording.map { RecordingTranscriptionPresentation(sessionID: sessionID, state: $0.transcriptionState, snapshot: transcription) }
     }
 
+    private var coverageRefreshToken: Int {
+        guard isProcessing else { return 0 }
+        return (transcription?.completedPreparations ?? 0) &+ (transcription?.completedWindows ?? 0)
+    }
+
+    private static func formatCoverageDuration(_ seconds: TimeInterval, reference: TimeInterval) -> String {
+        let clamped = max(0, seconds)
+        if max(clamped, reference) >= 3_600 {
+            return Duration.seconds(clamped).formatted(.time(pattern: .hourMinuteSecond))
+        }
+        return Duration.seconds(clamped).formatted(.time(pattern: .minuteSecond))
+    }
+
     private var completionBadge: String? {
-        if isProcessing { return String(localized: "正在本机转写") }
+        if isProcessing {
+            if let coverage, let processed = coverage.processedDuration, coverage.receivedDuration > 0 {
+                let pct = min(99, max(0, Int((processed / coverage.receivedDuration * 100).rounded(.down))))
+                let doneText = Self.formatCoverageDuration(processed, reference: coverage.receivedDuration)
+                let totalText = Self.formatCoverageDuration(coverage.receivedDuration, reference: coverage.receivedDuration)
+                return String(localized: "正在本机转写 · \(pct)%（\(doneText) / \(totalText)）")
+            }
+            return String(localized: "正在本机转写")
+        }
         guard recording?.transcriptionState == .transcribed,
               coverage?.epochs.contains(where: { !$0.pending.isEmpty || !$0.failed.isEmpty }) != true else { return nil }
         return String(localized: "已收到的内容已转写")
+    }
+
+    private var trailingProgressPrompt: String {
+        if transcription?.activeSessionID == sessionID, transcription?.phase == .preparing,
+           let coverage, let analyzed = coverage.analyzedDuration, coverage.receivedDuration > 0 {
+            let scannedText = Self.formatCoverageDuration(analyzed, reference: coverage.receivedDuration)
+            let totalText = Self.formatCoverageDuration(coverage.receivedDuration, reference: coverage.receivedDuration)
+            return String(localized: "正在快速跳过静音段（已扫描 \(scannedText) / \(totalText)），后续文字会自动追加。")
+        }
+        return String(localized: "后面的文字会继续出现在这里。")
     }
 
     private var processingStatus: String? {
         if transcriptionPresentation?.activity == .failed {
             return String(localized: "部分内容未能完成转写，已收到的音频会保留。")
         }
-        if isProcessing { return String(localized: "正在分析语音，已有内容可以先阅读。") }
+        if isProcessing {
+            if transcription?.activeSessionID == sessionID, transcription?.phase == .preparing,
+               let coverage, let analyzed = coverage.analyzedDuration, coverage.receivedDuration > 0 {
+                let scannedText = Self.formatCoverageDuration(analyzed, reference: coverage.receivedDuration)
+                let totalText = Self.formatCoverageDuration(coverage.receivedDuration, reference: coverage.receivedDuration)
+                return String(localized: "正在快速扫描静音与语音段（已推进至 \(scannedText) / \(totalText)），已有内容可先阅读。")
+            }
+            if let active = transcription?.activeSessionID, active != sessionID {
+                return String(localized: "正在优先转写最新语音，随后自动继续这段录音；已有内容可先阅读。")
+            }
+            return String(localized: "正在分析语音，已有内容可以先阅读。")
+        }
         if coverage?.epochs.contains(where: { !$0.notReceived.isEmpty }) == true { return String(localized: "还有录音未传到手机，已收到的内容可以先阅读。") }
         if let status = transcriptionPresentation?.status { return status }
         switch recording?.audioState {
@@ -473,6 +518,20 @@ struct RecordingDetailView: View {
         case .expiryPending: return String(localized: "正在清理到期原音，文字仍可阅读。")
         case .missingUnexpected: return String(localized: "部分原音文件缺失，请查看同步与转写详情。")
         default: return nil
+        }
+    }
+
+    private func refreshLiveCoverageIfNeeded() async {
+        guard coverageRefreshToken > 0, let expected = loadIdentity else { return }
+        do {
+            let loadedCoverage = try await library.archive.recordingCoverage(
+                sessionID: sessionID,
+                configurationFingerprint: library.configurationFingerprint
+            )
+            guard !Task.isCancelled, loadIdentity == expected else { return }
+            coverage = loadedCoverage
+        } catch {
+            // Supplemental live cursor refresh never overwrites existing document or error state.
         }
     }
 

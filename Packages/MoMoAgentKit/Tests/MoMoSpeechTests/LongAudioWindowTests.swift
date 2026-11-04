@@ -70,6 +70,38 @@ struct LongAudioWindowTests {
         #expect(try FrameRange.union(normal.map(\.coreFrames)) == [FrameRange(start: 0, count: 640_000)])
     }
 
+    @Test func breathValleyUnderSixteenSecondsKeepsDiariZenSinglePass() throws {
+        let input = try longAudioInput(frames: 640_000)
+        let planner = WindowPlanner(configuration: try SpeechConfiguration(), fingerprint: "test")
+        let energy = stride(from: Int64(0), to: 640_000, by: 512).map { frame in
+            // 160ms syllable/breath valley (-10 dB) around 14.0s (224,256..<227,328)
+            let rms: Float = (224_256..<227_328).contains(frame) ? 0.03 : 0.10
+            return SpeechEnergyFrame(start: frame, rms: rms)
+        }
+        let windows = try planner.continuousWindows(ranges: [0..<640_000], input: input,
+            availableThrough: input.modelFrameCount, tailClosed: true, energy: energy)
+        #expect(!windows.isEmpty)
+        #expect(windows[0].coreFrames.count <= 256_000)
+        #expect((224_256..<227_328).contains(windows[0].coreFrames.end))
+        #expect(try FrameRange.union(windows.map(\.coreFrames)) == [FrameRange(start: 0, count: 640_000)])
+    }
+
+    @Test func compressedContinuousSpeechSelectsQuietestSyllableUnderSixteenSeconds() throws {
+        let input = try longAudioInput(frames: 640_000)
+        let planner = WindowPlanner(configuration: try SpeechConfiguration(), fingerprint: "test")
+        let energy = stride(from: Int64(0), to: 640_000, by: 512).map { frame in
+            // Compressed noisy speech with only a mild -4.4 dB syllable dip at ~14.5s (231,936..<235,008)
+            let rms: Float = (231_936..<235_008).contains(frame) ? 0.06 : 0.10
+            return SpeechEnergyFrame(start: frame, rms: rms)
+        }
+        let windows = try planner.continuousWindows(ranges: [0..<640_000], input: input,
+            availableThrough: input.modelFrameCount, tailClosed: true, energy: energy)
+        #expect(!windows.isEmpty)
+        #expect(windows[0].coreFrames.count <= 256_000)
+        #expect((231_936..<235_008).contains(windows[0].coreFrames.end))
+        #expect(try FrameRange.union(windows.map(\.coreFrames)) == [FrameRange(start: 0, count: 640_000)])
+    }
+
     @Test func punctuationFollowsItsWordAcrossWindowBoundary() throws {
         let input = try longAudioInput(frames: 48_000)
         let planner = WindowPlanner(configuration: try SpeechConfiguration(), fingerprint: "test")

@@ -88,21 +88,22 @@ extension ArchiveStore {
                                                 calendar: Calendar = .current) throws -> EpochAnalysisTicket? {
         try validateBatchExecution(execution, fingerprint: configurationFingerprint)
         let rows = try database.rows("""
-            SELECT DISTINCT r.epoch_id,r.session_id,s.generation FROM transcription_batch_ranges r
+            SELECT DISTINCT r.epoch_id,r.session_id,s.generation,s.recorded_at FROM transcription_batch_ranges r
             JOIN sessions s ON s.id=r.session_id WHERE r.batch_id=? AND r.kind='unprepared' AND s.deleted=0
-            ORDER BY s.recorded_at,r.epoch_id
+            ORDER BY r.rowid
             """, [.text(execution.batchID.uuidString)])
-        var slices: [(order: Int, tier: Int, epochID: UUID, sessionID: UUID, generation: Int64, range: FrameRange)] = []
-        let policy = focusedDay != nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
+        var slices: [(order: Int, tier: Int, recordedAt: Double, epochID: UUID, sessionID: UUID, generation: Int64, range: FrameRange)] = []
+        let policy = ProcessingDatePolicy(now: now, calendar: calendar)
         for (order, row) in rows.enumerated() {
             let epochID = try row.requireUUID(0)
             let sessionID = try row.requireUUID(1)
             let generation = try row.requireInt(2)
+            let recordedAt = row.double(3) ?? row.integer(3).map(Double.init) ?? 0
             let pending = try CoverageRanges.subtract(batchPreparationRanges(id: execution.batchID, epochID: epochID),
                 analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint))
             guard !pending.isEmpty else { continue }
             let manifest: ChunkManifest?
-            if policy != nil, let data = try database.rows("""
+            if let data = try database.rows("""
                 SELECT c.manifest FROM epochs e
                 JOIN chunks c ON c.rowid=COALESCE(e.min_chunk_rowid, (SELECT rowid FROM chunks WHERE epoch_id=e.id ORDER BY start_frame LIMIT 1))
                 WHERE e.id=?
@@ -113,24 +114,23 @@ extension ArchiveStore {
             }
             for range in pending {
                 let tier: Int
-                if let policy, let manifest {
+                if let manifest {
                     if let focusedDay, policy.overlapsDay(focusedDay, frames: range, manifest: manifest) {
                         tier = policy.isHotLive(range, manifest: manifest) ? 0 : 1
                     } else {
                         tier = policy.freshnessTier(range, manifest: manifest, focusedDay: focusedDay)
                     }
                 } else {
-                    tier = 0
+                    tier = 2
                 }
-                slices.append((order: order, tier: tier, epochID: epochID, sessionID: sessionID, generation: generation, range: range))
+                slices.append((order: order, tier: tier, recordedAt: recordedAt, epochID: epochID, sessionID: sessionID, generation: generation, range: range))
             }
         }
-        if focusedDay != nil {
-            slices.sort {
-                if $0.tier != $1.tier { return $0.tier < $1.tier }
-                if $0.order != $1.order { return $0.order < $1.order }
-                return $0.range.start < $1.range.start
-            }
+        slices.sort {
+            if $0.tier != $1.tier { return $0.tier < $1.tier }
+            if $0.recordedAt != $1.recordedAt { return $0.recordedAt > $1.recordedAt }
+            if $0.order != $1.order { return $0.order < $1.order }
+            return $0.range.start < $1.range.start
         }
         for slice in slices {
             let epochID = slice.epochID

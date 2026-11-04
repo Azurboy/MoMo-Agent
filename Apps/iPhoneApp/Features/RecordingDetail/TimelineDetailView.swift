@@ -15,6 +15,7 @@ struct TimelineDetailView: View {
     var onSpeakersChanged: (() async -> Void)? = nil
     var resolveFiles: ((RecordingFileIssue, RecordingFileRecoveryAction) async throws -> Void)? = nil
     var openRecording: ((UUID) -> Void)? = nil
+    var requestWatchStatus: (() -> Void)? = nil
     #if DEBUG
     var readingPositionObserver: (@MainActor (TimelineReadingDiagnostic) -> Void)? = nil
     #endif
@@ -185,7 +186,9 @@ struct TimelineDetailView: View {
             }
         }
         .accessibilityIdentifier("timeline.detail.scroll")
-        .phonePageSurface().navigationTitle("转录详情").navigationBarTitleDisplayMode(.inline)
+        .phonePageSurface()
+        .watchStatusRefresh(requestWatchStatus)
+        .navigationTitle("转录详情").navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             if window != nil, !references.isEmpty {
                 TranscriptDiscussAction(title: String(localized: "围绕这段时间提问"), enabled: canDiscuss) { discuss(references) }

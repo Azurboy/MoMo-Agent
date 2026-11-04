@@ -32,7 +32,12 @@ extension ArchiveStore {
               rate.isFinite, rate > 0, rate <= 192_000 else { throw ArchiveError.invalidTranscript }
         let (pageEnd, overflow) = ticket.window.analysisAnchor.addingReportingOverflow(Int64(rate * 300))
         guard !overflow else { throw ArchiveError.invalidTranscript }
-        let through = max(pageEnd, ticket.window.contextFrames.end)
+        let analyzedHorizon = (try? database.rows(
+            "SELECT MAX(end_frame) FROM analysis_coverage WHERE epoch_id=? AND configuration_hash=? AND kind='analyzed'",
+            [.text(ticket.window.epochID.uuidString), .text(ticket.window.configurationFingerprint)]
+        ).first?.integer(0)) ?? ticket.window.contextFrames.end
+        let boundedPageEnd = min(pageEnd, max(analyzedHorizon, ticket.window.contextFrames.end))
+        let through = max(boundedPageEnd, ticket.window.contextFrames.end)
         let inputs = try contiguousInputs(epochID: ticket.window.epochID, from: ticket.window.analysisAnchor, through: through)
         guard let end = inputs.last?.envelope.manifest.frames.end, end >= ticket.window.contextFrames.end else {
             throw ArchiveError.staleSource

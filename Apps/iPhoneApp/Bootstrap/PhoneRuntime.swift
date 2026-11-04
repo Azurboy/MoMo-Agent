@@ -225,9 +225,7 @@ final class PhoneRuntime {
                let observation, !observation.restored, observation.observedAt != nil,
                case .watch(let status) = observation.snapshot.payload, status.audioBatchVersion == 1 {
                 self.pendingForegroundBatchFlush = false
-                if status.pendingChunkCount > 0 {
-                    self.transport?.requestPeerStatus(viewing: true)
-                }
+                self.transport?.requestPeerStatus(viewing: true)
             }
         }
         backgroundTasks?.onFailure = { [weak self] message in self?.speechFailure = message }
@@ -484,6 +482,10 @@ final class PhoneRuntime {
         await transcription?.resumeAfterSystemSuspension()
         receivedAudioTranscription?.expire(reason: .interrupted)
         transcriptionContinuation?.finish()
+        transport?.allowControlReplay()
+        requestWatchStatus()
+        await receiver.reconcile()
+        await resumeAutomaticTranscription()
         if libraryPresentationDeferred {
             do { try await prepareLibraryPresentation() }
             catch { refreshFailure = String(localized: "资料界面尚未更新：\(error.localizedDescription)"); return }
@@ -494,17 +496,13 @@ final class PhoneRuntime {
             guard isForeground else { return }
         }
         playback.requestWaveformPreparation()
-        transport?.allowControlReplay()
-        await resumeAutomaticTranscription()
-        await receiver.reconcile()
     }
 
     func requestWatchStatus() {
         var viewing = false
         // Background activation still requests status. Only a visible UI advertises viewing,
-        // after a fresh peer report proves it understands the extra request field.
-        if isForeground, let observation = receiver.currentWatchStatus, !observation.restored,
-           observation.observedAt != nil,
+        // once a peer report (including persisted status from the paired Watch) confirms batch v1.
+        if isForeground, let observation = receiver.currentWatchStatus,
            case .watch(let status) = observation.snapshot.payload, status.audioBatchVersion == 1 {
             viewing = true
             pendingForegroundBatchFlush = false

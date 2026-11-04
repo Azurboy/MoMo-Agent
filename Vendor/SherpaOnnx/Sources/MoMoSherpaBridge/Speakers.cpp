@@ -9,8 +9,10 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -402,6 +404,7 @@ bool ExtractTurnEmbeddingWithPurity(
     const SherpaOnnxSpeakerEmbeddingExtractor *ext, int emb_dim,
     const float *raw_audio, const std::vector<std::pair<int, int>> &spans,
     int min_samples, MoMoCancelCallback is_cancelled, const void *cancel_context,
+    const MoMoCancelToken *cancel_token,
     std::vector<float> &clip_buf, float out_emb[kMaxEmbDim], float *out_purity,
     float *out_emb_a = nullptr, float *out_emb_b = nullptr,
     bool *out_has_halves = nullptr) {
@@ -420,14 +423,14 @@ bool ExtractTurnEmbeddingWithPurity(
       std::array<float, kMaxEmbDim> emb_a{}, emb_b{};
       if (BuildCleanSpeechClip(raw_audio, half_a, 14400, emb_dim, clip_buf, 48000) &&
           [&]() {
-            CheckSpeakerCancel(is_cancelled, cancel_context);
+            CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
             ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                        static_cast<int>(clip_buf.size()),
                                        emb_a.data());
             return BuildCleanSpeechClip(raw_audio, half_b, 14400, emb_dim,
                                         clip_buf, 48000);
           }()) {
-        CheckSpeakerCancel(is_cancelled, cancel_context);
+        CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
         ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                    static_cast<int>(clip_buf.size()),
                                    emb_b.data());
@@ -457,7 +460,7 @@ bool ExtractTurnEmbeddingWithPurity(
                               64000)) {
       return false;
     }
-    CheckSpeakerCancel(is_cancelled, cancel_context);
+    CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
     ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                static_cast<int>(clip_buf.size()), out_emb);
     return true;
@@ -469,11 +472,11 @@ bool ExtractTurnEmbeddingWithPurity(
     SplitSpansInHalf(spans, half_a, half_b);
     std::array<float, kMaxEmbDim> emb_a{}, emb_b{};
     if (BuildCleanSpeechClip(raw_audio, half_a, 9600, emb_dim, clip_buf)) {
-      CheckSpeakerCancel(is_cancelled, cancel_context);
+      CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
       ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                  static_cast<int>(clip_buf.size()), emb_a.data());
       if (BuildCleanSpeechClip(raw_audio, half_b, 9600, emb_dim, clip_buf)) {
-        CheckSpeakerCancel(is_cancelled, cancel_context);
+        CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
         ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                    static_cast<int>(clip_buf.size()),
                                    emb_b.data());
@@ -493,7 +496,7 @@ bool ExtractTurnEmbeddingWithPurity(
         }
         if (total >= 96000 &&
             BuildCleanSpeechClip(raw_audio, spans, 48000, emb_dim, clip_buf)) {
-          CheckSpeakerCancel(is_cancelled, cancel_context);
+          CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
           std::array<float, kMaxEmbDim> emb_mid{};
           ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                                      static_cast<int>(clip_buf.size()),
@@ -513,7 +516,7 @@ bool ExtractTurnEmbeddingWithPurity(
   if (!BuildCleanSpeechClip(raw_audio, spans, min_samples, emb_dim, clip_buf)) {
     return false;
   }
-  CheckSpeakerCancel(is_cancelled, cancel_context);
+  CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
   ExtractNormalizedEmbedding(ext, emb_dim, clip_buf.data(),
                              static_cast<int>(clip_buf.size()), out_emb);
   return true;
@@ -683,6 +686,13 @@ struct MoMoSpeakerRuntime {
   int num_speakers = 3;
   int num_classes = 7;
   int embedding_dim = 192;
+  std::string seg_in_name;
+  std::string seg_out_name;
+  Ort::MemoryInfo seg_memory =
+      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  std::vector<std::array<int, 4>> perms;
+  std::mutex seg_scratch_mutex;
+  std::vector<float> seg_padded;
   ~MoMoSpeakerRuntime() {
     if (embedding) SherpaOnnxDestroySpeakerEmbeddingExtractor(embedding);
   }
@@ -706,23 +716,19 @@ void RunSlidingPowersetSegmentation(
       static_cast<size_t>(total_frames) * static_cast<size_t>(C), 0.0f);
   std::vector<float> global_weights(static_cast<size_t>(total_frames), 0.0f);
 
-  std::vector<float> padded(static_cast<size_t>(win_samples), 0.0f);
-  int64_t shape[] = {1, 1, win_samples};
-  auto memory =
-      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  Ort::AllocatorWithDefaultOptions allocator;
-  auto in_name = runtime->segmentation->GetInputNameAllocated(0, allocator);
-  auto out_name = runtime->segmentation->GetOutputNameAllocated(0, allocator);
-  const char *inputs[] = {in_name.get()}, *outputs[] = {out_name.get()};
-
-  std::vector<std::array<int, 4>> perms;
-  perms.reserve(24);
-  {
-    std::array<int, 4> p = {0, 1, 2, 3};
-    do {
-      perms.push_back(p);
-    } while (std::next_permutation(p.begin(), p.begin() + K));
+  std::unique_lock<std::mutex> scratch_lock(runtime->seg_scratch_mutex,
+                                            std::try_to_lock);
+  std::vector<float> fallback_padded;
+  std::vector<float> &padded =
+      scratch_lock.owns_lock() ? runtime->seg_padded : fallback_padded;
+  if (padded.size() != static_cast<size_t>(win_samples)) {
+    padded.assign(static_cast<size_t>(win_samples), 0.0f);
   }
+  int64_t shape[] = {1, 1, win_samples};
+  const char *inputs[] = {runtime->seg_in_name.c_str()};
+  const char *outputs[] = {runtime->seg_out_name.c_str()};
+  const auto &perms = runtime->perms;
+  momo_bridge::ScopedCancellableRunOptions shared_run_opts(cancel_token);
 
   for (int win_idx = 0;; ++win_idx) {
     CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
@@ -737,13 +743,9 @@ void RunSlidingPowersetSegmentation(
     }
 
     auto input = Ort::Value::CreateTensor<float>(
-        memory, padded.data(), padded.size(), shape, 3);
-    std::vector<Ort::Value> result;
-    {
-      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-      result = runtime->segmentation->Run(
-          run_opts.get(), inputs, &input, 1, outputs, 1);
-    }
+        runtime->seg_memory, padded.data(), padded.size(), shape, 3);
+    auto result = runtime->segmentation->Run(
+        shared_run_opts.get(), inputs, &input, 1, outputs, 1);
     auto dims = result[0].GetTensorTypeAndShapeInfo().GetShape();
     if (dims.size() != 3 || dims[0] != 1 || dims[2] != C || dims[1] < 1 ||
         dims[1] > 1600) {
@@ -1082,6 +1084,22 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(
         runtime->offset < 0) {
       throw std::runtime_error("Invalid segmentation frame clock");
     }
+    auto in_name = runtime->segmentation->GetInputNameAllocated(0, allocator);
+    auto out_name = runtime->segmentation->GetOutputNameAllocated(0, allocator);
+    if (!in_name || !out_name) {
+      throw std::runtime_error("Missing segmentation tensor names");
+    }
+    runtime->seg_in_name = in_name.get();
+    runtime->seg_out_name = out_name.get();
+    runtime->seg_padded.assign(static_cast<size_t>(runtime->window_samples), 0.0f);
+    runtime->perms.reserve(24);
+    {
+      std::array<int, 4> p = {0, 1, 2, 3};
+      do {
+        runtime->perms.push_back(p);
+      } while (
+          std::next_permutation(p.begin(), p.begin() + runtime->num_speakers));
+    }
 
     // Dynamic-duration ERes2NetV2 (192-dim) must run on ORT CPU because Apple
     // CoreML E5RT fails on unbounded pooling flatten dimensions and emits NaNs.
@@ -1231,8 +1249,8 @@ int MoMoExtractCleanVoiceprintCancellable(
     float purity = 1.0f;
     if (!ExtractTurnEmbeddingWithPurity(
             runtime->embedding, runtime->embedding_dim, slice, clean_spans,
-            12800, is_cancelled, cancel_context, clip_buf, emb.data(),
-            &purity)) {
+            12800, is_cancelled, cancel_context, cancel_token, clip_buf,
+            emb.data(), &purity)) {
       return 0;
     }
     const float min_purity = (runtime->embedding_dim == 192) ? 0.50f : 0.68f;
@@ -1570,7 +1588,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
               verified_monologue = false;
               break;
             }
-            CheckSpeakerCancel(is_cancelled, cancel_context);
+            CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
             std::array<float, kMaxEmbDim> pe{};
             ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                        clip_buf.data(),
@@ -1616,7 +1634,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
         if (total_clean >= kMinSessionEmbedSamples &&
             BuildCleanSpeechClip(raw_samples, all_clean,
                                  kMinSessionEmbedSamples, emb_dim, clip_buf)) {
-          CheckSpeakerCancel(is_cancelled, cancel_context);
+          CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
           ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                      clip_buf.data(),
                                      static_cast<int>(clip_buf.size()),
@@ -1625,7 +1643,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
         } else if (BuildCleanSpeechClip(raw_samples, mono_turns,
                                         kMinSessionEmbedSamples, emb_dim,
                                         clip_buf)) {
-          CheckSpeakerCancel(is_cancelled, cancel_context);
+          CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
           ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                      clip_buf.data(),
                                      static_cast<int>(clip_buf.size()),
@@ -1691,15 +1709,15 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
       if (clean_n >= kMinDirectEmbedSamples &&
           ExtractTurnEmbeddingWithPurity(
               runtime->embedding, emb_dim, raw_samples, rt.clean_spans,
-              kMinDirectEmbedSamples, is_cancelled, cancel_context, clip_buf,
-              rt.embedding.data(), out_purity, out_emb_a, out_emb_b,
-              out_has_halves)) {
+              kMinDirectEmbedSamples, is_cancelled, cancel_context,
+              cancel_token, clip_buf, rt.embedding.data(), out_purity,
+              out_emb_a, out_emb_b, out_has_halves)) {
         rt.clean_seconds = std::min(10.0f, float(clean_n) / 16000.0f);
       } else if (clean_n >= kMinSessionEmbedSamples &&
                  BuildCleanSpeechClip(raw_samples, rt.clean_spans,
                                       kMinSessionEmbedSamples, emb_dim,
                                       clip_buf)) {
-        CheckSpeakerCancel(is_cancelled, cancel_context);
+        CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
         ExtractNormalizedEmbedding(runtime->embedding, emb_dim, clip_buf.data(),
                                    static_cast<int>(clip_buf.size()),
                                    rt.embedding.data());
@@ -1708,7 +1726,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
         std::vector<std::pair<int, int>> full_span = {{rt.start, rt.end}};
         if (BuildCleanSpeechClip(raw_samples, full_span, kMinSessionEmbedSamples,
                                  emb_dim, clip_buf)) {
-          CheckSpeakerCancel(is_cancelled, cancel_context);
+          CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
           ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                      clip_buf.data(),
                                      static_cast<int>(clip_buf.size()),
@@ -1784,7 +1802,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
                   all_pure = false;
                   break;
                 }
-                CheckSpeakerCancel(is_cancelled, cancel_context);
+                CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
                 std::array<float, kMaxEmbDim> pe{};
                 ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                            clip_buf.data(),
@@ -1857,7 +1875,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
           memo.hi = w_hi;
           auto spans = collect_exclusive_spans(label, w_lo, w_hi);
           if (BuildCleanSpeechClip(raw_samples, spans, 8000, emb_dim, clip_buf)) {
-            CheckSpeakerCancel(is_cancelled, cancel_context);
+            CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
             ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                        clip_buf.data(),
                                        static_cast<int>(clip_buf.size()),
@@ -1867,7 +1885,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
             std::vector<std::pair<int, int>> raw_wing = {{w_lo, w_hi}};
             if (BuildCleanSpeechClip(raw_samples, raw_wing, 10400, emb_dim,
                                      clip_buf)) {
-              CheckSpeakerCancel(is_cancelled, cancel_context);
+              CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
               ExtractNormalizedEmbedding(runtime->embedding, emb_dim,
                                          clip_buf.data(),
                                          static_cast<int>(clip_buf.size()),
@@ -1884,6 +1902,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
           int sample = 0;
           float disjoint_sim = 1.0f;
           float rms_ratio = 1.0f;
+          bool evaluated = false;
           bool valid_wings = false;
           bool enrolled_trig = false;
           bool triggered = false;
@@ -1909,30 +1928,58 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
           }
         }
 
+        const int turn_len = end - start;
+        std::vector<double> turn_prefix_sq(static_cast<size_t>(turn_len + 1), 0.0);
+        for (int p = 0; p < turn_len; ++p) {
+          const double v = raw_samples[start + p];
+          turn_prefix_sq[static_cast<size_t>(p + 1)] =
+              turn_prefix_sq[static_cast<size_t>(p)] + v * v;
+        }
         auto wing_rms = [&](int lo, int hi) -> float {
-          if (hi <= lo) return 0.0f;
-          double sq = 0.0;
-          for (int p = lo; p < hi; ++p) {
-            sq += double(raw_samples[p]) * double(raw_samples[p]);
-          }
-          return static_cast<float>(std::sqrt(sq / (hi - lo)));
+          const int c_lo = std::clamp(lo, start, end) - start;
+          const int c_hi = std::clamp(hi, start, end) - start;
+          if (c_hi <= c_lo) return 0.0f;
+          const double sq = std::max(
+              0.0, turn_prefix_sq[static_cast<size_t>(c_hi)] -
+                       turn_prefix_sq[static_cast<size_t>(c_lo)]);
+          return static_cast<float>(std::sqrt(sq / (c_hi - c_lo)));
         };
 
-        const float two_sided_ceil = is_eres2net ? 0.64f : 0.82f;
         for (auto &cand : cands) {
+          const int l_lo = std::max(start, cand.sample - disjoint_wing_samples);
+          const int r_hi = std::min(end, cand.sample + disjoint_wing_samples);
+          const float rL = std::max(1e-4f, wing_rms(l_lo, cand.sample));
+          const float rR = std::max(1e-4f, wing_rms(cand.sample, r_hi));
+          cand.rms_ratio = std::max(rL / rR, rR / rL);
+        }
+
+        const float two_sided_ceil = is_eres2net ? 0.64f : 0.82f;
+        auto evaluate_cand = [&](size_t idx,
+                                 std::array<float, kMaxEmbDim> *out_left = nullptr,
+                                 std::array<float, kMaxEmbDim> *out_right = nullptr) {
+          auto &cand = cands[idx];
+          if (cand.evaluated) {
+            if (cand.valid_wings && (out_left || out_right)) {
+              const int l_lo = std::max(start, cand.sample - disjoint_wing_samples);
+              const int r_hi = std::min(end, cand.sample + disjoint_wing_samples);
+              if (out_left) get_wing_embedding(l_lo, cand.sample, *out_left);
+              if (out_right) get_wing_embedding(cand.sample, r_hi, *out_right);
+            }
+            return;
+          }
+          cand.evaluated = true;
           const int l_lo = std::max(start, cand.sample - disjoint_wing_samples);
           const int r_hi = std::min(end, cand.sample + disjoint_wing_samples);
           std::array<float, kMaxEmbDim> left_emb{}, right_emb{};
           if (!get_wing_embedding(l_lo, cand.sample, left_emb) ||
               !get_wing_embedding(cand.sample, r_hi, right_emb)) {
-            continue;
+            return;
           }
           cand.valid_wings = true;
+          if (out_left) *out_left = left_emb;
+          if (out_right) *out_right = right_emb;
           const float sim = DotN(left_emb.data(), right_emb.data(), emb_dim);
           cand.disjoint_sim = sim;
-          const float rL = std::max(1e-4f, wing_rms(l_lo, cand.sample));
-          const float rR = std::max(1e-4f, wing_rms(cand.sample, r_hi));
-          cand.rms_ratio = std::max(rL / rR, rR / rL);
 
           const auto m_left = MatchEnrolledPerson(
               left_emb.data(), emb_dim, enrolled_embeddings,
@@ -1947,7 +1994,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
               left_emb.data(), right_emb.data(), emb_dim, sim,
               enrolled_embeddings, enrolled_person_ids, enrolled_count);
           cand.enrolled_trig = two_sided_enrolled || one_sided_enrolled;
-        }
+        };
 
         const float abs_switch_th = is_eres2net ? 0.40f : 0.64f;
         const float strong_switch_th = is_eres2net ? 0.34f : 0.58f;
@@ -1955,6 +2002,112 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
         const float dip_min = is_eres2net ? 0.20f : 0.14f;
         const float dip_ceil = is_eres2net ? 0.48f : 0.72f;
         const float ch_ceil = is_eres2net ? 0.48f : 0.74f;
+
+        if (cands.size() <= 9) {
+          for (size_t k = 0; k < cands.size(); ++k) {
+            evaluate_cand(k);
+          }
+        } else {
+          // Stage 1: Evaluate stride-3 coarse cuts aligned with
+          // disjoint_wing_samples (3 * 6,400 = 19,200), so adjacent coarse
+          // wings share exact [lo, hi] intervals and hit wing_cache 100%.
+          struct CoarseNode {
+            size_t idx = 0;
+            std::array<float, kMaxEmbDim> left_emb{};
+            std::array<float, kMaxEmbDim> right_emb{};
+          };
+          std::vector<CoarseNode> coarse;
+          coarse.reserve(cands.size() / 3 + 2);
+          for (size_t k = 0; k < cands.size(); k += 3) {
+            CoarseNode node;
+            node.idx = k;
+            evaluate_cand(k, &node.left_emb, &node.right_emb);
+            coarse.push_back(node);
+          }
+          if (coarse.back().idx + 1 < cands.size()) {
+            CoarseNode tail;
+            tail.idx = cands.size() - 1;
+            evaluate_cand(tail.idx, &tail.left_emb, &tail.right_emb);
+            coarse.push_back(tail);
+          }
+
+          float coarse_max_sim = -1.0f;
+          for (const auto &node : coarse) {
+            if (cands[node.idx].valid_wings) {
+              coarse_max_sim =
+                  std::max(coarse_max_sim, cands[node.idx].disjoint_sim);
+            }
+          }
+
+          // Stage 2: Refine fine 0.40 s candidates only around coarse cuts or
+          // skip-1 block pairs showing voice drop, enrolled conflict, or step.
+          const float suspect_sim_th = is_eres2net ? 0.56f : 0.76f;
+          const float suspect_dip_min = is_eres2net ? 0.14f : 0.10f;
+          const float suspect_ch_ceil = is_eres2net ? 0.62f : 0.80f;
+          std::vector<bool> need_eval(cands.size(), false);
+          auto mark_range = [&](int lo_idx, int hi_idx) {
+            const int a = std::max(0, lo_idx);
+            const int b = std::min(static_cast<int>(cands.size()) - 1, hi_idx);
+            for (int u = a; u <= b; ++u) {
+              need_eval[static_cast<size_t>(u)] = true;
+            }
+          };
+
+          for (size_t m = 0; m < coarse.size(); ++m) {
+            const int ci = static_cast<int>(coarse[m].idx);
+            const auto &cc = cands[coarse[m].idx];
+            if (!cc.valid_wings) {
+              mark_range(ci - 3, ci + 3);
+              continue;
+            }
+            bool local_rms_step = false;
+            for (int u = std::max(0, ci - 2);
+                 u <= std::min(static_cast<int>(cands.size()) - 1, ci + 2);
+                 ++u) {
+              if (cands[static_cast<size_t>(u)].rms_ratio >= 2.2f) {
+                local_rms_step = true;
+                break;
+              }
+            }
+            const bool direct_suspect =
+                cc.enrolled_trig || (cc.disjoint_sim < suspect_sim_th) ||
+                (coarse_max_sim >= base_min &&
+                 (coarse_max_sim - cc.disjoint_sim >= suspect_dip_min)) ||
+                (local_rms_step && cc.disjoint_sim < suspect_ch_ceil);
+            if (direct_suspect) {
+              mark_range(ci - 5, ci + 5);
+            }
+
+            if (m > 0 && cands[coarse[m - 1].idx].valid_wings) {
+              const float skip_sim = DotN(coarse[m - 1].left_emb.data(),
+                                          coarse[m].right_emb.data(), emb_dim);
+              const auto ml = MatchEnrolledPerson(
+                  coarse[m - 1].left_emb.data(), emb_dim, enrolled_embeddings,
+                  enrolled_person_ids, enrolled_count);
+              const auto mr = MatchEnrolledPerson(
+                  coarse[m].right_emb.data(), emb_dim, enrolled_embeddings,
+                  enrolled_person_ids, enrolled_count);
+              const bool skip_enrolled =
+                  (ml.person_id >= 0 && mr.person_id >= 0 &&
+                   ml.person_id != mr.person_id && skip_sim < two_sided_ceil) ||
+                  HasOneSidedEnrolledDropoff(
+                      coarse[m - 1].left_emb.data(),
+                      coarse[m].right_emb.data(), emb_dim, skip_sim,
+                      enrolled_embeddings, enrolled_person_ids, enrolled_count);
+              const bool skip_suspect =
+                  skip_enrolled || (skip_sim < suspect_sim_th) ||
+                  (coarse_max_sim >= base_min &&
+                   (coarse_max_sim - skip_sim >= suspect_dip_min));
+              if (skip_suspect) {
+                mark_range(static_cast<int>(coarse[m - 1].idx) - 3, ci + 3);
+              }
+            }
+          }
+
+          for (size_t k = 0; k < cands.size(); ++k) {
+            if (need_eval[k]) evaluate_cand(k);
+          }
+        }
 
         for (size_t k = 0; k < cands.size(); ++k) {
           auto &cand = cands[k];
@@ -2213,7 +2366,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
       } else if (BuildCleanSpeechClip(raw_samples, tr.clean_spans,
                                       kMinSessionEmbedSamples, emb_dim,
                                       clip_buf)) {
-        CheckSpeakerCancel(is_cancelled, cancel_context);
+        CheckSpeakerCancel(is_cancelled, cancel_context, cancel_token);
         std::array<float, kMaxEmbDim> pooled_emb{};
         ExtractNormalizedEmbedding(runtime->embedding, emb_dim, clip_buf.data(),
                                    static_cast<int>(clip_buf.size()),
