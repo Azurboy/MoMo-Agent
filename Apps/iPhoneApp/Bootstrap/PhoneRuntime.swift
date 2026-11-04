@@ -103,6 +103,11 @@ final class PhoneRuntime {
             guard let self else { return }
             Task { await self.transcription?.invalidateAnalysisPrefetch() }
         }
+        speechSettings.onDayStartHourChanged = { [weak self] in
+            guard let self else { return }
+            self.library.timeline.handleDayBoundaryChanged()
+            Task { await self.library.refresh() }
+        }
         remoteAgent.onSummariesChanged = { [weak self] in self?.library.timeline.refreshCachedSummaries() }
         if let speech {
             speech.setSceneForeground(isForeground)

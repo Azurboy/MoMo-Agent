@@ -34,6 +34,7 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
+from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
 from superagent_computer import SuperAgentComputer
 from push_notifications import PushOutbox, load_provider
@@ -1206,8 +1207,9 @@ class SuperAgentGateway:
                     )
 
                 title = payload.get("title") or sid
+                day_start_hour = read_day_start_hour(self.data)
                 now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-                today_day = time.strftime("%Y-%m-%d", time.localtime(now))
+                today_day = logical_local_date(now, day_start_hour).isoformat()
 
                 for seg_idx, seg_first_idx, seg_spans in segment_groups:
                     seg_lines = []
@@ -1288,7 +1290,7 @@ class SuperAgentGateway:
                     rec_time_label = (
                         rec_start_str if rec_start_str[:16] == rec_end_str[:16] else f"{rec_start_str} ~ {rec_end_str}"
                     )
-                    rec_day = time.strftime("%Y-%m-%d", time.localtime(latest_span_ts))
+                    rec_day = logical_local_date(latest_span_ts, day_start_hour).isoformat()
                     lag_seconds = max(0.0, now - latest_span_ts)
                     date_anchor_note = ""
                     if rec_day != today_day or lag_seconds >= 6 * 3600:

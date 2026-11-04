@@ -380,8 +380,8 @@ struct ProcessingDatePolicy {
         let end = manifest.wallClockAnchor.addingTimeInterval(Double(frames.end) / manifest.timebaseHz)
         let recordedStart = start.timeIntervalSince1970 + Double(manifest.timezoneOffset)
         let recordedEnd = end.timeIntervalSince1970 + Double(manifest.timezoneOffset)
-        let dayStart = day.date(calendar: TimelineDay.calendar).timeIntervalSince1970
-        let dayEnd = day.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayStart = day.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayEnd = day.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         return recordedStart < dayEnd && recordedEnd > dayStart
     }
 
@@ -397,10 +397,10 @@ struct ProcessingDatePolicy {
     func priority(_ frames: FrameRange, manifest: ChunkManifest) -> Int {
         let start = manifest.wallClockAnchor.addingTimeInterval(Double(frames.start) / manifest.timebaseHz)
         let end = manifest.wallClockAnchor.addingTimeInterval(Double(frames.end) / manifest.timebaseHz)
-        let localStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let localStart = today.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         let recordedStart = start.timeIntervalSince1970 + Double(manifest.timezoneOffset)
         let recordedEnd = end.timeIntervalSince1970 + Double(manifest.timezoneOffset)
-        let dayEnd = today.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayEnd = today.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         return (recordedStart < dayEnd && recordedEnd > localStart)
             || end > now.addingTimeInterval(-1_800) ? 0 : 1
     }
@@ -408,8 +408,8 @@ struct ProcessingDatePolicy {
     func split(_ range: FrameRange, manifest: ChunkManifest) throws -> [(FrameRange, Int)] {
         let base = manifest.wallClockAnchor.timeIntervalSince1970
         let localBase = base + Double(manifest.timezoneOffset)
-        let dayStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
-        let dayEnd = today.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayStart = today.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayEnd = today.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         // Already-received audio must not chase a moving `now` cut when the Watch
         // clock is ahead or its recorded timezone differs from the phone's day.
         let boundaries = [(dayStart - localBase), (dayEnd - localBase), (now.timeIntervalSince1970 - 1_800 - base)]
@@ -436,15 +436,15 @@ struct ProcessingDatePolicy {
                             focusedSessionID: UUID? = nil) throws -> [(frames: FrameRange, priority: Int, tier: Int)] {
         let base = manifest.wallClockAnchor.timeIntervalSince1970
         let localBase = base + Double(manifest.timezoneOffset)
-        let dayStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
-        let dayEnd = today.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayStart = today.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
+        let dayEnd = today.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         var boundaries = [(dayStart - localBase), (dayEnd - localBase), (now.timeIntervalSince1970 - 1_800 - base)]
         if manifest.sampleRate == 16_000 {
             boundaries.append(quantizedHotCutoff.timeIntervalSince1970 - base)
         }
         if let focusedDay, focusedDay != today {
-            let focusedStart = focusedDay.date(calendar: TimelineDay.calendar).timeIntervalSince1970
-            let focusedEnd = focusedDay.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
+            let focusedStart = focusedDay.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
+            let focusedEnd = focusedDay.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
             boundaries.append(focusedStart - localBase)
             boundaries.append(focusedEnd - localBase)
         }

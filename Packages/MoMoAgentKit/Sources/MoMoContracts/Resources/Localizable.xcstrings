@@ -6874,6 +6874,36 @@
         }
       }
     },
+    "修改后立即重排时间线日期归属，已有录音和文字保留。": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updates timeline day grouping immediately while keeping existing recordings and transcripts."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "変更するとタイムラインの日付分類がすぐに更新され、既存の録音と文字起こしは保持されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "변경하면 기존 녹음과 전사를 유지한 채 타임라인 날짜 분류가 즉시 업데이트됩니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改后立即重排时间线日期归属，已有录音和文字保留。"
+          }
+        }
+      }
+    },
     "修改地址、协议、密钥或模型后，需要重新验证。现有连接会在验证并保存成功前继续保留。": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -28521,6 +28551,36 @@
         }
       }
     },
+    "早于该时间的凌晨录音会归入前一天。默认 08:00。": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Early-morning recordings before this time are grouped into the previous day. Default is 08:00."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この時刻より前の早朝の録音は前日にまとめられます。標準は 08:00 です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 시각 이전의 새벽 녹음은 전날로 분류됩니다. 기본값은 08:00입니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "早于该时间的凌晨录音会归入前一天。默认 08:00。"
+          }
+        }
+      }
+    },
     "时间": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -28625,6 +28685,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "时间待核对"
+          }
+        }
+      }
+    },
+    "时间线": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Timeline"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タイムライン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "타임라인"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "时间线"
           }
         }
       }
@@ -37962,6 +38052,66 @@
           "stringUnit": {
             "state": "translated",
             "value": "每周重复"
+          }
+        }
+      }
+    },
+    "每天起点": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Day Start"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1日の開始時刻"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "하루 시작 시각"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每天起点"
+          }
+        }
+      }
+    },
+    "每天起点须在 00:00 至 23:00 之间。": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Day start must be between 00:00 and 23:00."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1日の開始時刻は 00:00 から 23:00 の間で指定してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "하루 시작 시각은 00:00에서 23:00 사이여야 합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每天起点须在 00:00 至 23:00 之间。"
           }
         }
       }

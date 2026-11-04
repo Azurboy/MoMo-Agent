@@ -2,6 +2,7 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 import MoMoAgentClient
+import MoMoContracts
 
 struct DesktopRoot: View {
     @Bindable var model: DesktopModel
@@ -428,7 +429,7 @@ struct DesktopSettings: View {
         [Page.advanced, .model, .memory, .pairing].filter { destination in
             let terms: [String]
             switch destination {
-            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), "Hermes", "SuperAgent", "Proactive"]
+            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), "Hermes", "SuperAgent", "Proactive"]
             case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude"]
             case .memory: terms = [String(localized: "记忆")]
             case .pairing: terms = [String(localized: "设备"), String(localized: "配对手机"), String(localized: "远程访问")]
@@ -550,6 +551,32 @@ struct DesktopSettings: View {
                                 }
                         }.desktopSettingsRow()
                     }
+                }
+                DesktopSettingsGroup("时间线") {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("每天起点").font(.system(size: 14))
+                            Text("早于该时间的凌晨录音会归入前一天。默认 08:00。")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 16)
+                        if model.dayStartHour != DayStartBoundary.defaultHour {
+                            Button("恢复默认") { model.selectDayStartHour(DayStartBoundary.defaultHour) }
+                                .buttonStyle(DesktopSettingsButtonStyle())
+                                .accessibilityIdentifier("settings.dayStartHour.reset")
+                        }
+                        Picker("每天起点", selection: Binding(
+                            get: { model.dayStartHour },
+                            set: { model.selectDayStartHour($0) }
+                        )) {
+                            ForEach(Array(DayStartBoundary.hourRange), id: \.self) { hour in
+                                Text(DayStartBoundary.label(for: hour)).tag(hour)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 112)
+                        .accessibilityIdentifier("settings.dayStartHour")
+                    }.desktopSettingsRow()
                 }
                 DesktopSettingsGroup("运行环境") {
                     if model.hasBundledRuntime {

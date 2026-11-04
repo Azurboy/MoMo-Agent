@@ -3,6 +3,7 @@ import ApplicationServices
 import Foundation
 import Observation
 import MoMoAgentClient
+import MoMoContracts
 import Darwin
 
 struct AccessStatus: Decodable {
@@ -102,6 +103,7 @@ final class DesktopModel {
     var modelName = ""
     var providerKey = ""
     var runtimeEngine = DesktopAgentEngine.superagent
+    var dayStartHour = DayStartBoundary.defaultHour
     var proactiveSnapshot: DesktopProactiveSnapshot?
     var taskStore: RemoteTaskStore?
     var memories: [ContextMemory] = []
@@ -149,6 +151,7 @@ final class DesktopModel {
         dataDirectory = URL(fileURLWithPath: argument("--data-dir") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/\(dataFolder)/Agent").path)
         tailnet = EmbeddedTailnet(directory: dataDirectory.appendingPathComponent("tailscale"), device: "mac")
         setupStep = SetupStep(rawValue: UserDefaults.standard.string(forKey: "setup." + dataDirectory.path) ?? "welcome") ?? .welcome
+        loadDayBoundaryConfiguration()
     }
 
     func load() async {
@@ -346,6 +349,7 @@ final class DesktopModel {
         key = try String(contentsOf: dataDirectory.appendingPathComponent("api-key"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         prepareDesktop()
         loadEngineConfiguration()
+        loadDayBoundaryConfiguration()
         if let model = Self.readModelConfiguration(from: dataDirectory.appendingPathComponent("hermes/config.yaml")),
            let name = model["default"], !name.isEmpty {
             modelProvider = switch model["provider"] {
@@ -861,6 +865,43 @@ final class DesktopModel {
         controlSession.finishTasksAndInvalidate()
     }
     func showFiles() { NSWorkspace.shared.open(dataDirectory.appendingPathComponent("workspace")) }
+
+    func loadDayBoundaryConfiguration() {
+        let file = dataDirectory.appendingPathComponent("runtime/day-boundary.json")
+        let resolved: Int
+        if let raw = try? Data(contentsOf: file),
+           let parsed = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
+           let hour = parsed["day_start_hour"] as? Int,
+           DayStartBoundary.hourRange.contains(hour) {
+            resolved = hour
+        } else {
+            resolved = DayStartBoundary.resolvedHour()
+        }
+        dayStartHour = resolved
+        DayStartBoundary.setCurrentHour(resolved)
+        if !FileManager.default.fileExists(atPath: file.path) {
+            try? writeDayBoundaryConfiguration(hour: resolved)
+        }
+    }
+
+    private func writeDayBoundaryConfiguration(hour: Int) throws {
+        let file = dataDirectory.appendingPathComponent("runtime/day-boundary.json")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let payload: [String: Int] = ["day_start_hour": hour]
+        let encoded = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try privateWrite(encoded, to: file)
+    }
+
+    func selectDayStartHour(_ hour: Int) {
+        let clamped = min(max(hour, DayStartBoundary.hourRange.lowerBound), DayStartBoundary.hourRange.upperBound)
+        guard clamped != dayStartHour || DayStartBoundary.currentHour != clamped else { return }
+        dayStartHour = clamped
+        DayStartBoundary.setCurrentHour(clamped)
+        try? writeDayBoundaryConfiguration(hour: clamped)
+        if connection != nil {
+            Task { await loadContext(silent: true) }
+        }
+    }
 
     func loadEngineConfiguration() {
         let file = dataDirectory.appendingPathComponent("runtime/engine.json")

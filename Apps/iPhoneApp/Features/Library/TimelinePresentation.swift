@@ -250,9 +250,11 @@ private struct TimelineActivityStrip: View {
 
 enum RecordingDatePresentation {
     static func day(_ date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
-        if calendar.isDate(date, inSameDayAs: now) { return String(localized: "今天") }
-        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) { return String(localized: "昨天") }
-        return date.formatted(.dateTime.locale(AppLanguage.current.locale).year().month().day())
+        let target = TimelineDay(date, calendar: calendar)
+        let today = TimelineDay(now, calendar: calendar)
+        if target == today { return String(localized: "今天") }
+        if target == today.adding(days: -1) { return String(localized: "昨天") }
+        return target.date(calendar: calendar).formatted(.dateTime.locale(AppLanguage.current.locale).year().month().day())
     }
 
     static func title(_ date: Date) -> String {

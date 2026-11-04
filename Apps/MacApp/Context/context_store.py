@@ -1,5 +1,6 @@
 """MoMo source replica and delivery checkpoints. Legacy fact tables are retained, inactive."""
 from contextlib import contextmanager
+import datetime as _dt
 import hashlib
 import json
 import math
@@ -7,6 +8,28 @@ from pathlib import Path
 import sqlite3
 import time
 import uuid
+
+DEFAULT_DAY_START_HOUR = 8
+
+
+def read_day_start_hour(directory) -> int:
+    try:
+        raw = (Path(directory) / "runtime" / "day-boundary.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+        hour = data.get("day_start_hour")
+        if type(hour) is int and 0 <= hour <= 23:
+            return hour
+    except Exception:
+        pass
+    return DEFAULT_DAY_START_HOUR
+
+
+def logical_local_date(timestamp: float, day_start_hour: int = DEFAULT_DAY_START_HOUR) -> _dt.date:
+    dt = _dt.datetime.fromtimestamp(float(timestamp))
+    day = dt.date()
+    if dt.hour < day_start_hour:
+        day -= _dt.timedelta(days=1)
+    return day
 
 
 class Conflict(ValueError):
@@ -182,12 +205,13 @@ class ContextStore:
         if not spans:
             return []
         library_id = str(uuid.UUID(payload["library_id"]))
+        day_start_hour = read_day_start_hour(self.directory)
         groups, position = [], 0
         for span in spans:
             text = span["text"]
             start = float(span["recorded_at"])
             end_pos = position + len(text)
-            day = time.localtime(start)[:3]
+            day = logical_local_date(start, day_start_hour)
             est_end = start + min(60.0, len(text) * 0.22)
             if groups and day == groups[-1]["day"] and start - groups[-1]["est_end"] <= 300:
                 groups[-1]["end_at"] = max(groups[-1]["end_at"], start)

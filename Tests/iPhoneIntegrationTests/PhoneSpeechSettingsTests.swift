@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import MoMoContracts
 import MoMoSpeech
 #if SWIFT_PACKAGE
 @testable import PhonePipelineReplay
@@ -140,4 +141,41 @@ import MoMoSpeech
     defaults.set("funASRNanoCoreML", forKey: PhoneSpeechModelSettings.selectionKey)
     #expect(PhoneSpeechModelSettings.restoredDownload(at: root, defaults: defaults)?.model == .funASRNano)
     #expect(defaults.string(forKey: PhoneSpeechModelSettings.selectionKey) == SpeechModelChoice.funASRNano.rawValue)
+}
+
+@MainActor
+@Test func dayStartHourDefaultsToEightAndPersistsCustomBoundaries() throws {
+    let suite = "MoMoAgent.day-start-test.\(UUID())"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer {
+        DayStartBoundary.setCurrentHour(DayStartBoundary.defaultHour)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    let settings = PhoneSpeechSettings(speech: nil, defaults: defaults)
+    #expect(settings.dayStartHour == 8)
+    #expect(settings.dayStartHourLabel == "08:00")
+    #expect(DayStartBoundary.currentHour == 8)
+
+    var notifications: [Int] = []
+    settings.onDayStartHourChanged = { notifications.append(settings.dayStartHour) }
+
+    for hour in [0, 6, 23] {
+        settings.selectDayStartHour(hour)
+        #expect(settings.dayStartHour == hour)
+        #expect(DayStartBoundary.resolvedHour(from: defaults) == hour)
+        #expect(defaults.integer(forKey: PhoneSpeechSettings.dayStartHourKey) == hour)
+        let restored = PhoneSpeechSettings(speech: nil, defaults: defaults)
+        #expect(restored.dayStartHour == hour)
+    }
+    #expect(notifications == [0, 6, 23])
+
+    settings.selectDayStartHour(24)
+    #expect(settings.dayStartHour == 23)
+    #expect(settings.failure != nil)
+
+    settings.selectDayStartHour(PhoneSpeechSettings.defaultDayStartHour)
+    #expect(settings.dayStartHour == 8)
+    #expect(settings.dayStartHourLabel == "08:00")
+    #expect(settings.failure == nil)
 }
