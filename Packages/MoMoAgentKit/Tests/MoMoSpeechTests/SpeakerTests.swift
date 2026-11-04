@@ -143,6 +143,42 @@ struct SpeakerAlignmentTests {
         #expect(singleParts[0].evidence?.localSpeaker == 1)
     }
 
+    @Test func clausePunctuationSnappingAndMicroTurnConsolidationPreventOverSplitting() throws {
+        let revision = String(repeating: "d", count: 64)
+        let v1: [Float] = [1] + Array(repeating: 0, count: 191)
+        let v2: [Float] = [0, 1] + Array(repeating: 0, count: 190)
+
+        let commaTurns = SpeakerTurn.plan([
+            SpeakerEvidence(start: 0.0, end: 2.00, localSpeaker: 1, embedding: v1, cleanSeconds: 1.9, modelRevision: revision),
+            SpeakerEvidence(start: 2.00, end: 4.20, localSpeaker: 2, embedding: v2, cleanSeconds: 2.0, modelRevision: revision)
+        ], core: 0..<67_200)
+        let commaRecognition = SpeechRecognition(
+            windowID: "comma-snap",
+            text: "先看方案，下午讨论。",
+            tokens: ["先", "看", "方", "案", "，", "下", "午", "讨", "论", "。"],
+            timestamps: [0.40, 0.85, 1.35, 2.08, 2.15, 2.55, 2.95, 3.35, 3.75, 3.90],
+            rawJSON: "{}",
+            configurationFingerprint: "test"
+        )
+        #expect(commaRecognition.alignedSpeakerTurns(commaTurns)?.map(\.text) == ["先看方案，", "下午讨论。"])
+
+        // Consolidate noisy Watch micro-turns (< 1.5s, < 0.9s clean speech) before turn-split ASR
+        // while keeping genuine >= 1.5s distinct speakers intact.
+        let fragmented = SpeakerTurn.plan([
+            SpeakerEvidence(start: 0.00, end: 4.50, localSpeaker: 1, embedding: v1, cleanSeconds: 3.8, modelRevision: revision),
+            SpeakerEvidence(start: 4.50, end: 5.20, localSpeaker: 3, embedding: [], cleanSeconds: 0.0, modelRevision: revision),
+            SpeakerEvidence(start: 5.20, end: 5.95, localSpeaker: 1, embedding: v1, cleanSeconds: 0.5, modelRevision: revision),
+            SpeakerEvidence(start: 5.95, end: 9.20, localSpeaker: 2, embedding: v2, cleanSeconds: 2.9, modelRevision: revision)
+        ], core: 0..<147_200)
+        #expect(fragmented.count >= 3)
+        let consolidated = SpeakerTurn.consolidateForTurnDecoding(fragmented)
+        #expect(consolidated.count == 2)
+        #expect(consolidated[0].evidence.localSpeaker == 1)
+        #expect(consolidated[1].evidence.localSpeaker == 2)
+        #expect(consolidated[0].frames.lowerBound == 0)
+        #expect(consolidated[1].frames.upperBound == 147_200)
+    }
+
     @Test func multiSpeakerOverlapDeduplicationAndGapRecoveryPreserveTurnAttribution() throws {
         let revision = String(repeating: "c", count: 64)
         let v1: [Float] = [1] + Array(repeating: 0, count: 191)
@@ -263,10 +299,39 @@ struct SpeakerNativeTests {
         let cache = URL(fileURLWithPath: try #require(environment["MOMO_SPEAKER_TEST_OUTPUT"]))
         let attempt = SpeechAttempt()
         let runtime = try SpeakerRuntime(directory: models, cacheRoot: cache, attempt: attempt)
+        #expect(runtime.acceleratorMask == 3)
+        let cpuRuntime = try SpeakerRuntime(directory: models, cacheRoot: nil, attempt: attempt)
+        #expect(cpuRuntime.acceleratorMask == 0)
         let wave = try #require(SherpaOnnxReadWave(audio))
         defer { SherpaOnnxFreeWave(wave) }
         #expect(wave.pointee.sample_rate == 16_000)
         let samples = Array(UnsafeBufferPointer(start: wave.pointee.samples, count: Int(wave.pointee.num_samples)))
+        let exact3sSlice = Array(samples.prefix(min(samples.count, 48_000)))
+        if let ane3s = try runtime.extractCleanVoiceprint(exact3sSlice, attempt: attempt),
+           let cpu3s = try cpuRuntime.extractCleanVoiceprint(exact3sSlice, attempt: attempt) {
+            var dot: Float = 0, na: Float = 0, nb: Float = 0
+            for i in ane3s.embedding.indices {
+                dot += ane3s.embedding[i] * cpu3s.embedding[i]
+                na += ane3s.embedding[i] * ane3s.embedding[i]
+                nb += cpu3s.embedding[i] * cpu3s.embedding[i]
+            }
+            let cos3s = dot / max(1e-8, (na * nb).squareRoot())
+            print("Speaker ANE vs CPU 3s clean voiceprint cosine=\(cos3s)")
+            #expect(cos3s >= 0.98)
+        }
+        let seedSlice = Array(samples.prefix(min(samples.count, 96_000)))
+        if let aneSeed = try runtime.extractCleanVoiceprint(seedSlice, attempt: attempt),
+           let cpuSeed = try cpuRuntime.extractCleanVoiceprint(seedSlice, attempt: attempt) {
+            var dot: Float = 0, na: Float = 0, nb: Float = 0
+            for i in aneSeed.embedding.indices {
+                dot += aneSeed.embedding[i] * cpuSeed.embedding[i]
+                na += aneSeed.embedding[i] * aneSeed.embedding[i]
+                nb += cpuSeed.embedding[i] * cpuSeed.embedding[i]
+            }
+            let cosSim = dot / max(1e-8, (na * nb).squareRoot())
+            print("Speaker ANE vs CPU 5.6s clean voiceprint cosine=\(cosSim)")
+            #expect(cosSim >= 0.990)
+        }
         let started = Date()
         let evidence = try runtime.analyze(samples, attempt: attempt)
         #expect(evidence.contains { $0.hasVoiceprint && $0.cleanSeconds >= 3 })
@@ -423,6 +488,7 @@ struct SpeakerNativeTests {
             segmentationModel: .pyannoteCommunity1,
             cacheRoot: cache,
             attempt: attempt)
+        #expect(communityRuntime.acceleratorMask == 3)
         let communityEvidence = try communityRuntime.analyze(aba, attempt: attempt)
         let communityTurns = SpeakerTurn.plan(communityEvidence, core: 0..<aba.count)
         #expect(communityTurns.count >= 3)

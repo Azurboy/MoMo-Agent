@@ -131,6 +131,91 @@ struct SpeakerTurn: Sendable {
                     cleanSeconds: min(10.0, totalClean), modelRevision: best.modelRevision))
         }
     }
+
+    /// Consolidates sub-second unverified micro-turns into compatible adjacent turns before
+    /// per-turn ASR decoding (e.g. timestamp-free FunASR-Nano), avoiding redundant LLM passes
+    /// on Watch noise/backchannels while keeping real enrolled or multi-second speakers separate.
+    static func consolidateForTurnDecoding(
+        _ turns: [Self],
+        enrolledPrototypes: [EnrolledSpeakerPrototype] = []
+    ) -> [Self] {
+        guard turns.count > 1 else { return turns }
+        func matchedEnrolledPerson(_ ev: SpeakerEvidence) -> UUID? {
+            guard ev.hasVoiceprint, !enrolledPrototypes.isEmpty else { return nil }
+            let minScore: Float = ev.embedding.count == 192 ? 0.60 : 0.76
+            let minMargin: Float = ev.embedding.count == 192 ? 0.07 : 0.045
+            var bestScoreByPerson: [UUID: Float] = [:]
+            for proto in enrolledPrototypes where proto.modelRevision == ev.modelRevision
+                && proto.embedding.count == ev.embedding.count {
+                let s = SpeakerEvidence.similarity(ev.embedding, proto.embedding)
+                if s > (bestScoreByPerson[proto.personID] ?? -2) {
+                    bestScoreByPerson[proto.personID] = s
+                }
+            }
+            let ranked = bestScoreByPerson.sorted { $0.value > $1.value }
+            guard let top = ranked.first, top.value >= minScore else { return nil }
+            if ranked.count >= 2, top.value - ranked[1].value < minMargin { return nil }
+            return top.key
+        }
+
+        var current = turns
+        while current.count > 1 {
+            var mergedAny = false
+            for idx in current.indices {
+                let micro = current[idx]
+                guard micro.frames.count < 14_400, micro.evidence.cleanSeconds < 0.60 else { continue }
+                let microPerson = matchedEnrolledPerson(micro.evidence)
+                var bestTarget: Int?
+                var bestScore: Float = -2
+                for candIdx in [idx - 1, idx + 1] where current.indices.contains(candIdx) {
+                    let neighbor = current[candIdx]
+                    let neighborPerson = matchedEnrolledPerson(neighbor.evidence)
+                    if let mp = microPerson, let np = neighborPerson, mp != np { continue }
+                    if microPerson != nil, neighborPerson == nil { continue }
+                    let score: Float
+                    if sameVoice(micro.evidence, neighbor.evidence) {
+                        score = 2.0
+                    } else if !micro.evidence.hasVoiceprint || !neighbor.evidence.hasVoiceprint {
+                        score = Float(neighbor.frames.count) / 160_000
+                    } else {
+                        let sim = SpeakerEvidence.similarity(micro.evidence.embedding, neighbor.evidence.embedding)
+                        let minSim: Float = micro.evidence.embedding.count == 192 ? 0.32 : 0.58
+                        guard sim >= minSim else { continue }
+                        score = sim
+                    }
+                    if score > bestScore {
+                        bestScore = score
+                        bestTarget = candIdx
+                    }
+                }
+                guard let targetIdx = bestTarget else { continue }
+                let lo = min(idx, targetIdx)
+                let hi = max(idx, targetIdx)
+                let dominant = current[targetIdx]
+                let combinedFrames = current[lo].frames.lowerBound..<current[hi].frames.upperBound
+                let combinedAudio = min(current[lo].audioFrames.lowerBound, current[hi].audioFrames.lowerBound)
+                    ..< max(current[lo].audioFrames.upperBound, current[hi].audioFrames.upperBound)
+                let combinedEvidence: SpeakerEvidence
+                if sameVoice(micro.evidence, dominant.evidence) {
+                    combinedEvidence = mergeEvidence(current[lo].evidence, current[hi].evidence)
+                } else {
+                    combinedEvidence = SpeakerEvidence(
+                        start: min(current[lo].evidence.start, current[hi].evidence.start),
+                        end: max(current[lo].evidence.end, current[hi].evidence.end),
+                        localSpeaker: dominant.evidence.localSpeaker,
+                        embedding: dominant.evidence.embedding,
+                        cleanSeconds: dominant.evidence.cleanSeconds,
+                        modelRevision: dominant.evidence.modelRevision)
+                }
+                current[lo] = Self(frames: combinedFrames, audioFrames: combinedAudio, evidence: combinedEvidence)
+                current.remove(at: hi)
+                mergedAny = true
+                break
+            }
+            if !mergedAny { break }
+        }
+        return current
+    }
 }
 
 public struct SpeakerTurnTranscript: Codable, Equatable, Sendable {
@@ -147,6 +232,10 @@ extension SpeechRecognition {
 
     fileprivate static func isSentenceEndingToken(_ token: String) -> Bool {
         token.contains { "。！？!?；;".contains($0) }
+    }
+
+    fileprivate static func isClauseEndingToken(_ token: String) -> Bool {
+        token.contains { "，、：,:".contains($0) }
     }
 
     /// Use genuine word times first: short interjections need the full decode's language context.
@@ -185,8 +274,9 @@ extension SpeechRecognition {
             ownership.append(match)
         }
 
-        // Snap speaker transitions to adjacent sentence-ending punctuation within 300 ms
-        // so acoustic midpoint jitter does not strand a trailing syllable + "。" across turns.
+        // Snap speaker transitions to adjacent sentence/clause punctuation within acoustic jitter bounds
+        // (350 ms for sentence endings, 250 ms for clause commas when both sides have >= 2 words)
+        // so acoustic midpoint jitter does not strand a trailing syllable + punctuation across turns.
         if turns.count > 1 {
             for tA in 0..<(turns.count - 1) {
                 let tB = tA + 1
@@ -196,14 +286,16 @@ extension SpeechRecognition {
                       firstB == lastA + 1 else { continue }
                 let wordsInA = ownership.indices.filter { ownership[$0] == tA && Self.isWordToken(tokens[$0]) }
                 let wordsInB = ownership.indices.filter { ownership[$0] == tB && Self.isWordToken(tokens[$0]) }
-                if lastA >= 1, ownership[lastA - 1] == tA,
-                   Self.isSentenceEndingToken(tokens[lastA - 1]), Self.isWordToken(tokens[lastA]),
-                   wordsInA.count >= 2, abs(Double(timestamps[lastA]) - boundarySec) <= 0.30 {
+                let distanceLastA = abs(Double(timestamps[lastA]) - boundarySec)
+                let distanceFirstB = abs(Double(timestamps[firstB]) - boundarySec)
+                if lastA >= 1, ownership[lastA - 1] == tA, Self.isWordToken(tokens[lastA]), wordsInA.count >= 2,
+                   (Self.isSentenceEndingToken(tokens[lastA - 1]) && distanceLastA <= 0.35)
+                   || (Self.isClauseEndingToken(tokens[lastA - 1]) && wordsInB.count >= 2 && distanceLastA <= 0.25) {
                     ownership[lastA] = tB
                 } else if firstB + 2 <= tokens.count, ownership[firstB + 1] == tB,
-                          Self.isWordToken(tokens[firstB]), !Self.isWordToken(tokens[firstB + 1]),
-                          Self.isSentenceEndingToken(tokens[firstB + 1]),
-                          wordsInB.count >= 2, abs(Double(timestamps[firstB]) - boundarySec) <= 0.30 {
+                          Self.isWordToken(tokens[firstB]), !Self.isWordToken(tokens[firstB + 1]), wordsInB.count >= 2,
+                          (Self.isSentenceEndingToken(tokens[firstB + 1]) && distanceFirstB <= 0.35)
+                          || (Self.isClauseEndingToken(tokens[firstB + 1]) && wordsInA.count >= 2 && distanceFirstB <= 0.25) {
                     ownership[firstB] = tA
                     ownership[firstB + 1] = tA
                 }
@@ -216,9 +308,9 @@ extension SpeechRecognition {
             for turnIndex in turns.indices {
                 let turn = turns[turnIndex]
                 let hasWords = ownership.indices.contains { ownership[$0] == turnIndex && Self.isWordToken(tokens[$0]) }
-                if !hasWords, turn.evidence.cleanSeconds >= 1.2, turn.frames.count >= 19_200 {
-                    // Full-window ASR dropped an entire >= 1.2 s clean speech turn (e.g. bilingual
-                    // switch or strong near/far-field volume contrast); fall back to per-turn ASR.
+                if !hasWords, turn.evidence.cleanSeconds >= 2.5, turn.frames.count >= 40_000 {
+                    // Full-window CTC ASR genuinely dropped a sustained >= 2.5 s clean speech turn
+                    // (e.g. extreme near/far-field volume contrast); fall back to per-turn ASR.
                     return nil
                 }
             }

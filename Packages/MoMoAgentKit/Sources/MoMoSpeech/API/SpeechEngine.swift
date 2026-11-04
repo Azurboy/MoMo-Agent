@@ -218,17 +218,8 @@ public final class SpeechEngine: @unchecked Sendable {
             recorder.value.inputModelFrames = input.modelFrameCount
             let pcm = try samples(for: FrameRange(start: 0, count: input.modelFrameCount),
                                   input: input, attempt: attempt, recorder: recorder)
-            let segModel = selectedSegmentationModel.withLock { $0 }
-            let spkThreads = effectiveCPUThreads
-            if speakerRuntime == nil || runtimeSegmentationModel != segModel || runtimeSpeakerThreads != spkThreads {
-                try ensureSpeakerValidated(directory: speakerDirectory, segmentationModel: segModel, attempt: attempt)
-                speakerRuntime = try SpeakerRuntime(directory: speakerDirectory, segmentationModel: segModel,
-                    cacheRoot: coreMLCacheDirectory, attempt: attempt, threads: spkThreads,
-                    skipValidation: true)
-                runtimeSegmentationModel = segModel
-                runtimeSpeakerThreads = spkThreads
-            }
-            guard let extracted = try speakerRuntime?.extractCleanVoiceprint(pcm, attempt: attempt) else { return nil }
+            let speaker = try ensureSpeakerRuntime(directory: speakerDirectory, attempt: attempt, recorder: nil)
+            guard let extracted = try speaker.extractCleanVoiceprint(pcm, attempt: attempt) else { return nil }
             return (extracted.embedding, extracted.cleanSeconds, SpeakerRuntime.revision)
         }
     }
@@ -574,22 +565,11 @@ public final class SpeechEngine: @unchecked Sendable {
                         rawJSON: "{\"text\":\"\",\"reason\":\"digital_silence\"}", configurationFingerprint: configurationFingerprint)
                 }
 
+                let prototypes = enrolledSpeakers.withLock { $0 }
                 var detectedSpeakers: [SpeakerEvidence]?
                 var speakerFailure: String?
                 do {
-                    let segModel = selectedSegmentationModel.withLock { $0 }
-                    let spkThreads = effectiveCPUThreads
-                    if speakerRuntime == nil || runtimeSegmentationModel != segModel || runtimeSpeakerThreads != spkThreads {
-                        let loadStart = DispatchTime.now().uptimeNanoseconds
-                        try ensureSpeakerValidated(directory: speakerDirectory, segmentationModel: segModel, attempt: attempt)
-                        speakerRuntime = try SpeakerRuntime(directory: speakerDirectory, segmentationModel: segModel,
-                            cacheRoot: coreMLCacheDirectory, attempt: attempt, threads: spkThreads,
-                            skipValidation: true)
-                        recorder.value.modelLoadSeconds += SpeechDiagnosticRecorder.seconds(since: loadStart)
-                        runtimeSegmentationModel = segModel
-                        runtimeSpeakerThreads = spkThreads
-                    }
-                    let prototypes = enrolledSpeakers.withLock { $0 }
+                    let speaker = try ensureSpeakerRuntime(directory: speakerDirectory, attempt: attempt, recorder: recorder)
                     let speakerRange: Range<Int>
                     if let coreRange = input.coreRange, coreRange.lowerBound >= 0,
                        coreRange.upperBound <= input.samples.count, !coreRange.isEmpty,
@@ -608,11 +588,11 @@ public final class SpeechEngine: @unchecked Sendable {
                     let spkStart = DispatchTime.now().uptimeNanoseconds
                     defer { recorder.value.speakerAnalyzeSeconds += SpeechDiagnosticRecorder.seconds(since: spkStart) }
                     if speakerRange == 0..<input.samples.count {
-                        detectedSpeakers = try speakerRuntime?.analyze(input.samples, prototypes: prototypes, attempt: attempt)
+                        detectedSpeakers = try speaker.analyze(input.samples, prototypes: prototypes, attempt: attempt)
                     } else {
                         let speakerOffset = Double(speakerRange.lowerBound) / 16_000
                         let sliced = Array(input.samples[speakerRange])
-                        detectedSpeakers = try speakerRuntime?.analyze(sliced, prototypes: prototypes, attempt: attempt)
+                        detectedSpeakers = try speaker.analyze(sliced, prototypes: prototypes, attempt: attempt)
                             .map {
                                 SpeakerEvidence(start: $0.start + speakerOffset, end: $0.end + speakerOffset,
                                     localSpeaker: $0.localSpeaker, embedding: $0.embedding,
@@ -624,9 +604,10 @@ public final class SpeechEngine: @unchecked Sendable {
                     speakerFailure = "speaker_inference_failed"
                 }
 
-                let turns = detectedSpeakers.map {
+                let rawTurns = detectedSpeakers.map {
                     SpeakerTurn.plan($0, core: input.coreRange ?? input.samples.indices, sampleBounds: input.samples.indices)
                 } ?? []
+                let turns = SpeakerTurn.consolidateForTurnDecoding(rawTurns, enrolledPrototypes: prototypes)
 
                 var candidateSplit: SpeechRecognition?
                 if turns.count > 1, let detectedSpeakers {
@@ -781,20 +762,9 @@ public final class SpeechEngine: @unchecked Sendable {
                 configurationFingerprint: result.configurationFingerprint)
             aligned.recognitionFingerprint = result.recognitionFingerprint
             if let speakerDirectory, !aligned.text.isEmpty {
+                let prototypes = enrolledSpeakers.withLock { $0 }
                 do {
-                    let segModel = selectedSegmentationModel.withLock { $0 }
-                    let spkThreads = effectiveCPUThreads
-                    if speakerRuntime == nil || runtimeSegmentationModel != segModel || runtimeSpeakerThreads != spkThreads {
-                        let loadStart = DispatchTime.now().uptimeNanoseconds
-                        try ensureSpeakerValidated(directory: speakerDirectory, segmentationModel: segModel, attempt: attempt)
-                        speakerRuntime = try SpeakerRuntime(directory: speakerDirectory, segmentationModel: segModel,
-                            cacheRoot: coreMLCacheDirectory, attempt: attempt, threads: spkThreads,
-                            skipValidation: true)
-                        recorder.value.modelLoadSeconds += SpeechDiagnosticRecorder.seconds(since: loadStart)
-                        runtimeSegmentationModel = segModel
-                        runtimeSpeakerThreads = spkThreads
-                    }
-                    let prototypes = enrolledSpeakers.withLock { $0 }
+                    let speaker = try ensureSpeakerRuntime(directory: speakerDirectory, attempt: attempt, recorder: recorder)
                     let speakerRange: Range<Int>
                     if let coreRange = input.coreRange, coreRange.lowerBound >= 0,
                        coreRange.upperBound <= input.samples.count, !coreRange.isEmpty,
@@ -813,11 +783,11 @@ public final class SpeechEngine: @unchecked Sendable {
                     let spkStart = DispatchTime.now().uptimeNanoseconds
                     defer { recorder.value.speakerAnalyzeSeconds += SpeechDiagnosticRecorder.seconds(since: spkStart) }
                     if speakerRange == 0..<input.samples.count {
-                        aligned.speakers = try speakerRuntime?.analyze(input.samples, prototypes: prototypes, attempt: attempt)
+                        aligned.speakers = try speaker.analyze(input.samples, prototypes: prototypes, attempt: attempt)
                     } else {
                         let speakerOffset = Double(speakerRange.lowerBound) / 16_000
                         let sliced = Array(input.samples[speakerRange])
-                        aligned.speakers = try speakerRuntime?.analyze(sliced, prototypes: prototypes, attempt: attempt)
+                        aligned.speakers = try speaker.analyze(sliced, prototypes: prototypes, attempt: attempt)
                             .map {
                                 SpeakerEvidence(start: $0.start + speakerOffset, end: $0.end + speakerOffset,
                                     localSpeaker: $0.localSpeaker, embedding: $0.embedding,
@@ -840,81 +810,84 @@ public final class SpeechEngine: @unchecked Sendable {
                             split.speakers = detectedSpeakers
                             split.speakerTurns = timed
                             aligned = split
-                        } else if turns.count > 1 {
-                            do {
-                                var decodedPieces: [(turn: SpeakerTurn, text: String, hasWords: Bool)] = []
-                                decodedPieces.reserveCapacity(turns.count)
-                                for start in stride(from: 0, to: turns.count, by: archiveBatchSize) {
-                                    try attempt.checkCancellation()
-                                    let batch = Array(turns[start..<min(turns.count, start + archiveBatchSize)])
-                                    let clips = batch.enumerated().map { index, turn in
-                                        SherpaRecognitionInput(samples: Array(input.samples[turn.audioFrames]),
-                                            windowID: "\(input.windowID):turn:\(start + index)")
-                                    }
-                                    let decodedTurns = try native(attempt: attempt, recorder: recorder).recognizeBatch(clips,
-                                        fingerprint: configurationFingerprint, attempt: attempt, onEvent: onEvent, recorder: recorder)
-                                    guard decodedTurns.count == batch.count else { throw SpeechError.nativeResult }
-                                    for (clip, turn) in zip(clips, batch) {
-                                        guard let decoded = decodedTurns.first(where: { $0.windowID == clip.windowID }) else {
-                                            throw SpeechError.nativeResult
+                        } else {
+                            let decodeTurns = SpeakerTurn.consolidateForTurnDecoding(turns, enrolledPrototypes: prototypes)
+                            if decodeTurns.count > 1 {
+                                do {
+                                    var decodedPieces: [(turn: SpeakerTurn, text: String, hasWords: Bool)] = []
+                                    decodedPieces.reserveCapacity(decodeTurns.count)
+                                    for start in stride(from: 0, to: decodeTurns.count, by: archiveBatchSize) {
+                                        try attempt.checkCancellation()
+                                        let batch = Array(decodeTurns[start..<min(decodeTurns.count, start + archiveBatchSize)])
+                                        let clips = batch.enumerated().map { index, turn in
+                                            SherpaRecognitionInput(samples: Array(input.samples[turn.audioFrames]),
+                                                windowID: "\(input.windowID):turn:\(start + index)")
                                         }
-                                        let hasWords = decoded.text.contains { $0.isLetter || $0.isNumber }
-                                        decodedPieces.append((turn, hasWords ? decoded.text : "", hasWords))
-                                    }
-                                    recorder.value.recognitionInputModelFrames = (recorder.value.recognitionInputModelFrames ?? 0)
-                                        + clips.reduce(0) { $0 + Int64($1.samples.count) }
-                                }
-                                let originalWords = aligned.text.filter { $0.isLetter || $0.isNumber }.count
-                                let coreSeconds = max(1.0, Double((input.coreRange ?? input.samples.indices).count) / 16_000)
-                                let cappedOriginalWords = min(originalWords, max(6, Int(ceil(coreSeconds * 5.5))))
-                                let splitWords = decodedPieces.reduce(0) { $0 + $1.text.filter { c in c.isLetter || c.isNumber }.count }
-                                let preservesWords = cappedOriginalWords < 6 || splitWords * 10 >= cappedOriginalWords * 4
-                                if preservesWords, let firstNonEmpty = decodedPieces.firstIndex(where: \.hasWords) {
-                                    var merged: [SpeakerTurnTranscript] = []
-                                    var pendingStart = Double(turns[0].frames.lowerBound) / 16_000
-                                    for idx in firstNonEmpty..<decodedPieces.count {
-                                        let piece = decodedPieces[idx]
-                                        let pieceStart = idx == firstNonEmpty ? pendingStart : Double(piece.turn.frames.lowerBound) / 16_000
-                                        let pieceEnd = Double(piece.turn.frames.upperBound) / 16_000
-                                        if piece.hasWords {
-                                            if let prev = merged.last, SpeakerTurn.sameVoice(prev.evidence, piece.turn.evidence) {
-                                                merged[merged.count - 1] = SpeakerTurnTranscript(
-                                                    text: prev.text + piece.text,
-                                                    start: prev.start,
-                                                    end: pieceEnd,
-                                                    evidence: SpeakerTurn.mergeEvidence(prev.evidence, piece.turn.evidence))
-                                            } else {
-                                                merged.append(SpeakerTurnTranscript(
-                                                    text: piece.text, start: pieceStart, end: pieceEnd, evidence: piece.turn.evidence))
+                                        let decodedTurns = try native(attempt: attempt, recorder: recorder).recognizeBatch(clips,
+                                            fingerprint: configurationFingerprint, attempt: attempt, onEvent: onEvent, recorder: recorder)
+                                        guard decodedTurns.count == batch.count else { throw SpeechError.nativeResult }
+                                        for (clip, turn) in zip(clips, batch) {
+                                            guard let decoded = decodedTurns.first(where: { $0.windowID == clip.windowID }) else {
+                                                throw SpeechError.nativeResult
                                             }
-                                            pendingStart = pieceEnd
-                                        } else if !merged.isEmpty {
-                                            let prev = merged[merged.count - 1]
-                                            merged[merged.count - 1] = SpeakerTurnTranscript(
-                                                text: prev.text, start: prev.start, end: pieceEnd, evidence: prev.evidence)
-                                            pendingStart = pieceEnd
+                                            let hasWords = decoded.text.contains { $0.isLetter || $0.isNumber }
+                                            decodedPieces.append((turn, hasWords ? decoded.text : "", hasWords))
+                                        }
+                                        recorder.value.recognitionInputModelFrames = (recorder.value.recognitionInputModelFrames ?? 0)
+                                            + clips.reduce(0) { $0 + Int64($1.samples.count) }
+                                    }
+                                    let originalWords = aligned.text.filter { $0.isLetter || $0.isNumber }.count
+                                    let coreSeconds = max(1.0, Double((input.coreRange ?? input.samples.indices).count) / 16_000)
+                                    let cappedOriginalWords = min(originalWords, max(6, Int(ceil(coreSeconds * 5.5))))
+                                    let splitWords = decodedPieces.reduce(0) { $0 + $1.text.filter { c in c.isLetter || c.isNumber }.count }
+                                    let preservesWords = cappedOriginalWords < 6 || splitWords * 10 >= cappedOriginalWords * 4
+                                    if preservesWords, let firstNonEmpty = decodedPieces.firstIndex(where: \.hasWords) {
+                                        var merged: [SpeakerTurnTranscript] = []
+                                        var pendingStart = Double(decodeTurns[0].frames.lowerBound) / 16_000
+                                        for idx in firstNonEmpty..<decodedPieces.count {
+                                            let piece = decodedPieces[idx]
+                                            let pieceStart = idx == firstNonEmpty ? pendingStart : Double(piece.turn.frames.lowerBound) / 16_000
+                                            let pieceEnd = Double(piece.turn.frames.upperBound) / 16_000
+                                            if piece.hasWords {
+                                                if let prev = merged.last, SpeakerTurn.sameVoice(prev.evidence, piece.turn.evidence) {
+                                                    merged[merged.count - 1] = SpeakerTurnTranscript(
+                                                        text: prev.text + piece.text,
+                                                        start: prev.start,
+                                                        end: pieceEnd,
+                                                        evidence: SpeakerTurn.mergeEvidence(prev.evidence, piece.turn.evidence))
+                                                } else {
+                                                    merged.append(SpeakerTurnTranscript(
+                                                        text: piece.text, start: pieceStart, end: pieceEnd, evidence: piece.turn.evidence))
+                                                }
+                                                pendingStart = pieceEnd
+                                            } else if !merged.isEmpty {
+                                                let prev = merged[merged.count - 1]
+                                                merged[merged.count - 1] = SpeakerTurnTranscript(
+                                                    text: prev.text, start: prev.start, end: pieceEnd, evidence: prev.evidence)
+                                                pendingStart = pieceEnd
+                                            }
+                                        }
+                                        if !merged.isEmpty {
+                                            var split = SpeechRecognition(windowID: aligned.windowID, text: merged.map(\.text).joined(),
+                                                tokens: [], timestamps: [], rawJSON: aligned.rawJSON,
+                                                configurationFingerprint: aligned.configurationFingerprint)
+                                            split.recognitionFingerprint = aligned.recognitionFingerprint
+                                            split.speakers = detectedSpeakers
+                                            split.speakerTurns = merged
+                                            aligned = split
                                         }
                                     }
-                                    if !merged.isEmpty {
-                                        var split = SpeechRecognition(windowID: aligned.windowID, text: merged.map(\.text).joined(),
-                                            tokens: [], timestamps: [], rawJSON: aligned.rawJSON,
-                                            configurationFingerprint: aligned.configurationFingerprint)
-                                        split.recognitionFingerprint = aligned.recognitionFingerprint
-                                        split.speakers = detectedSpeakers
-                                        split.speakerTurns = merged
-                                        aligned = split
-                                    }
+                                } catch {
+                                    try attempt.checkCancellation()
+                                    aligned.speakerFailure = "speaker_turn_redecode_failed"
                                 }
-                            } catch {
-                                try attempt.checkCancellation()
-                                aligned.speakerFailure = "speaker_turn_redecode_failed"
+                            } else if aligned.tokens.isEmpty, let singleTurn = decodeTurns.first {
+                                aligned.speakerTurns = [SpeakerTurnTranscript(
+                                    text: aligned.text,
+                                    start: Double(singleTurn.frames.lowerBound) / 16_000,
+                                    end: Double(singleTurn.frames.upperBound) / 16_000,
+                                    evidence: singleTurn.evidence)]
                             }
-                        } else if aligned.tokens.isEmpty, turns.count == 1 {
-                            aligned.speakerTurns = [SpeakerTurnTranscript(
-                                text: aligned.text,
-                                start: Double(turns[0].frames.lowerBound) / 16_000,
-                                end: Double(turns[0].frames.upperBound) / 16_000,
-                                evidence: turns[0].evidence)]
                         }
                     }
                 }
@@ -1055,6 +1028,30 @@ public final class SpeechEngine: @unchecked Sendable {
             backend: recognitionBackend, download: download, cacheRoot: coreMLCacheDirectory,
             attempt: attempt, recorder: recorder, effectiveThreads: effectiveCPUThreads,
             validateBundleFiles: false)
+    }
+
+    private func ensureSpeakerRuntime(directory: URL, attempt: SpeechAttempt,
+                                      recorder: SpeechDiagnosticRecorder?) throws -> SpeakerRuntime {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let segModel = selectedSegmentationModel.withLock { $0 }
+        let spkThreads = effectiveCPUThreads
+        let speakerCacheRoot = recognitionBackend == .sherpaCoreML ? coreMLCacheDirectory : nil
+        if let current = speakerRuntime, runtimeSegmentationModel == segModel,
+           (current.acceleratorMask == 3 || runtimeSpeakerThreads == spkThreads) {
+            return current
+        }
+        let loadStart = DispatchTime.now().uptimeNanoseconds
+        try ensureSpeakerValidated(directory: directory, segmentationModel: segModel, attempt: attempt)
+        let created = try SpeakerRuntime(directory: directory, segmentationModel: segModel,
+            cacheRoot: speakerCacheRoot, attempt: attempt, threads: spkThreads,
+            skipValidation: true)
+        if let recorder {
+            recorder.value.modelLoadSeconds += SpeechDiagnosticRecorder.seconds(since: loadStart)
+        }
+        speakerRuntime = created
+        runtimeSegmentationModel = segModel
+        runtimeSpeakerThreads = spkThreads
+        return created
     }
 
     private func analyze(input: SpeechInputSet, boundary: AudioProcessingBoundary, replayOrigin: Int64?, attempt: SpeechAttempt,

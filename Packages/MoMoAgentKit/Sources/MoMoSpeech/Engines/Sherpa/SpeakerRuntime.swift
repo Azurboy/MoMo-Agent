@@ -8,12 +8,14 @@ private func speakerAttemptIsCancelled(_ raw: UnsafeRawPointer?) -> Int32 {
     return attempt.pollCancellationOrPace() ? 1 : 0
 }
 
-/// Queue-confined 3D-Speaker ERes2NetV2 (192-d) + configurable DiariZen / PyAnnote Community-1 segmentation on ORT CPU.
+/// Queue-confined 3D-Speaker ERes2NetV2 (192-d) + configurable DiariZen / PyAnnote Community-1 segmentation
+/// accelerated on CoreML CPUAndNeuralEngine with automatic ORT CPU fallback.
 final class SpeakerRuntime: @unchecked Sendable {
     static let revision = "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239"
     private static let stitchedBlockSamples = 640_000
     let segmentationModel: SpeakerSegmentationModel
     let embeddingDim: Int
+    let acceleratorMask: Int
     private let handle: OpaquePointer
     init(directory: URL, segmentationModel: SpeakerSegmentationModel = .diariZenWavLMBase,
          cacheRoot: URL?, attempt: SpeechAttempt, threads: Int = 2,
@@ -29,12 +31,36 @@ final class SpeakerRuntime: @unchecked Sendable {
                 }
             }
         }
-        _ = cacheRoot
+        let provider: String
+        let effectiveThreads: Int
+        if let cacheRoot {
+            let cacheDir = cacheRoot.appendingPathComponent(
+                "speaker-coreml-v2-\(segmentationModel.sha256.prefix(16))",
+                isDirectory: true)
+            for sub in [cacheDir,
+                        cacheDir.appendingPathComponent("seg", isDirectory: true),
+                        cacheDir.appendingPathComponent("emb", isDirectory: true)] {
+                try FileManager.default.createDirectory(
+                    at: sub,
+                    withIntermediateDirectories: true,
+                    attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+            }
+            if !cacheDir.path.contains("\n") && !cacheDir.path.contains("\r") {
+                provider = "coreml:\(cacheDir.path)"
+                effectiveThreads = min(2, max(1, threads))
+            } else {
+                provider = "cpu"
+                effectiveThreads = max(1, min(6, threads))
+            }
+        } else {
+            provider = "cpu"
+            effectiveThreads = max(1, min(6, threads))
+        }
         var error = [CChar](repeating: 0, count: 2048)
         guard let handle = MoMoCreateSpeakerRuntimeWithThreads(
             directory.appendingPathComponent(files[1].0).path,
             directory.appendingPathComponent(files[0].0).path,
-            "cpu", Int32(max(1, min(6, threads))), &error, error.count) else {
+            provider, Int32(effectiveThreads), &error, error.count) else {
             throw SpeechNativeFailure(stage: .load, detail: error.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
         }
         let dim = Int(MoMoGetSpeakerEmbeddingDim(handle))
@@ -44,6 +70,7 @@ final class SpeakerRuntime: @unchecked Sendable {
         }
         self.segmentationModel = segmentationModel
         self.embeddingDim = dim
+        self.acceleratorMask = Int(MoMoGetSpeakerAcceleratorMask(handle))
         self.handle = handle
     }
     deinit { MoMoDestroySpeakerRuntime(handle) }
