@@ -43,31 +43,56 @@ func withNativeCancelToken(_ attempt: SpeechAttempt, _ body: (OpaquePointer?) ->
     return box.withPointer(body)
 }
 
+public enum SpeechBackgroundBudget: String, Sendable, Equatable {
+    /// Conservative pace (`0.65` CPU-s/s) for finite UIKit background tasks subject to XNU's 48s/60s `cpu_resource_fatal` limit.
+    case standard
+    /// Elevated pace (`1.35` CPU-s/s) for system `BGProcessingTask` / `BGContinuedProcessingTask` grants on battery under nominal/fair thermal state.
+    case elevatedSystemTask
+    /// High-throughput pace (`2.20` CPU-s/s) for system processing grants while connected to external power under nominal/fair thermal state.
+    case externalPowerSystemTask
+
+    var parameters: (maxCapacity: Double, initialBurst: Double, refillRate: Double) {
+        switch self {
+        case .standard: return (6.0, 6.0, 0.65)
+        case .elevatedSystemTask: return (10.0, 8.0, 1.35)
+        case .externalPowerSystemTask: return (14.0, 12.0, 2.20)
+        }
+    }
+}
+
 /// Paces total process CPU consumption (`getrusage(RUSAGE_SELF)`) while the app scene is in the
 /// background so background transcription stays safely below XNU's `cpu_resource_fatal` limit
-/// (`48s` CPU over `60s` wall time = `80%` single-core equivalent).
+/// (`48s` CPU over `60s` wall time = `80%` single-core equivalent) on finite UIKit tasks while
+/// scaling up under admitted `BGProcessingTask` / `BGContinuedProcessingTask` coalitions.
 final class BackgroundCPUPacer: @unchecked Sendable {
     private let condition = NSCondition()
     private var isForeground: Bool
+    private var currentBudget: SpeechBackgroundBudget
     private var tokens: Double
     private var lastWallSeconds: Double
     private var lastCPUSeconds: Double
 
-    private let maxCapacity: Double
-    private let initialBackgroundBurst: Double
-    private let refillRate: Double
+    private var maxCapacity: Double
+    private var initialBackgroundBurst: Double
+    private var refillRate: Double
 
     init(initiallyForeground: Bool = true,
-         maxCapacity: Double = 6.0,
-         initialBackgroundBurst: Double = 6.0,
-         refillRate: Double = 0.65) {
+         budget: SpeechBackgroundBudget = .standard,
+         maxCapacity: Double? = nil,
+         initialBackgroundBurst: Double? = nil,
+         refillRate: Double? = nil) {
+        let defaults = budget.parameters
+        let resolvedMax = maxCapacity ?? defaults.maxCapacity
+        let resolvedBurst = initialBackgroundBurst ?? defaults.initialBurst
+        let resolvedRate = refillRate ?? defaults.refillRate
         self.isForeground = initiallyForeground
-        self.maxCapacity = maxCapacity
-        self.initialBackgroundBurst = initialBackgroundBurst
-        self.refillRate = refillRate
+        self.currentBudget = budget
+        self.maxCapacity = resolvedMax
+        self.initialBackgroundBurst = resolvedBurst
+        self.refillRate = resolvedRate
         let wall = Self.monotonicSeconds()
         let cpu = Self.processCPUSeconds()
-        self.tokens = initiallyForeground ? maxCapacity : initialBackgroundBurst
+        self.tokens = initiallyForeground ? resolvedMax : resolvedBurst
         self.lastWallSeconds = wall
         self.lastCPUSeconds = cpu
     }
@@ -76,6 +101,39 @@ final class BackgroundCPUPacer: @unchecked Sendable {
         condition.lock()
         defer { condition.unlock() }
         return isForeground
+    }
+
+    var backgroundBudget: SpeechBackgroundBudget {
+        condition.lock()
+        defer { condition.unlock() }
+        return currentBudget
+    }
+
+    var currentRefillRate: Double {
+        condition.lock()
+        defer { condition.unlock() }
+        return refillRate
+    }
+
+    func setBackgroundBudget(_ budget: SpeechBackgroundBudget) {
+        condition.lock()
+        defer { condition.unlock() }
+        guard currentBudget != budget else { return }
+        updateBucketLocked()
+        let previousMax = maxCapacity
+        let next = budget.parameters
+        currentBudget = budget
+        maxCapacity = next.maxCapacity
+        initialBackgroundBurst = next.initialBurst
+        refillRate = next.refillRate
+        if isForeground {
+            tokens = next.maxCapacity
+        } else if next.maxCapacity > previousMax {
+            tokens = min(next.maxCapacity, max(tokens, min(next.initialBurst, tokens + (next.maxCapacity - previousMax) * 0.5)))
+        } else {
+            tokens = min(tokens, next.maxCapacity)
+        }
+        condition.broadcast()
     }
 
     func setSceneForeground(_ foreground: Bool) {

@@ -255,6 +255,7 @@ final class PhoneRuntime {
         }
         backgroundTasks?.onResourceConditionsChanged = { [weak self] allowed in
             let constraint = PhoneBackgroundTasks.currentProcessingConstraint
+            self?.syncSpeechExecutionMode()
             if allowed { self?.requestSpeechWarmup() }
             else {
                 self?.speechWarmup?.cancel()
@@ -268,6 +269,11 @@ final class PhoneRuntime {
                 await self?.transcription?.setAnalysisPrefetchEnabled(allowed)
                 await self?.transcription?.setHistoricalWorkAllowed(allowed, constraint: constraint)
             }
+        }
+        library.timeline.onSelectedDayChanged = { [weak self] day in
+            guard let self else { return }
+            let focused = self.isForeground ? day : nil
+            Task { await self.transcription?.setFocusedDay(focused) }
         }
         library.timeline.preparePlayback = { [weak self] windows in
             guard let self else { return }
@@ -301,10 +307,14 @@ final class PhoneRuntime {
         let initialSnapshot = await transcription?.snapshot()
         if let fingerprint = speechFingerprint,
            let handle = initialSnapshot?.execution ?? transcriptionSnapshot?.execution,
-           handle.origin != .continuedProcessing,
            handle.batchExecution != nil,
-           (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: fingerprint)) == true {
-            await transcription?.requestPriorityInterleaving(execution: handle)
+           let summary = try? await archive.livePriorityWorkSummary(configurationFingerprint: fingerprint) {
+            let shouldInterleave = handle.origin == .continuedProcessing
+                ? summary.hasHotLiveWork
+                : summary.hasAnyPriorityWork
+            if shouldInterleave {
+                await transcription?.requestPriorityInterleaving(execution: handle)
+            }
         }
         await transcription?.requestWork()
         await backgroundTasks?.scheduleAutomatic()
@@ -385,19 +395,39 @@ final class PhoneRuntime {
         receiver.dismissFailures()
     }
 
+    private static func resolvedBackgroundBudget(systemGrantActive: Bool) -> SpeechBackgroundBudget {
+        guard systemGrantActive,
+              !ProcessInfo.processInfo.isLowPowerModeEnabled,
+              [.nominal, .fair].contains(ProcessInfo.processInfo.thermalState) else {
+            return .standard
+        }
+        if !UIDevice.current.isBatteryMonitoringEnabled {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+        }
+        switch UIDevice.current.batteryState {
+        case .charging, .full:
+            return .externalPowerSystemTask
+        default:
+            return .elevatedSystemTask
+        }
+    }
+
     private func syncSpeechExecutionMode() {
         speech?.setSceneForeground(isForeground)
+        let systemGrantActive = activeSystemTaskRunning || backgroundTasks?.hasActiveContinuedGrant == true
         let elevatedQoS = isForeground
-            || activeSystemTaskRunning
-            || backgroundTasks?.hasActiveContinuedGrant == true
+            || systemGrantActive
             || transcriptionContinuation?.isActive == true
             || receivedAudioTranscription?.isActive == true
         speech?.setForegroundPriority(elevatedQoS)
+        speech?.setBackgroundBudget(Self.resolvedBackgroundBudget(systemGrantActive: systemGrantActive))
     }
 
     func foreground() async {
         isForeground = true
         syncSpeechExecutionMode()
+        let selectedDay = library.timeline.selectedDay
+        await transcription?.setFocusedDay(selectedDay)
         remoteAgent.foreground()
         if foregrounding {
             await withCheckedContinuation { foregroundWaiters.append($0) }
@@ -468,6 +498,7 @@ final class PhoneRuntime {
         guard isForeground else { return }
         isForeground = false
         pendingForegroundBatchFlush = false
+        Task { await transcription?.setFocusedDay(nil) }
         remoteAgent.leavingForeground()
         if transcription != nil, PhoneBackgroundTasks.resourcesAllowProcessing,
            !activeSystemTaskRunning, backgroundTasks?.hasActiveContinuedGrant != true {

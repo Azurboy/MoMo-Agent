@@ -183,6 +183,15 @@ public final class SpeechEngine: @unchecked Sendable {
         backgroundCPUPacer.setSceneForeground(isForeground)
     }
 
+    public var backgroundBudget: SpeechBackgroundBudget {
+        backgroundCPUPacer.backgroundBudget
+    }
+
+    /// Adjusts background CPU pacing according to the active BGTask coalition grant, power source, and thermal state.
+    public func setBackgroundBudget(_ budget: SpeechBackgroundBudget) {
+        backgroundCPUPacer.setBackgroundBudget(budget)
+    }
+
     private var effectiveCPUThreads: Int {
         #if os(iOS)
         return max(1, min(2, configuration.threads))

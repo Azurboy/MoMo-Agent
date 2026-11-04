@@ -161,7 +161,12 @@ final class PhoneBackgroundTasks {
     func register() {
         guard !registered else { return }
         registered = true
-        resourceObservers = [Notification.Name.NSProcessInfoPowerStateDidChange, ProcessInfo.thermalStateDidChangeNotification].map { name in
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        resourceObservers = [
+            Notification.Name.NSProcessInfoPowerStateDidChange,
+            ProcessInfo.thermalStateDidChangeNotification,
+            UIDevice.batteryStateDidChangeNotification
+        ].map { name in
             Task { [weak self] in
                 for await _ in NotificationCenter.default.notifications(named: name).map({ _ in () }) {
                     guard !Task.isCancelled else { return }

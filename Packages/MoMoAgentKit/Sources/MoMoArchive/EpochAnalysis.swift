@@ -90,7 +90,7 @@ extension ArchiveStore {
             else if let rangeEnd { hasRangeBoundary = try analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint).contains { $0.start == rangeEnd } }
             else { hasRangeBoundary = false }
             guard let rate = row.double(3), rate.isFinite, rate > 0, rate <= 192_000 else { throw ArchiveError.invalidTranscript }
-            let clampedStepSeconds = max(5, min(120, maxStepSeconds.isFinite ? maxStepSeconds : 120))
+            let clampedStepSeconds = max(5, min(300, maxStepSeconds.isFinite ? maxStepSeconds : 120))
             let step = max(1, Int64((rate * clampedStepSeconds).rounded()))
             var (through, overflow) = start.addingReportingOverflow(step)
             guard !overflow else { throw ArchiveError.invalidTranscript }
@@ -333,72 +333,99 @@ extension ArchiveStore {
                                          inputLease: TranscriptionInputLease? = nil,
                                          sessionID: UUID? = nil, expectedGeneration: Int64? = nil, sources: [TimelineAudioSource]? = nil,
                                          isolateLocalFailures: Bool = false, selectedWindowID: String? = nil,
-                                         now: Date = Date()) throws -> TranscriptionWindowTicket? {
+                                         focusedDay: TimelineDay? = nil,
+                                         now: Date = Date(), calendar: Calendar = .current) throws -> TranscriptionWindowTicket? {
         if let batchExecution {
             try registerPreparedBatchWindows(execution: batchExecution, fingerprint: configurationFingerprint)
         }
         try validateRetryScope(sessionID: sessionID, expectedGeneration: expectedGeneration)
         let filter = sessionID.map { SQLValue.text($0.uuidString) } ?? .null
         let selected = selectedWindowID.map(SQLValue.text) ?? .null
-        var cursorRowID: Int64 = 0
-        while true {
-            let candidates = try database.rows("""
-                SELECT w.rowid,w.descriptor,w.generation FROM analysis_windows w
-                JOIN sessions s ON s.id=w.session_id
-                WHERE w.state='pending' AND w.configuration_hash=? AND s.deleted=0 AND s.projection_blocked=0 AND w.generation=s.generation
-                  AND (? IS NULL OR s.id=?) AND (? IS NULL OR w.id=?) AND w.rowid > ?
-                ORDER BY w.rowid LIMIT 64
-                """, [.text(configurationFingerprint), filter, filter, selected, selected, .integer(cursorRowID)])
-            guard !candidates.isEmpty else { break }
-            for row in candidates {
-                cursorRowID = try row.requireInt(0)
-                let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: row.requireData(1))
-                if let sources, !sources.contains(where: { $0.epochID == window.epochID && $0.sessionID == window.sessionID && $0.frames.start < window.coreFrames.end && $0.frames.end > window.coreFrames.start }) { continue }
-                if let batchExecution {
-                    guard try !database.rows("SELECT 1 FROM transcription_batch_windows WHERE batch_id=? AND window_id=?", [.text(batchExecution.batchID.uuidString), .text(window.id)]).isEmpty else { continue }
-                }
-                guard try !batchReserves(window, except: batchExecution?.batchID) else { continue }
-                let generation = try row.requireInt(2)
-                if batchExecution == nil, try processingIsDeferred(epochID: window.epochID, generation: generation, fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, now: now) { continue }
-                let inputs = try contiguousInputs(epochID: window.epochID, from: window.analysisAnchor, through: window.contextFrames.end)
-                guard let last = inputs.last, last.envelope.manifest.frames.end >= window.contextFrames.end else {
-                    if let batchExecution, isolateLocalFailures {
+        let passes: [Bool] = (focusedDay != nil && selectedWindowID == nil) ? [true, false] : [false]
+        let policy = focusedDay != nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
+        var epochManifestCache: [UUID: ChunkManifest?] = [:]
+        func matchesFocusedDay(_ window: ArchiveAnalysisWindow) throws -> Bool {
+            guard let focusedDay, let policy else { return false }
+            let manifest: ChunkManifest?
+            if let cached = epochManifestCache[window.epochID] {
+                manifest = cached
+            } else {
+                let loaded = try database.rows("""
+                    SELECT c.manifest FROM epochs e
+                    JOIN chunks c ON c.rowid=COALESCE(e.min_chunk_rowid, (SELECT rowid FROM chunks WHERE epoch_id=e.id ORDER BY start_frame LIMIT 1))
+                    WHERE e.id=?
+                    """, [.text(window.epochID.uuidString)]).first?.data(0).flatMap { try? WireJSON.decode(ChunkManifest.self, from: $0) }
+                epochManifestCache[window.epochID] = loaded
+                manifest = loaded
+            }
+            guard let manifest else { return false }
+            return policy.overlapsDay(focusedDay, frames: window.coreFrames, manifest: manifest)
+        }
+        for preferFocusedOnly in passes {
+            var cursorRowID: Int64 = 0
+            while true {
+                let candidates = try database.rows("""
+                    SELECT w.rowid,w.descriptor,w.generation FROM analysis_windows w
+                    JOIN sessions s ON s.id=w.session_id
+                    WHERE w.state='pending' AND w.configuration_hash=? AND s.deleted=0 AND s.projection_blocked=0 AND w.generation=s.generation
+                      AND (? IS NULL OR s.id=?) AND (? IS NULL OR w.id=?) AND w.rowid > ?
+                    ORDER BY w.rowid LIMIT 64
+                    """, [.text(configurationFingerprint), filter, filter, selected, selected, .integer(cursorRowID)])
+                guard !candidates.isEmpty else { break }
+                for row in candidates {
+                    cursorRowID = try row.requireInt(0)
+                    let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: row.requireData(1))
+                    if passes.count == 2 {
+                        let isFocused = try matchesFocusedDay(window)
+                        if preferFocusedOnly != isFocused { continue }
+                    }
+                    if let sources, !sources.contains(where: { $0.epochID == window.epochID && $0.sessionID == window.sessionID && $0.frames.start < window.coreFrames.end && $0.frames.end > window.coreFrames.start }) { continue }
+                    if let batchExecution {
+                        guard try !database.rows("SELECT 1 FROM transcription_batch_windows WHERE batch_id=? AND window_id=?", [.text(batchExecution.batchID.uuidString), .text(window.id)]).isEmpty else { continue }
+                    }
+                    guard try !batchReserves(window, except: batchExecution?.batchID) else { continue }
+                    let generation = try row.requireInt(2)
+                    if batchExecution == nil, try processingIsDeferred(epochID: window.epochID, generation: generation, fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, now: now) { continue }
+                    let inputs = try contiguousInputs(epochID: window.epochID, from: window.analysisAnchor, through: window.contextFrames.end)
+                    guard let last = inputs.last, last.envelope.manifest.frames.end >= window.contextFrames.end else {
+                        if let batchExecution, isolateLocalFailures {
+                            try saveProcessingFailure(sessionID: window.sessionID, epochID: window.epochID, generation: generation,
+                                fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, frames: window.coreFrames, code: .audioUnavailable, now: now)
+                            try deferBatchWindow(batchID: batchExecution.batchID, window: window)
+                        }
+                        continue
+                    }
+                    guard inputs.map({ $0.envelope.manifestSHA256 }) == window.replayInputManifestHashes else {
+                        guard let batchExecution, isolateLocalFailures else { throw ArchiveError.staleSource }
+                        try saveProcessingFailure(sessionID: window.sessionID, epochID: window.epochID, generation: generation,
+                            fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, frames: window.coreFrames, code: .invalidAudio, now: now)
+                        try deferBatchWindow(batchID: batchExecution.batchID, window: window)
+                        continue
+                    }
+                    let reuses = inputLease.map { canReuseInputLease($0, window: window, generation: generation, inputs: inputs) } ?? false
+                    let leases: [UUID]
+                    do { leases = reuses ? [] : try leaseInputs(inputs) }
+                    catch let error as ArchiveError {
+                        guard isolateLocalFailures, case .missingRecording = error else { throw error }
                         try saveProcessingFailure(sessionID: window.sessionID, epochID: window.epochID, generation: generation,
                             fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, frames: window.coreFrames, code: .audioUnavailable, now: now)
-                        try deferBatchWindow(batchID: batchExecution.batchID, window: window)
+                        if let batchExecution {
+                            try deferBatchWindow(batchID: batchExecution.batchID, window: window)
+                        }
+                        continue
                     }
-                    continue
-                }
-                guard inputs.map({ $0.envelope.manifestSHA256 }) == window.replayInputManifestHashes else {
-                    guard let batchExecution, isolateLocalFailures else { throw ArchiveError.staleSource }
-                    try saveProcessingFailure(sessionID: window.sessionID, epochID: window.epochID, generation: generation,
-                        fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, frames: window.coreFrames, code: .invalidAudio, now: now)
-                    try deferBatchWindow(batchID: batchExecution.batchID, window: window)
-                    continue
-                }
-                let reuses = inputLease.map { canReuseInputLease($0, window: window, generation: generation, inputs: inputs) } ?? false
-                let leases: [UUID]
-                do { leases = reuses ? [] : try leaseInputs(inputs) }
-                catch let error as ArchiveError {
-                    guard isolateLocalFailures, case .missingRecording = error else { throw error }
-                    try saveProcessingFailure(sessionID: window.sessionID, epochID: window.epochID, generation: generation,
-                        fingerprint: configurationFingerprint, stage: .transcription, workID: window.id, frames: window.coreFrames, code: .audioUnavailable, now: now)
-                    if let batchExecution {
-                        try deferBatchWindow(batchID: batchExecution.batchID, window: window)
+                    let attempt = UUID()
+                    do {
+                        try database.execute("UPDATE analysis_windows SET state='running',attempt_id=? WHERE id=?", [.text(attempt.uuidString), .text(window.id)])
+                    } catch {
+                        for lease in leases { audioLeases.removeValue(forKey: lease) }
+                        throw error
                     }
-                    continue
+                    return TranscriptionWindowTicket(attemptID: attempt, window: window, inputs: inputs, expectedGeneration: generation,
+                                                     batchExecution: batchExecution, leaseIDs: leases)
                 }
-                let attempt = UUID()
-                do {
-                    try database.execute("UPDATE analysis_windows SET state='running',attempt_id=? WHERE id=?", [.text(attempt.uuidString), .text(window.id)])
-                } catch {
-                    for lease in leases { audioLeases.removeValue(forKey: lease) }
-                    throw error
-                }
-                return TranscriptionWindowTicket(attemptID: attempt, window: window, inputs: inputs, expectedGeneration: generation,
-                                                 batchExecution: batchExecution, leaseIDs: leases)
+                if candidates.count < 64 { break }
             }
-            if candidates.count < 64 { break }
         }
         return nil
     }

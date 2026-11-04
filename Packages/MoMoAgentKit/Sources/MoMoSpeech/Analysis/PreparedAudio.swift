@@ -18,7 +18,18 @@ final class PreparedAudioCache: @unchecked Sendable {
             try attempt.checkCancellation()
             entries.removeAll { $0.window.id == window.id }
             entries.append(Entry(owner: owner, window: window, samples: samples))
-            if entries.count > capacity { entries.removeFirst(entries.count - capacity) }
+            let protectedPerOwner = max(1, min(4, capacity / 2))
+            while entries.count > capacity {
+                var counts: [UUID: Int] = [:]
+                for entry in entries { counts[entry.owner, default: 0] += 1 }
+                if let tailOtherIndex = entries.lastIndex(where: { $0.owner != owner && (counts[$0.owner] ?? 0) > protectedPerOwner }) {
+                    entries.remove(at: tailOtherIndex)
+                } else if let oldestOwnOverflow = entries.firstIndex(where: { (counts[$0.owner] ?? 0) > protectedPerOwner }) {
+                    entries.remove(at: oldestOwnOverflow)
+                } else {
+                    entries.removeFirst()
+                }
+            }
         }
     }
 

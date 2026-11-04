@@ -26,6 +26,7 @@ final class TimelineModel {
     @ObservationIgnored private var summaryTask: Task<Void, Never>?
     @ObservationIgnored var requestSummaries: (@MainActor (TimelineDay) -> Void)?
     @ObservationIgnored var preparePlayback: (@MainActor ([TimelineWindow]) -> Void)?
+    @ObservationIgnored var onSelectedDayChanged: (@MainActor (TimelineDay) -> Void)?
     private(set) var invalidationRevision: UInt64 = 0
     @ObservationIgnored private var readingPositions: [TimelineWindowID: TimelineReadingAnchor] = [:]
     @ObservationIgnored private var readingLayouts: [TimelineWindowID: ReadingLayout] = [:]
@@ -227,7 +228,9 @@ final class TimelineModel {
 
     func select(_ day: TimelineDay) {
         guard day <= TimelineDay(Date()) else { return }
+        let changed = selectedDay != day
         selectedDay = day
+        if changed { onSelectedDayChanged?(day) }
     }
 
     func currentID(_ id: TimelineWindowID?) -> TimelineWindowID? {
@@ -249,7 +252,10 @@ final class TimelineModel {
     func refresh() async {
         let currentToday = TimelineDay(Date())
         if currentToday != observedToday {
-            if selectedDay == observedToday { selectedDay = currentToday }
+            if selectedDay == observedToday {
+                selectedDay = currentToday
+                onSelectedDayChanged?(currentToday)
+            }
             observedToday = currentToday
         }
         let day = selectedDay
