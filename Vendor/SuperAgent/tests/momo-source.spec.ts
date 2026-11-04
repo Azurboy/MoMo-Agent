@@ -106,6 +106,31 @@ describe('momoKind policy and loopback bridge', () => {
       basis: { via: 'admission', source: SOURCE, row: 'transcripts', cell: 'listedUnaddressed' },
     })
 
+    const participatingThread: Thread = {
+      ...emptyThread('transcript:rec-1'),
+      subscriptions: ['tkt-existing'],
+    }
+    expect(policy.gate(transcriptTrigger, participatingThread, [])).toMatchObject({
+      admissible: true,
+      strength: 'inferred',
+      basis: { via: 'admission', source: SOURCE, row: 'transcripts', cell: 'listedUnaddressed' },
+    })
+
+    const otherSpeakerTrigger = momoTrigger({
+      cursor: '3', id: 'span-2', stream: 'transcripts', thread_id: 'transcript:rec-1',
+      actor_id: 'other', actor_name: 'Other Speaker', human: true,
+      at: '2026-10-31T10:06:00.000Z', text: '[他人:同事] 我去把那个接口改一下。',
+      source_id: 'rec-1', reply_allowed: true,
+    }, 'http://127.0.0.1:18787')
+    expect(policy.gate(otherSpeakerTrigger, emptyThread('transcript:rec-1'), [])).toEqual({
+      admissible: false,
+      reason: 'not_a_member',
+    })
+    expect(policy.gate(otherSpeakerTrigger, participatingThread, [])).toEqual({
+      admissible: false,
+      reason: 'not_a_member',
+    })
+
     const offSettings = SettingsSchema.parse({ ...settings, eval: { mode: 'off' } })
     const offSources = new SourceRegistry(() => offSettings, new HealthBoard())
     offSources.register(momoKind)

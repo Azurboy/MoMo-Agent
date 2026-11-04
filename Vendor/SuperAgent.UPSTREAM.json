@@ -31,8 +31,8 @@
     },
     {
       "file": "src/policy.ts, src/executor/dsh.ts, src/app/sessions.ts, src/client/locales.ts",
-      "reason": "Support general Personal Agent dual-track proactive admission: rules marked `exploratory: true` may accept grounded exploratory research, option trade-off synthesis, and workspace deliverables (`target_basis: 'exploratory'`) without prematurely mutating user repositories, while non-exploratory rules preserve strict settled-direction enforcement.",
-      "validation": "tests/policy.spec.ts, tests/locales.spec.ts, tests/model-surface.spec.ts, and Tests/AgentRuntime/test_superagent_runtime.py"
+      "reason": "Support general Personal Agent dual-track proactive admission: rules marked `exploratory: true` may accept grounded exploratory research, option trade-off synthesis, and workspace deliverables (`target_basis: 'exploratory'`) without prematurely mutating user repositories, while non-exploratory rules preserve strict settled-direction enforcement; keep unaddressed MoMo ambient transcripts/life-signals rule-evaluated (`inferred`) for the owner and non-originating (`not_a_member`) for non-owner speakers even on participating threads.",
+      "validation": "tests/policy.spec.ts, tests/momo-source.spec.ts, tests/locales.spec.ts, tests/model-surface.spec.ts, and Tests/AgentRuntime/test_superagent_runtime.py"
     }
   ]
 }

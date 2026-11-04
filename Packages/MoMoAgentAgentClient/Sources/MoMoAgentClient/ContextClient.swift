@@ -6,8 +6,12 @@ public struct SourceEnvelope: Codable, Sendable, Equatable {
         public let id: String
         public let text: String
         public let recordedAt: Double
-        public init(id: UUID, text: String, recordedAt: Date) {
-            self.id = id.uuidString.lowercased(); self.text = text; self.recordedAt = recordedAt.timeIntervalSince1970
+        public let isOwner: Bool?
+        public init(id: UUID, text: String, recordedAt: Date, isOwner: Bool? = nil) {
+            self.id = id.uuidString.lowercased()
+            self.text = text
+            self.recordedAt = recordedAt.timeIntervalSince1970
+            self.isOwner = isOwner
         }
     }
     public let libraryId: String

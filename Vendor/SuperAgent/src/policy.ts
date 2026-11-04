@@ -213,8 +213,11 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const basis = { ...recorded, via: 'admission' as const, cell, ...trigger.addressed ? { addressed: trigger.addressed } : {} }
       // Check explicit admission cells before thread follow-ups so a thread's tickets never weaken an explicit request to a follow-up.
       if (admission === 'explicit') return { admissible: true, strength: 'explicit', basis }
+      // Ambient MoMo observations (unaddressed voice transcripts and life signals) never escalate via thread follow-ups:
+      // unlisted speakers cannot originate tickets on handback, and owner observations stay rule-evaluated (`inferred`).
+      const ambientMomo = trigger.source === 'momo' && !trigger.addressed && (row === 'transcripts' || row === 'life_signals')
       // Direct-message threads belong to one sender (no follow-up for others), and inferred follow-ups require an accept mode other than off (when off, the table decides).
-      if (!(trigger.addressed === 'direct' && !allowed) && (allowed || mode !== 'off') && participating(thread, tickets)) {
+      if (!ambientMomo && !(trigger.addressed === 'direct' && !allowed) && (allowed || mode !== 'off') && participating(thread, tickets)) {
         return { admissible: true, strength: allowed ? 'explicit' : 'inferred', basis: { ...recorded, via: 'followup' } }
       }
       if (admission === 'inferred' && mode !== 'off') return { admissible: true, strength: 'inferred', basis: { ...basis, observation: { mode } } }

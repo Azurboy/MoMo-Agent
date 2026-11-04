@@ -2284,7 +2284,7 @@ function settingsPolicy(settings, sources) {
 				strength: "explicit",
 				basis
 			};
-			if (!(trigger.addressed === "direct" && !allowed) && (allowed || mode !== "off") && participating(thread, tickets)) return {
+			if (!(trigger.source === "momo" && !trigger.addressed && (row === "transcripts" || row === "life_signals")) && !(trigger.addressed === "direct" && !allowed) && (allowed || mode !== "off") && participating(thread, tickets)) return {
 				admissible: true,
 				strength: allowed ? "explicit" : "inferred",
 				basis: {

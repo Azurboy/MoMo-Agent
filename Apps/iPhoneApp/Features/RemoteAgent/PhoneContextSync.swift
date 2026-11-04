@@ -148,7 +148,7 @@ final class PhoneContextSync {
         let spans = try document.spans.map { span -> SourceEnvelope.Span in
             guard let location = snapshot.locations[span.id] else { throw SyncError.missingSourceTime }
             let text = span.speaker.map { "[\($0)] \(span.text)" } ?? span.text
-            return .init(id: span.id, text: text, recordedAt: location.recordedAt)
+            return .init(id: span.id, text: text, recordedAt: location.recordedAt, isOwner: span.attribution?.isUser)
         }
         let source = Source(envelope: SourceEnvelope(library: archive.libraryInstanceID, session: recording.sessionID, device: deviceID,
             generation: document.generation, version: document.version, recordedAt: recording.recordedAt, spans: spans))
