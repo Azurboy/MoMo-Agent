@@ -98,13 +98,27 @@ extension ArchiveStore {
     }
 
     func projectRecordingManifest(sessionID: UUID) throws {
+        let url = try transcriptDirectory(sessionID: sessionID).appendingPathComponent("manifest.json")
+        try validateRecordingPath(url)
+        if !database.isInTransaction,
+           let cached = verifiedManifestProjectionStamps[sessionID],
+           cached.directoryPath == url.deletingLastPathComponent().standardizedFileURL.path,
+           let row = try? database.rows(
+               "SELECT manifest_projected,(SELECT COUNT(*) FROM chunks WHERE session_id=sessions.id) FROM sessions WHERE id=? AND deleted=0",
+               [.text(sessionID.uuidString)]
+           ).first,
+           row.integer(0) == 1,
+           (row.integer(1) ?? 0) == cached.chunkCount,
+           let stamp = FileStatStamp.read(at: url),
+           (stamp.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+           stamp == cached.manifestStamp {
+            return
+        }
         let chunks = try database.rows("SELECT manifest FROM chunks WHERE session_id=? ORDER BY rowid", [.text(sessionID.uuidString)]).map {
             try WireJSON.decode(ChunkManifest.self, from: $0.requireData(0))
         }
         guard !chunks.isEmpty else { return }
         let data = try WireJSON.encode(RecordingManifest(sessionID: sessionID, chunks: chunks))
-        let url = try transcriptDirectory(sessionID: sessionID).appendingPathComponent("manifest.json")
-        try validateRecordingPath(url)
         if !files.fileExists(atPath: url.path),
            try database.rows("SELECT manifest_projected FROM sessions WHERE id=?", [.text(sessionID.uuidString)]).first?.integer(0) == 1 {
             try blockProjection(sessionID: sessionID)
@@ -112,10 +126,12 @@ extension ArchiveStore {
         }
         if files.fileExists(atPath: url.path), try Data(contentsOf: url) == data {
             try database.execute("UPDATE sessions SET manifest_projected=1 WHERE id=? AND manifest_projected!=1", [.text(sessionID.uuidString)])
+            recordVerifiedManifestProjection(sessionID: sessionID, manifestURL: url, chunkCount: Int64(chunks.count))
             return
         }
         try ArchiveFilePolicy.write(data, to: url)
         try database.execute("UPDATE sessions SET manifest_projected=1 WHERE id=?", [.text(sessionID.uuidString)])
+        recordVerifiedManifestProjection(sessionID: sessionID, manifestURL: url, chunkCount: Int64(chunks.count))
     }
 
     func projectTranscript(sessionID: UUID) throws {
@@ -172,6 +188,7 @@ extension ArchiveStore {
 
     func blockProjection(sessionID: UUID) throws {
         verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+        verifiedManifestProjectionStamps.removeValue(forKey: sessionID)
         try database.transaction {
             try database.execute("UPDATE sessions SET projection_blocked=1 WHERE id=?", [.text(sessionID.uuidString)])
             try invalidateAgentSources(sessionID: sessionID)

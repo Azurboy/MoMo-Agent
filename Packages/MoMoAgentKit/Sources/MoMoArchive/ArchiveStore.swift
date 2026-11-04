@@ -2,11 +2,50 @@ import Darwin
 import Foundation
 import MoMoContracts
 
+struct VerifiedChunkFileStamps: Sendable, Equatable {
+    let audio: FileStatStamp
+    let manifest: FileStatStamp
+}
+
 struct VerifiedChunkAudioStamp: Equatable {
     let audio: FileStatStamp
     let manifest: FileStatStamp
     let audioSHA256: String
     let manifestSHA256: String
+}
+
+@frozen
+public struct AcceptedChunkID: Sendable, Equatable {
+    public let highBits: UInt64
+    public let lowBits: UInt64
+
+    public init(_ uuid: UUID) {
+        let u = uuid.uuid
+        self.highBits = (UInt64(u.0) << 56) | (UInt64(u.1) << 48) | (UInt64(u.2) << 40) | (UInt64(u.3) << 32)
+            | (UInt64(u.4) << 24) | (UInt64(u.5) << 16) | (UInt64(u.6) << 8) | UInt64(u.7)
+        self.lowBits = (UInt64(u.8) << 56) | (UInt64(u.9) << 48) | (UInt64(u.10) << 40) | (UInt64(u.11) << 32)
+            | (UInt64(u.12) << 24) | (UInt64(u.13) << 16) | (UInt64(u.14) << 8) | UInt64(u.15)
+    }
+
+    public var uuidValue: UUID {
+        UUID(uuid: (
+            UInt8(truncatingIfNeeded: highBits >> 56), UInt8(truncatingIfNeeded: highBits >> 48),
+            UInt8(truncatingIfNeeded: highBits >> 40), UInt8(truncatingIfNeeded: highBits >> 32),
+            UInt8(truncatingIfNeeded: highBits >> 24), UInt8(truncatingIfNeeded: highBits >> 16),
+            UInt8(truncatingIfNeeded: highBits >> 8), UInt8(truncatingIfNeeded: highBits),
+            UInt8(truncatingIfNeeded: lowBits >> 56), UInt8(truncatingIfNeeded: lowBits >> 48),
+            UInt8(truncatingIfNeeded: lowBits >> 40), UInt8(truncatingIfNeeded: lowBits >> 32),
+            UInt8(truncatingIfNeeded: lowBits >> 24), UInt8(truncatingIfNeeded: lowBits >> 16),
+            UInt8(truncatingIfNeeded: lowBits >> 8), UInt8(truncatingIfNeeded: lowBits)
+        ))
+    }
+}
+
+@frozen
+public enum InboxCommitOutcome: Sendable, Equatable {
+    case accepted(AcceptedChunkID)
+    case missing
+    case ignored
 }
 
 public struct ReceiptOutboxEntry: Sendable {
@@ -40,6 +79,8 @@ public actor ArchiveStore {
     var hasPendingFileDeletions = false
     var compactedBytesPendingVacuum: Int64 = 0
     var verifiedRecordingFilesCache: [UUID: VerifiedRecordingFilesEntry] = [:]
+    var verifiedDirectoryIdentityCache: [UUID: VerifiedDirectoryIdentityEntry] = [:]
+    var verifiedManifestProjectionStamps: [UUID: VerifiedManifestProjectionStamp] = [:]
     var verifiedRecordingFilesDataVersion: Int64 = -1
     var verifiedChunkAudioStamps: [UUID: VerifiedChunkAudioStamp] = [:]
     var voiceprintBankCache: VoiceprintBankCache?
@@ -144,22 +185,97 @@ public actor ArchiveStore {
         try? loadEnvelopeFromDisk(item).manifest.chunkID
     }
 
-    public nonisolated static func preverifyInboxItem(_ item: InboxItem) -> (chunkID: UUID, manifestSHA256: String, audioSHA256: String)? {
-        guard let envelope = try? loadEnvelopeFromDisk(item) else { return nil }
-        let manifest = envelope.manifest
-        guard manifest.representation == .full else { return nil }
-        let temporaryAudio = item.directoryURL.appendingPathComponent("audio")
-        guard FileManager.default.fileExists(atPath: temporaryAudio.path),
-              let size = try? temporaryAudio.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              Int64(size) == manifest.byteCount,
-              (try? ContentHash.sha256(fileAt: temporaryAudio)) == manifest.audioSHA256,
-              (try? validateAudio(at: temporaryAudio, manifest: manifest)) != nil else {
-            return nil
+    private nonisolated static func verifyInboxDirectoryAtPath(
+        _ directoryPath: String,
+        expectedAudio: FileStatStamp,
+        expectedManifest: FileStatStamp,
+        expectedHash: FileStatStamp
+    ) -> Bool {
+        let directoryURL = URL(fileURLWithPath: directoryPath, isDirectory: true)
+        let audioURL = directoryURL.appendingPathComponent("audio")
+        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
+        let hashURL = directoryURL.appendingPathComponent("manifest.sha256")
+        guard let beforeAudio = FileStatStamp.read(at: audioURL),
+              let beforeManifest = FileStatStamp.read(at: manifestURL),
+              let beforeHash = FileStatStamp.read(at: hashURL),
+              beforeAudio == expectedAudio,
+              beforeManifest == expectedManifest,
+              beforeHash == expectedHash,
+              let hash = try? String(contentsOf: hashURL, encoding: .utf8),
+              let manifestData = try? Data(contentsOf: manifestURL),
+              let envelope = try? ManifestEnvelope(manifestData: manifestData, manifestSHA256: hash) else {
+            return false
         }
-        return (manifest.chunkID, envelope.manifestSHA256, manifest.audioSHA256)
+        let manifest = envelope.manifest
+        guard manifest.representation == .full,
+              expectedAudio.size == manifest.byteCount,
+              (try? ContentHash.sha256(fileAt: audioURL)) == manifest.audioSHA256,
+              (try? validateAudio(at: audioURL, manifest: manifest)) != nil,
+              let afterAudio = FileStatStamp.read(at: audioURL),
+              let afterManifest = FileStatStamp.read(at: manifestURL),
+              let afterHash = FileStatStamp.read(at: hashURL),
+              afterAudio == expectedAudio,
+              afterManifest == expectedManifest,
+              afterHash == expectedHash else {
+            return false
+        }
+        return true
     }
 
-    public func commitReceivedChunk(_ item: InboxItem, preverifiedAudioSHA256: String? = nil) throws -> ReceiveResult {
+    public func commitInboxItemForCoordinator(_ item: InboxItem) async throws -> InboxCommitOutcome {
+        let directoryPath = item.directoryURL.path
+        let audioURL = item.directoryURL.appendingPathComponent("audio")
+        let manifestURL = item.directoryURL.appendingPathComponent("manifest.json")
+        let hashURL = item.directoryURL.appendingPathComponent("manifest.sha256")
+        let preAudio = FileStatStamp.read(at: audioURL)
+        let preManifest = FileStatStamp.read(at: manifestURL)
+        let preHash = FileStatStamp.read(at: hashURL)
+        let verifiedOffActor: Bool
+        if let preAudio, let preManifest, let preHash,
+           (preAudio.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+           (preManifest.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+           (preHash.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+           let candidateID = Self.quickInboxChunkIdentity(item),
+           !hasCommittedPresentChunk(id: candidateID) {
+            verifiedOffActor = await Task.detached(priority: .userInitiated) {
+                Self.verifyInboxDirectoryAtPath(
+                    directoryPath,
+                    expectedAudio: preAudio,
+                    expectedManifest: preManifest,
+                    expectedHash: preHash
+                )
+            }.value
+        } else {
+            verifiedOffActor = false
+        }
+        let skipVerifiedSourceAudio: Bool
+        if verifiedOffActor,
+           let preAudio, let preManifest, let preHash,
+           FileStatStamp.read(at: audioURL) == preAudio,
+           FileStatStamp.read(at: manifestURL) == preManifest,
+           FileStatStamp.read(at: hashURL) == preHash {
+            skipVerifiedSourceAudio = true
+        } else {
+            skipVerifiedSourceAudio = false
+        }
+        let result = try commitReceivedChunk(item, skipVerifiedSourceAudio: skipVerifiedSourceAudio)
+        switch result {
+        case .missing:
+            return .missing
+        case .accepted(let receipt):
+            return .accepted(AcceptedChunkID(receipt.chunkID))
+        case .restored(let receipt):
+            return .accepted(AcceptedChunkID(receipt.chunkID))
+        case .duplicate, .deleted, .expired, .noLongerPending:
+            return .ignored
+        }
+    }
+
+    public func commitReceivedChunk(
+        _ item: InboxItem,
+        preverifiedAudioSHA256: String? = nil,
+        skipVerifiedSourceAudio: Bool = false
+    ) throws -> ReceiveResult {
         guard item.directoryURL.deletingLastPathComponent().standardizedFileURL.path == inbox.rootURL.standardizedFileURL.path,
               item.directoryURL.lastPathComponent == item.id.uuidString else {
             throw ArchiveError.invalidInbox
@@ -225,7 +341,8 @@ public actor ArchiveStore {
             item: item,
             envelope: envelope,
             target: target,
-            skipSourceAudioValidation: preverifiedAudioSHA256 == manifest.audioSHA256 && files.fileExists(atPath: item.directoryURL.appendingPathComponent("audio").path)
+            skipSourceAudioValidation: (skipVerifiedSourceAudio || preverifiedAudioSHA256 == manifest.audioSHA256)
+                && files.fileExists(atPath: item.directoryURL.appendingPathComponent("audio").path)
         )
         recordVerifiedChunkAudioStamp(
             chunkID: manifest.chunkID,
@@ -302,7 +419,8 @@ public actor ArchiveStore {
             try database.execute("INSERT INTO receipt_outbox(id,chunk_id,payload) VALUES(?,?,?)", [.text(receipt.receiptID.uuidString), .text(manifest.chunkID.uuidString), .blob(try WireJSON.encode(receipt))])
             try recordReceiveCommit(chunkID: manifest.chunkID)
         }
-        verifiedRecordingFilesCache.removeValue(forKey: manifest.sessionID)
+        verifiedManifestProjectionStamps.removeValue(forKey: manifest.sessionID)
+        refreshVerifiedRecordingFilesAfterChunkCommit(sessionID: manifest.sessionID)
         #if DEBUG && os(macOS)
         receiveBoundaryObserver?(.receiveCommitted)
         #endif
@@ -546,6 +664,8 @@ public actor ArchiveStore {
             return deletion
         }
         verifiedRecordingFilesCache.removeValue(forKey: id)
+        verifiedDirectoryIdentityCache.removeValue(forKey: id)
+        verifiedManifestProjectionStamps.removeValue(forKey: id)
         if let deletedChunks = try? database.rows("SELECT id FROM chunks WHERE session_id=?", [.text(id.uuidString)]) {
             for row in deletedChunks {
                 if let chunkID = try? row.requireUUID(0) {
@@ -725,14 +845,14 @@ public actor ArchiveStore {
         guard let row = try database.rows("SELECT payload FROM receipt_outbox WHERE chunk_id=?", [.text(id.uuidString)]).first else { throw ArchiveError.invalidInbox }
         return try WireJSON.decode(Receipt.self, from: row.requireData(0))
     }
-    nonisolated static func readVerifiedChunkStamps(audioURL: URL, manifestURL: URL) -> (audio: FileStatStamp, manifest: FileStatStamp)? {
+    nonisolated static func readVerifiedChunkStamps(audioURL: URL, manifestURL: URL) -> VerifiedChunkFileStamps? {
         guard let audio = FileStatStamp.read(at: audioURL),
               let manifest = FileStatStamp.read(at: manifestURL),
               (audio.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
               (manifest.mode & UInt16(S_IFMT)) == UInt16(S_IFREG) else {
             return nil
         }
-        return (audio, manifest)
+        return VerifiedChunkFileStamps(audio: audio, manifest: manifest)
     }
 
     func hasVerifiedChunkAudioStamp(

@@ -531,10 +531,10 @@ public actor TranscriptionCoordinator {
     }
 
     /// Elevates newly arrived hot live speech onto a dedicated low-latency fast lane:
-    /// - Immediately cancels any historical VAD / batch VAD prefetch (`VADContinuation` preserves progress with zero loss)
-    ///   and starts hot-live VAD concurrently on `SpeechEngine.analysisQueue` while `queue` finishes its current step.
-    /// - In foreground, if an ultra-hot live utterance arrives right as a slow historical ASR step started, preempts it cleanly.
-    public func onHotLiveWorkArrived(foreground: Bool, ultraHot: Bool) async {
+    /// - Releases any queued historical/batch VAD prefetch and starts hot-live VAD concurrently on
+    ///   `SpeechEngine.analysisQueue` while `queue` finishes its current bounded step (<1 s),
+    ///   never aborting `drain()` or discarding warm `EpochAudioReader` / `preparedAudio` caches.
+    public func onHotLiveWorkArrived(foreground _: Bool, ultraHot _: Bool) async {
         if let execution = managed?.handle, execution.batchExecution != nil, managed?.stopping == nil {
             managed?.interleavePriorityWork = true
         }
@@ -544,49 +544,32 @@ public actor TranscriptionCoordinator {
         if let prefetch = analysisPrefetch, !prefetch.isHotLive {
             try? await releaseAnalysisPrefetch()
         }
-        let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
-        if activeWorkIsHistorical, nativeInFlight {
-            if phase == .preparing {
-                restartAfterCancellation = true
-                attempt?.cancel()
-                return
+        if activeWorkIsHistorical, nativeInFlight, phase == .transcribing,
+           analysisPrefetch == nil, analysisPrefetchEnabled, retryScope == nil {
+            let activeWindow: ArchiveAnalysisWindow?
+            switch activeWork {
+            case .window(let single): activeWindow = single.window
+            case .windows(let batch): activeWindow = batch.first?.window
+            default: activeWindow = nil
             }
-            if phase == .transcribing {
-                if foreground, ultraHot,
-                   nowUptime - activeStepStartedUptime <= 2.5,
-                   nowUptime - lastLivePreemptionUptime >= 45.0 {
-                    lastLivePreemptionUptime = nowUptime
-                    restartAfterCancellation = true
-                    attempt?.cancel()
-                    return
+            if let activeWindow {
+                #if DEBUG
+                let onClaim: @Sendable (UUID) async -> Void = { [observer = onClaimReturned] id in
+                    await observer?(.analysis, id)
                 }
-                if analysisPrefetch == nil, analysisPrefetchEnabled, retryScope == nil {
-                    let activeWindow: ArchiveAnalysisWindow?
-                    switch activeWork {
-                    case .window(let single): activeWindow = single.window
-                    case .windows(let batch): activeWindow = batch.first?.window
-                    default: activeWindow = nil
-                    }
-                    if let activeWindow {
-                        #if DEBUG
-                        let onClaim: @Sendable (UUID) async -> Void = { [observer = onClaimReturned] id in
-                            await observer?(.analysis, id)
-                        }
-                        #else
-                        let onClaim: @Sendable (UUID) async -> Void = { _ in }
-                        #endif
-                        analysisPrefetch = AnalysisPrefetch(
-                            archive: archive,
-                            speech: speech,
-                            activeWindow: activeWindow,
-                            allowHistorical: false,
-                            hotOnly: true,
-                            focusedDay: nil,
-                            lowLatency: true,
-                            onClaim: onClaim
-                        )
-                    }
-                }
+                #else
+                let onClaim: @Sendable (UUID) async -> Void = { _ in }
+                #endif
+                analysisPrefetch = AnalysisPrefetch(
+                    archive: archive,
+                    speech: speech,
+                    activeWindow: activeWindow,
+                    allowHistorical: false,
+                    hotOnly: true,
+                    focusedDay: nil,
+                    lowLatency: true,
+                    onClaim: onClaim
+                )
             }
         }
         requestWork()

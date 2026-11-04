@@ -33,13 +33,13 @@ final class PhoneReceiveCoordinator {
     private var replayReceiptSweep = false
     private var pendingInboxRecovery = false
     private let logger = Logger(subsystem: "com.momoagent.ios", category: "WatchStatus")
-    var onChanged: () async -> Void = {}
-    var onAudioReceived: (UUID) -> Void = { _ in }
-    var onStatusChanged: () async -> Void = {}
-    var onCurrentWatchStatusChanged: (WatchStatusObservation?) -> Void = { _ in }
-    var onStatusFailure: (String?) -> Void = { _ in }
-    var onFailure: (String) -> Void = { _ in }
-    var onSyncFailure: (String?) -> Void = { _ in }
+    var onChanged: @MainActor () async -> Void = {}
+    var onAudioReceived: @MainActor (UUID) -> Void = { _ in }
+    var onStatusChanged: @MainActor () async -> Void = {}
+    var onCurrentWatchStatusChanged: @MainActor (WatchStatusObservation?) -> Void = { _ in }
+    var onStatusFailure: @MainActor (String?) -> Void = { _ in }
+    var onFailure: @MainActor (String) -> Void = { _ in }
+    var onSyncFailure: @MainActor (String?) -> Void = { _ in }
 
     init(archive: ArchiveStore, controls: ControlInbox, identity: ReceiverIdentity,
          recoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
@@ -347,46 +347,37 @@ final class PhoneReceiveCoordinator {
                 }
                 var notifiedFirstAccepted = false
                 var lastChangedNotificationUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
-                var processedInPage = 0
-                // Process bounded pages and yield between files so outbound receipts/reconcile responses
-                // and live transcription are never starved behind a large duplicate inbox.
+                // Process bounded pages so outbound receipts/reconcile responses and live transcription
+                // are never starved behind a large inbox. Keep Receipt/ReceiveResult strictly synchronous
+                // and out of async suspension frames.
                 for item in listed.prefix(inboxPageLimit) {
                     guard !Task.isCancelled else { return }
+                    var shouldNotifyChangedNow = false
                     do {
-                        let candidateChunkID = ArchiveStore.quickInboxChunkIdentity(item)
-                        let preverifiedAudioSHA256: String?
-                        if let candidateChunkID, !(await archive.hasCommittedPresentChunk(id: candidateChunkID)) {
-                            let preverified = await Task.detached(priority: .userInitiated) {
-                                ArchiveStore.preverifyInboxItem(item)
-                            }.value
-                            preverifiedAudioSHA256 = preverified?.audioSHA256
-                        } else {
-                            preverifiedAudioSHA256 = nil
-                        }
-                        switch try await archive.commitReceivedChunk(item, preverifiedAudioSHA256: preverifiedAudioSHA256) {
+                        switch try await archive.commitInboxItemForCoordinator(item) {
                         case .missing:
                             contentsChanged = true
                             onFailure(String(localized: "已接收的原音文件缺失，请在资料库检查。"))
-                        case .accepted(let receipt), .restored(let receipt):
+                        case .accepted(let acceptedID):
                             contentsChanged = true
-                            onAudioReceived(receipt.chunkID)
+                            onAudioReceived(acceptedID.uuidValue)
                             let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
-                            if !notifiedFirstAccepted || nowUptime - lastChangedNotificationUptime >= 1.5 {
+                            if !notifiedFirstAccepted || nowUptime - lastChangedNotificationUptime >= 4.0 {
                                 notifiedFirstAccepted = true
                                 lastChangedNotificationUptime = nowUptime
-                                await onChanged()
-                                contentsChanged = false
+                                shouldNotifyChangedNow = true
                             }
-                        case .duplicate, .deleted, .expired, .noLongerPending: break
+                        case .ignored:
+                            break
                         }
                     } catch {
                         // A failed repair can already have marked the original unavailable.
                         contentsChanged = true
                         onFailure(String(localized: "音频尚未接收完成：\(error.localizedDescription)"))
                     }
-                    processedInPage += 1
-                    if processedInPage % 8 == 0 {
-                        await Task.yield()
+                    if shouldNotifyChangedNow {
+                        contentsChanged = false
+                        await onChanged()
                     }
                 }
             } catch { onFailure(String(localized: "音频收件处理未完成：\(error.localizedDescription)")) }

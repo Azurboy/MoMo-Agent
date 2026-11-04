@@ -92,6 +92,8 @@ extension ArchiveStore {
             try database.execute("UPDATE sessions SET document_directory=? WHERE id=?", [.text(relativeDirectory), .text(sessionID.uuidString)])
         }
         verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+        verifiedDirectoryIdentityCache.removeValue(forKey: sessionID)
+        verifiedManifestProjectionStamps.removeValue(forKey: sessionID)
     }
 
     func parseMarkdownEdit(_ text: String, original: TranscriptDocument) throws -> [TranscriptSpan] {
