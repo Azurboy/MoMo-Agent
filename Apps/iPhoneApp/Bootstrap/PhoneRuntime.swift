@@ -283,6 +283,11 @@ final class PhoneRuntime {
             let focused = self.isForeground ? day : nil
             Task { await self.transcription?.setFocusedDay(focused) }
         }
+        library.onFocusedSessionChanged = { [weak self] sessionID in
+            guard let self else { return }
+            let focused = self.isForeground ? sessionID : nil
+            Task { await self.transcription?.setFocusedSessionID(focused) }
+        }
         library.timeline.preparePlayback = { [weak self] windows in
             guard let self else { return }
             let targets = windows.filter { !$0.sources.isEmpty }.map { AudioPlaybackTarget.window($0.id, $0.sources) }
@@ -315,7 +320,12 @@ final class PhoneRuntime {
         let initialSnapshot = await transcription?.snapshot()
         let summary: LivePriorityWorkSummary?
         if let fingerprint = speechFingerprint {
-            summary = try? await archive.livePriorityWorkSummary(configurationFingerprint: fingerprint)
+            summary = try? await archive.livePriorityWorkSummary(
+                configurationFingerprint: fingerprint,
+                allowFocusedHistorical: isForeground,
+                focusedDay: isForeground ? library.timeline.selectedDay : nil,
+                focusedSessionID: isForeground ? library.focusedSessionID : nil
+            )
         } else {
             summary = nil
         }
@@ -444,7 +454,9 @@ final class PhoneRuntime {
         isForeground = true
         syncSpeechExecutionMode()
         let selectedDay = library.timeline.selectedDay
+        let selectedSession = library.focusedSessionID
         await transcription?.setFocusedDay(selectedDay)
+        await transcription?.setFocusedSessionID(selectedSession)
         remoteAgent.foreground()
         if foregrounding {
             await withCheckedContinuation { foregroundWaiters.append($0) }
@@ -521,6 +533,7 @@ final class PhoneRuntime {
         let bgConstraint = PhoneBackgroundTasks.currentProcessingConstraint(foreground: false)
         Task { [transcription] in
             await transcription?.setFocusedDay(nil)
+            await transcription?.setFocusedSessionID(nil)
             await transcription?.setAnalysisPrefetchEnabled(bgAllowed)
             await transcription?.setHistoricalWorkAllowed(bgAllowed, constraint: bgConstraint)
         }
@@ -645,7 +658,12 @@ final class PhoneRuntime {
                 }
                 let prioritySummary: LivePriorityWorkSummary?
                 if let speechFingerprint {
-                    prioritySummary = try? await archive.livePriorityWorkSummary(configurationFingerprint: speechFingerprint)
+                    prioritySummary = try? await archive.livePriorityWorkSummary(
+                        configurationFingerprint: speechFingerprint,
+                        allowFocusedHistorical: isForeground,
+                        focusedDay: isForeground ? library.timeline.selectedDay : nil,
+                        focusedSessionID: isForeground ? library.focusedSessionID : nil
+                    )
                 } else {
                     prioritySummary = nil
                 }

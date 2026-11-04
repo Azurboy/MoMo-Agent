@@ -122,6 +122,7 @@ public actor TranscriptionCoordinator {
     private var historicalWorkAllowed = true
     private var historicalResourceConstraint: TranscriptionResourceConstraint?
     private var focusedDay: TimelineDay?
+    private var focusedSessionID: UUID?
     private var preservedHistoryFingerprint: String?
     private var activeWorkIsHistorical = false
     private var activeStepStartedUptime: Double = 0
@@ -177,7 +178,25 @@ public actor TranscriptionCoordinator {
     public func setFocusedDay(_ day: TimelineDay?) {
         guard focusedDay != day else { return }
         focusedDay = day
-        if day != nil { requestWork() }
+        if day != nil {
+            if managed?.handle.batchExecution != nil, managed?.stopping == nil,
+               managed?.handle.origin != .continuedProcessing {
+                managed?.interleavePriorityWork = true
+            }
+            requestWork()
+        }
+    }
+
+    public func setFocusedSessionID(_ sessionID: UUID?) {
+        guard focusedSessionID != sessionID else { return }
+        focusedSessionID = sessionID
+        if sessionID != nil {
+            if managed?.handle.batchExecution != nil, managed?.stopping == nil,
+               managed?.handle.origin != .continuedProcessing {
+                managed?.interleavePriorityWork = true
+            }
+            requestWork()
+        }
     }
 
     public func setAnalysisPrefetchEnabled(_ enabled: Bool) {
@@ -868,6 +887,7 @@ public actor TranscriptionCoordinator {
                 let execution = managed?.handle
                 activeExecutionID = execution?.id
                 let currentFocusedDay = systemSuspended ? nil : focusedDay
+                let currentFocusedSessionID = systemSuspended ? nil : focusedSessionID
                 let inputLease = readingSequences.first?.lease
                 var selectedWindow: TranscriptionWindowTicket?
                 var selectedWindowIsInterleavedPriority = false
@@ -889,11 +909,16 @@ public actor TranscriptionCoordinator {
                     }
                     if allowPriorityStep {
                         let effectiveHotOnly = hotOnlyOrigin || burstTailHotOnly
+                        let allowFocusedHistorical = !effectiveHotOnly
+                            && historicalWorkAllowed
+                            && (currentFocusedDay != nil || currentFocusedSessionID != nil)
+                        let priorityMaxTier = effectiveHotOnly ? 0 : 2
                         let activeAnalysis = try await analysisPrefetch?.activeTicket()
                         let priorityClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
                             try await archive.claimAutomaticWork(configurationFingerprint: fingerprint,
-                                inputLease: inputLease, allowHistorical: false, hotOnly: effectiveHotOnly,
-                                focusedDay: currentFocusedDay, activeAnalysis: activeAnalysis)
+                                inputLease: inputLease, allowHistorical: allowFocusedHistorical, hotOnly: effectiveHotOnly,
+                                focusedDay: currentFocusedDay, focusedSessionID: currentFocusedSessionID,
+                                maxTier: priorityMaxTier, activeAnalysis: activeAnalysis)
                         }
                         pendingClaim = .automatic(priorityClaim)
                         switch try await priorityClaim.value {
@@ -944,7 +969,8 @@ public actor TranscriptionCoordinator {
                         let claim = Task { [archive, fingerprint = speech.configurationFingerprint] in
                             try await archive.claimAutomaticWork(configurationFingerprint: fingerprint,
                                 inputLease: inputLease, allowHistorical: allowHistorical,
-                                focusedDay: currentFocusedDay, activeAnalysis: activeAnalysis)
+                                focusedDay: currentFocusedDay, focusedSessionID: currentFocusedSessionID,
+                                activeAnalysis: activeAnalysis)
                         }
                         pendingClaim = .automatic(claim)
                         switch try await claim.value {
@@ -960,14 +986,64 @@ public actor TranscriptionCoordinator {
                     } else {
                         let isolateWindowFailures = retry == nil
                         let focused = retry == nil ? currentFocusedDay : nil
-                        let windowClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
-                            try await archive.claimTranscriptionWindow(configurationFingerprint: fingerprint,
-                                batchExecution: execution?.batchExecution, inputLease: inputLease,
-                                sessionID: retry?.sessionID, expectedGeneration: retry?.generation, sources: sources,
-                                isolateLocalFailures: isolateWindowFailures, focusedDay: focused)
+                        let focusedSession = retry == nil ? currentFocusedSessionID : nil
+                        let hasActiveFocus = retry == nil
+                            && ((currentFocusedDay != nil && currentFocusedDay != TimelineDay(Date())) || currentFocusedSessionID != nil)
+                        if let execution, let batch = execution.batchExecution, hasActiveFocus {
+                            let tier1WindowClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
+                                try await archive.claimTranscriptionWindow(configurationFingerprint: fingerprint,
+                                    batchExecution: batch, inputLease: inputLease,
+                                    isolateLocalFailures: isolateWindowFailures,
+                                    focusedDay: focused, focusedSessionID: focusedSession, maxTier: 1)
+                            }
+                            pendingClaim = .window(tier1WindowClaim)
+                            selectedWindow = try await tier1WindowClaim.value
+                            if selectedWindow == nil {
+                                pendingClaim = nil
+                                if batchAnalysisPrefetch != nil {
+                                    try await releaseBatchAnalysisPrefetch()
+                                }
+                                let tier1EpochClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
+                                    try await archive.claimTranscriptionBatchAnalysis(
+                                        execution: batch,
+                                        configurationFingerprint: fingerprint,
+                                        maxStepSeconds: 240,
+                                        focusedDay: focused,
+                                        focusedSessionID: focusedSession,
+                                        maxTier: 1
+                                    )
+                                }
+                                pendingClaim = .epoch(tier1EpochClaim)
+                                if let ticket = try await tier1EpochClaim.value {
+                                    #if DEBUG
+                                    await onClaimReturned?(.analysis, ticket.sessionID)
+                                    #endif
+                                    let prepStart = monotonicUptimeSeconds()
+                                    switch try await prepare(ticket) {
+                                    case .committed: prepared += 1; consecutiveRevisions = 0
+                                    case .superseded:
+                                        consecutiveRevisions += 1
+                                        guard consecutiveRevisions < maximumConsecutiveRevisions else { throw TranscriptionCoordinatorError.repeatedRevisions }
+                                    case .deferred: break
+                                    }
+                                    refillPriorityCredit(afterBatchElapsed: monotonicUptimeSeconds() - prepStart, origin: execution.origin)
+                                    try await refreshBatch(execution)
+                                    continue
+                                }
+                                pendingClaim = nil
+                            }
                         }
-                        pendingClaim = .window(windowClaim)
-                        selectedWindow = try await windowClaim.value
+                        if selectedWindow == nil {
+                            let windowClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
+                                try await archive.claimTranscriptionWindow(configurationFingerprint: fingerprint,
+                                    batchExecution: execution?.batchExecution, inputLease: inputLease,
+                                    sessionID: retry?.sessionID, expectedGeneration: retry?.generation, sources: sources,
+                                    isolateLocalFailures: isolateWindowFailures,
+                                    focusedDay: focused, focusedSessionID: focusedSession)
+                            }
+                            pendingClaim = .window(windowClaim)
+                            selectedWindow = try await windowClaim.value
+                        }
                     }
                 }
                 if let ticket = selectedWindow {
@@ -1034,7 +1110,8 @@ public actor TranscriptionCoordinator {
                             execution: batch,
                             configurationFingerprint: fingerprint,
                             maxStepSeconds: stepSeconds,
-                            focusedDay: currentFocusedDay
+                            focusedDay: currentFocusedDay,
+                            focusedSessionID: currentFocusedSessionID
                         )
                     }
                     pendingClaim = .epoch(epochClaim)
@@ -1377,15 +1454,22 @@ public actor TranscriptionCoordinator {
                 let onClaim: @Sendable (UUID) async -> Void = { _ in }
                 #endif
                 let currentFocusedDay = systemSuspended ? nil : focusedDay
+                let currentFocusedSessionID = systemSuspended ? nil : focusedSessionID
                 if (managed?.handle.batchExecution == nil || interleavedPriority), analysisPrefetch == nil {
                     let hotOnly = interleavedPriority && managed?.handle.origin == .continuedProcessing
+                    let allowPrefetchHistorical = interleavedPriority
+                        ? (!hotOnly && historicalWorkAllowed && (currentFocusedDay != nil || currentFocusedSessionID != nil))
+                        : historicalWorkAllowed
+                    let prefetchMaxTier: Int? = interleavedPriority ? (hotOnly ? 0 : 2) : nil
                     analysisPrefetch = AnalysisPrefetch(
                         archive: archive,
                         speech: speech,
                         activeWindow: ticket.window,
-                        allowHistorical: interleavedPriority ? false : historicalWorkAllowed,
+                        allowHistorical: allowPrefetchHistorical,
                         hotOnly: hotOnly,
-                        focusedDay: interleavedPriority ? nil : currentFocusedDay,
+                        focusedDay: currentFocusedDay,
+                        focusedSessionID: currentFocusedSessionID,
+                        maxTier: prefetchMaxTier,
                         lowLatency: isHotLive,
                         onClaim: onClaim
                     )
@@ -1404,6 +1488,7 @@ public actor TranscriptionCoordinator {
                             speech: speech,
                             execution: batchExec,
                             focusedDay: currentFocusedDay,
+                            focusedSessionID: currentFocusedSessionID,
                             onClaim: onClaim
                         )
                     }
@@ -1629,12 +1714,14 @@ private final class AnalysisPrefetch: Sendable {
 
     init(archive: ArchiveStore, speech: SpeechEngine, activeWindow: ArchiveAnalysisWindow,
          allowHistorical: Bool, hotOnly: Bool = false, focusedDay: TimelineDay? = nil,
+         focusedSessionID: UUID? = nil, maxTier: Int? = nil,
          lowLatency: Bool = false,
          onClaim: @escaping @Sendable (UUID) async -> Void) {
         self.isHotLive = hotOnly || lowLatency
         let claim = Task {
             guard let ticket = try await archive.claimAutomaticAnalysis(configurationFingerprint: speech.configurationFingerprint,
-                activeWindow: activeWindow, allowHistorical: allowHistorical, hotOnly: hotOnly, focusedDay: focusedDay) else {
+                activeWindow: activeWindow, allowHistorical: allowHistorical, hotOnly: hotOnly,
+                focusedDay: focusedDay, focusedSessionID: focusedSessionID, maxTier: maxTier) else {
                 return nil as EpochAnalysisTicket?
             }
             return try await analysisTicketWithContext(ticket, archive: archive, speech: speech)
@@ -1714,7 +1801,8 @@ private final class BatchAnalysisPrefetch: Sendable {
     private let attempt: SpeechAttempt
 
     init(archive: ArchiveStore, speech: SpeechEngine, execution: TranscriptionBatchExecution,
-         focusedDay: TimelineDay?, onClaim: @escaping @Sendable (UUID) async -> Void) {
+         focusedDay: TimelineDay?, focusedSessionID: UUID? = nil,
+         onClaim: @escaping @Sendable (UUID) async -> Void) {
         self.execution = execution
         self.archive = archive
         let claim = Task {
@@ -1722,7 +1810,8 @@ private final class BatchAnalysisPrefetch: Sendable {
                 execution: execution,
                 configurationFingerprint: speech.configurationFingerprint,
                 maxStepSeconds: 240,
-                focusedDay: focusedDay
+                focusedDay: focusedDay,
+                focusedSessionID: focusedSessionID
             ) else { return nil as EpochAnalysisTicket? }
             return try await analysisTicketWithContext(ticket, archive: archive, speech: speech)
         }

@@ -27,28 +27,36 @@ extension ArchiveStore {
     /// Both stages compete here, so a historical window cannot outrank today's analysis.
     public func claimAutomaticWork(configurationFingerprint: String, inputLease: TranscriptionInputLease? = nil,
                                    allowHistorical: Bool = true, hotOnly: Bool = false,
-                                   focusedDay: TimelineDay? = nil, now: Date = Date(),
+                                   focusedDay: TimelineDay? = nil, focusedSessionID: UUID? = nil,
+                                   maxTier: Int? = nil, now: Date = Date(),
                                    calendar: Calendar = .current,
                                    activeAnalysis: EpochAnalysisTicket? = nil) throws -> AutomaticProcessingWork? {
         try claimAutomatic(configurationFingerprint: configurationFingerprint, inputLease: inputLease,
             allowHistorical: allowHistorical, hotOnly: hotOnly, focusedDay: focusedDay,
+            focusedSessionID: focusedSessionID, maxTier: maxTier,
             now: now, calendar: calendar, activeWindow: nil, activeAnalysis: activeAnalysis)
     }
 
     /// Shares the ordinary scheduler, with at most one additional registered analysis batch.
     public func claimAutomaticAnalysis(configurationFingerprint: String, activeWindow: ArchiveAnalysisWindow,
                                        allowHistorical: Bool = true, hotOnly: Bool = false,
-                                       focusedDay: TimelineDay? = nil, now: Date = Date(),
+                                       focusedDay: TimelineDay? = nil, focusedSessionID: UUID? = nil,
+                                       maxTier: Int? = nil, now: Date = Date(),
                                        calendar: Calendar = .current) throws -> EpochAnalysisTicket? {
         let work = try claimAutomatic(configurationFingerprint: configurationFingerprint, inputLease: nil,
             allowHistorical: allowHistorical, hotOnly: hotOnly, focusedDay: focusedDay,
+            focusedSessionID: focusedSessionID, maxTier: maxTier,
             now: now, calendar: calendar, activeWindow: activeWindow, activeAnalysis: nil)
         if case .analysis(let ticket)? = work { return ticket }
         return nil
     }
 
-    /// Summarizes unreserved priority-0 work, separating the recent 5-minute live hot window from earlier same-day backlog.
-    public func livePriorityWorkSummary(configurationFingerprint: String, now: Date = Date(),
+    /// Summarizes unreserved priority work, separating the recent live hot window from earlier same-day or focused backlog.
+    public func livePriorityWorkSummary(configurationFingerprint: String,
+                                        allowFocusedHistorical: Bool = false,
+                                        focusedDay: TimelineDay? = nil,
+                                        focusedSessionID: UUID? = nil,
+                                        now: Date = Date(),
                                         calendar: Calendar = .current) throws -> LivePriorityWorkSummary {
         guard ContentHash.isValid(configurationFingerprint), now.timeIntervalSince1970.isFinite else {
             return LivePriorityWorkSummary(hasHotLiveWork: false, hasTodayUnreservedWork: false, hotPendingSeconds: 0)
@@ -68,6 +76,7 @@ extension ArchiveStore {
             ORDER BY e.rowid
             """, [.text(configurationFingerprint), .text(configurationFingerprint)]) {
             let epochID = try row.requireUUID(0)
+            let sessionID = try row.requireUUID(1)
             let generation = try row.requireInt(2)
             let manifest = try WireJSON.decode(ChunkManifest.self, from: row.requireData(3))
             let rate = manifest.timebaseHz
@@ -86,7 +95,11 @@ extension ArchiveStore {
                 ORDER BY w.rowid
                 """, [.text(epochID.uuidString), .text(configurationFingerprint), .integer(generation), .double(now.timeIntervalSince1970)]) {
                 let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: windowRow.requireData(0))
-                guard policy.priority(window.coreFrames, manifest: manifest) == 0 else { continue }
+                let tier = policy.freshnessTier(window.coreFrames, manifest: manifest, sessionID: sessionID,
+                    focusedDay: focusedDay, focusedSessionID: focusedSessionID)
+                let qualifies = policy.priority(window.coreFrames, manifest: manifest) == 0
+                    || (allowFocusedHistorical && tier <= 1)
+                guard qualifies else { continue }
                 if try !batchReserves(window) && windowHasRetainedContextInputs(window) {
                     hasToday = true
                     if policy.isHotLive(window.coreFrames, manifest: manifest) {
@@ -103,7 +116,9 @@ extension ArchiveStore {
             let receivedEnd = try receivedAnalysisRanges(epochID: epochID, retainedOnly: false).last?.end
             let closedFrame = try analysisClosedFrame(epochID: epochID)
             for range in pendingRanges {
-                for segment in try policy.splitForScheduling(range, manifest: manifest, focusedDay: nil) where segment.priority == 0 {
+                for segment in try policy.splitForScheduling(range, manifest: manifest, sessionID: sessionID,
+                    focusedDay: focusedDay, focusedSessionID: focusedSessionID)
+                where segment.priority == 0 || (allowFocusedHistorical && segment.tier <= 1) {
                     let frames = segment.frames
                     let inputs = try contiguousInputs(epochID: epochID, from: frames.start, through: frames.end)
                     guard let last = inputs.last else { continue }
@@ -173,6 +188,7 @@ extension ArchiveStore {
 
     private func claimAutomatic(configurationFingerprint: String, inputLease: TranscriptionInputLease?,
                                 allowHistorical: Bool, hotOnly: Bool, focusedDay: TimelineDay?,
+                                focusedSessionID: UUID?, maxTier: Int?,
                                 now: Date, calendar: Calendar,
                                 activeWindow: ArchiveAnalysisWindow?, activeAnalysis: EpochAnalysisTicket?) throws -> AutomaticProcessingWork? {
         guard ContentHash.isValid(configurationFingerprint), now.timeIntervalSince1970.isFinite else { throw ArchiveError.invalidQuery }
@@ -182,7 +198,8 @@ extension ArchiveStore {
             let start = activeAnalysis.checkpoint?.sourceFrame ?? first.envelope.manifest.frames.start
             let end = min(last.envelope.manifest.frames.end, activeAnalysis.boundary.endFrame ?? .max)
             let range = try FrameRange(start: start, count: end - start)
-            analysisTier = policy.freshnessTier(range, manifest: first.envelope.manifest, focusedDay: focusedDay)
+            analysisTier = policy.freshnessTier(range, manifest: first.envelope.manifest,
+                sessionID: activeAnalysis.sessionID, focusedDay: focusedDay, focusedSessionID: focusedSessionID)
         } else { analysisTier = nil }
         var candidates: [AutomaticCandidate] = []
         var batches: [Int: Set<String>] = [:]
@@ -202,7 +219,8 @@ extension ArchiveStore {
             let turn = try row.requireInt(4)
             let epochRowID = try row.requireInt(6)
             if let activeWindow, activeWindow.epochID == epochID {
-                activeTier = policy.freshnessTier(activeWindow.coreFrames, manifest: manifest, focusedDay: focusedDay)
+                activeTier = policy.freshnessTier(activeWindow.coreFrames, manifest: manifest,
+                    sessionID: activeWindow.sessionID, focusedDay: focusedDay, focusedSessionID: focusedSessionID)
                 batches[activeTier, default: []].insert("\(epochID)/\(activeWindow.analysisAnchor)")
             }
             for window in try database.rows("""
@@ -220,7 +238,8 @@ extension ArchiveStore {
                 """, [.text(epochID.uuidString), .text(configurationFingerprint), .integer(try row.requireInt(2)), .double(now.timeIntervalSince1970)]) {
                 let frames = try FrameRange(start: window.requireInt(1), count: window.requireInt(2))
                 let priority = policy.priority(frames, manifest: manifest)
-                let tier = policy.freshnessTier(frames, manifest: manifest, focusedDay: focusedDay)
+                let tier = policy.freshnessTier(frames, manifest: manifest, sessionID: sessionID,
+                    focusedDay: focusedDay, focusedSessionID: focusedSessionID)
                 batches[tier, default: []].insert("\(epochID)/\(try window.requireInt(3))")
                 candidates.append(AutomaticCandidate(epochID: epochID, epochRowID: epochRowID, sessionID: sessionID,
                     generation: try row.requireInt(2), priority: priority, tier: tier, turn: turn,
@@ -233,7 +252,8 @@ extension ArchiveStore {
                     [.text(epochID.uuidString), .text(configurationFingerprint)])
             }
             for range in pendingRanges {
-                for segment in try policy.splitForScheduling(range, manifest: manifest, focusedDay: focusedDay) {
+                for segment in try policy.splitForScheduling(range, manifest: manifest, sessionID: sessionID,
+                    focusedDay: focusedDay, focusedSessionID: focusedSessionID) {
                     candidates.append(AutomaticCandidate(epochID: epochID, epochRowID: epochRowID, sessionID: sessionID,
                         generation: try row.requireInt(2), priority: segment.priority, tier: segment.tier, turn: turn,
                         recordedAt: manifest.wallClockAnchor, frames: segment.frames, windowID: nil))
@@ -253,6 +273,7 @@ extension ArchiveStore {
         let prefetchTier = min(activeTier, candidates.filter { $0.windowID != nil }.map(\.tier).min() ?? 3)
         for candidate in candidates {
             guard !hotOnly || candidate.tier == 0 else { continue }
+            if let maxTier, candidate.tier > maxTier { continue }
             guard allowHistorical || candidate.priority == 0 else { continue }
             if let analysisTier, candidate.tier > analysisTier { continue }
             // Equal-tier snapshots finish their bounded claim; alternating unstarted producers would livelock.
@@ -364,9 +385,11 @@ struct ProcessingDatePolicy {
         return recordedStart < dayEnd && recordedEnd > dayStart
     }
 
-    /// 4-tier freshness: `0` = last 15–20m hot live, `1` = user-focused historical day, `2` = earlier today, `3` = other history.
-    func freshnessTier(_ frames: FrameRange, manifest: ChunkManifest, focusedDay: TimelineDay? = nil) -> Int {
+    /// 4-tier freshness: `0` = last 15–20m hot live, `1` = user-focused day or recording, `2` = earlier today, `3` = other history.
+    func freshnessTier(_ frames: FrameRange, manifest: ChunkManifest, sessionID: UUID? = nil,
+                       focusedDay: TimelineDay? = nil, focusedSessionID: UUID? = nil) -> Int {
         if isHotLive(frames, manifest: manifest) { return 0 }
+        if let focusedSessionID, sessionID == focusedSessionID { return 1 }
         if let focusedDay, focusedDay != today, overlapsDay(focusedDay, frames: frames, manifest: manifest) { return 1 }
         return priority(frames, manifest: manifest) == 0 ? 2 : 3
     }
@@ -408,8 +431,9 @@ struct ProcessingDatePolicy {
         return result
     }
 
-    func splitForScheduling(_ range: FrameRange, manifest: ChunkManifest,
-                            focusedDay: TimelineDay? = nil) throws -> [(frames: FrameRange, priority: Int, tier: Int)] {
+    func splitForScheduling(_ range: FrameRange, manifest: ChunkManifest, sessionID: UUID? = nil,
+                            focusedDay: TimelineDay? = nil,
+                            focusedSessionID: UUID? = nil) throws -> [(frames: FrameRange, priority: Int, tier: Int)] {
         let base = manifest.wallClockAnchor.timeIntervalSince1970
         let localBase = base + Double(manifest.timezoneOffset)
         let dayStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
@@ -436,7 +460,8 @@ struct ProcessingDatePolicy {
         for (start, end) in zip(cuts, cuts.dropFirst()) {
             let frames = try FrameRange(start: start, count: end - start)
             let level = priority(frames, manifest: manifest)
-            let tier = freshnessTier(frames, manifest: manifest, focusedDay: focusedDay)
+            let tier = freshnessTier(frames, manifest: manifest, sessionID: sessionID,
+                focusedDay: focusedDay, focusedSessionID: focusedSessionID)
             if let last = result.last, last.priority == level, last.tier == tier {
                 result[result.count - 1] = (try FrameRange(start: last.frames.start, count: end - last.frames.start), level, tier)
             } else {
