@@ -426,6 +426,100 @@ final class TimelineDateNavigationTests: XCTestCase {
         try await checkReceivedAudioProgress(dayOffset: 0)
     }
 
+    func testDayPagerNeverStaysSplitBetweenDaysAcrossProgressBannerAndManyDays() async throws {
+        let root = temporaryRoot()
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
+        let today = TimelineDay(Date())
+        let yesterday = today.adding(days: -1)
+        let earliest = today.adding(days: -25)
+        let fingerprint = ContentHash.sha256(Data("day-pager-alignment".utf8))
+
+        for day in [earliest, yesterday] {
+            let at = day.date().addingTimeInterval(15 * 3_600)
+            let offset = TimeZone.current.secondsFromGMT(for: at)
+            try await receive(archive, root: root, at: at, offset: offset, frames: 960_000)
+        }
+        let todayAt = today.date().addingTimeInterval(15 * 3_600)
+        let todayOffset = TimeZone.current.secondsFromGMT(for: todayAt)
+        try await receive(archive, root: root, at: todayAt, offset: todayOffset, frames: 960_000)
+        while let job = try await archive.claimAnalysisJob(configurationHash: fingerprint) {
+            _ = try await archive.commitTranscript(ticket: job, spans: [TranscriptSpan(chunkID: job.chunkID,
+                frames: job.manifest.frames, text: "已整理完的历史转录片段。")])
+        }
+        // Leave an unprocessed recording on today only, so today renders the pending banner while yesterday does not.
+        try await receive(archive, root: root, at: todayAt.addingTimeInterval(3_600), offset: todayOffset, frames: 960_000)
+
+        let model = LibraryModel(archive: archive, configurationFingerprint: fingerprint)
+        let player = AudioPlaybackController(archive: archive)
+        addTeardownBlock { await player.stop() }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            LibraryView(model: model, playback: player, transcription: nil, speechFailure: nil, batches: [],
+                delete: { _ in }, refresh: { await model.refresh() }, canDiscuss: false, discuss: { _ in },
+                continueInBackground: {})
+        }.environment(\.colorScheme, .light))
+        window.overrideUserInterfaceStyle = .light
+        window.makeKeyAndVisible()
+
+        func horizontalPager(in view: UIView) -> UIScrollView? {
+            if let scroll = view as? UIScrollView,
+               !scroll.alwaysBounceVertical,
+               scroll.bounds.width > 300,
+               scroll.contentSize.width > scroll.bounds.width * 1.5 {
+                return scroll
+            }
+            return view.subviews.lazy.compactMap { horizontalPager(in: $0) }.first
+        }
+        func visibleDayPanes(in view: UIView) -> [CGRect] {
+            var result: [CGRect] = []
+            if let scroll = view as? UIScrollView, scroll.alwaysBounceVertical, scroll.bounds.height > 150 {
+                let frame = scroll.convert(scroll.bounds, to: window)
+                if frame.intersection(window.bounds).width > 1 {
+                    result.append(frame)
+                }
+            } else {
+                for child in view.subviews { result.append(contentsOf: visibleDayPanes(in: child)) }
+            }
+            return result
+        }
+        func waitForSingleAlignedPane(stage: String) async throws -> UIScrollView {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
+                window.layoutIfNeeded()
+                let panes = visibleDayPanes(in: window)
+                if let pager = horizontalPager(in: window),
+                   model.timeline.days.count == 26,
+                   panes.count == 1,
+                   abs(panes[0].minX - 24) <= 1,
+                   abs(panes[0].maxX - (window.bounds.width - 24)) <= 1 {
+                    return pager
+                }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            let panes = visibleDayPanes(in: window)
+            XCTFail("Day pager did not settle on a single aligned page (\(stage)): panes=\(panes), selected=\(model.timeline.selectedDay)")
+            throw CancellationError()
+        }
+
+        let pager = try await waitForSingleAlignedPane(stage: "initial-26-day-entry")
+        XCTAssertEqual(model.timeline.selectedDay, today)
+        try await assertProgressText(in: window, contains: "待处理1分钟录音", excludes: ["%"], name: "pager-initial-today")
+
+        // Simulate a swipe interrupted mid-page (45% yesterday / 55% today, matching the 181pt split).
+        let todayAlignedX = pager.contentOffset.x
+        pager.setContentOffset(CGPoint(x: max(0, todayAlignedX - 181), y: 0), animated: false)
+        window.layoutIfNeeded()
+        XCTAssertGreaterThan(visibleDayPanes(in: window).count, 1, "Precondition: viewport is split across two days.")
+
+        _ = try await waitForSingleAlignedPane(stage: "recover-from-mid-page-split")
+        XCTAssertEqual(model.timeline.selectedDay, today)
+    }
+
     private func checkReceivedAudioProgress(dayOffset: Int) async throws {
         let root = temporaryRoot()
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
