@@ -369,6 +369,58 @@ struct AutomaticProcessingTests {
         #expect(try await store.claimAutomaticWork(configurationFingerprint: fingerprint, now: now, calendar: calendar) == nil)
     }
 
+    @Test func liveHotWindowOutranksSameDayMorningBacklogAndSplitsLongOpenEpoch() async throws {
+        let morning = try Fixture(), live = try Fixture()
+        defer { morning.remove(); live.remove() }
+        let store = try morning.store()
+        _ = try await ingest(morning, into: store, anchor: now.addingTimeInterval(-10_800))
+        _ = try await ingest(live, into: store, anchor: now.addingTimeInterval(-120))
+        let summary = try await store.livePriorityWorkSummary(configurationFingerprint: fingerprint, now: now, calendar: calendar)
+        #expect(summary.hasHotLiveWork)
+        #expect(summary.hasTodayUnreservedWork)
+        #expect(summary.hotPendingSeconds > 0 && summary.hotPendingSeconds < 1.0)
+        let first = try await nextAnalysis(store)
+        #expect(first.sessionID == live.sessionID)
+        try await completeSilence(first, store: store)
+        #expect(try await store.claimAutomaticWork(configurationFingerprint: fingerprint, hotOnly: true, now: now, calendar: calendar) == nil)
+        let second = try await nextAnalysis(store)
+        #expect(second.sessionID == morning.sessionID)
+        try await completeSilence(second, store: store)
+
+        // Verify a continuous multi-hour 16 kHz open epoch splits cleanly at the quantized 5-minute hot cutoff.
+        let longOpen = try Fixture(); defer { longOpen.remove() }
+        let longManifest = try manifest(longOpen, anchor: now.addingTimeInterval(-7_200), offset: 0)
+        let policy = ProcessingDatePolicy(now: now, calendar: calendar)
+        let segments = try policy.splitForScheduling(FrameRange(start: 0, count: 7_200 * 16_000), manifest: longManifest)
+        #expect(segments.count == 2)
+        #expect(segments[0].tier == 2)
+        #expect(segments[1].tier == 0)
+    }
+
+    @Test func focusedTimelineDayBoostsViewedHistoricalDayBehindLiveSpeechAheadOfMorningBacklog() async throws {
+        let twoDaysAgo = try Fixture(), yesterday = try Fixture(), morning = try Fixture(), live = try Fixture()
+        defer { twoDaysAgo.remove(); yesterday.remove(); morning.remove(); live.remove() }
+        let store = try twoDaysAgo.store()
+        _ = try await ingest(twoDaysAgo, into: store, anchor: now.addingTimeInterval(-172_800))
+        _ = try await ingest(yesterday, into: store, anchor: now.addingTimeInterval(-86_400))
+        _ = try await ingest(morning, into: store, anchor: now.addingTimeInterval(-10_800))
+        _ = try await ingest(live, into: store, anchor: now.addingTimeInterval(-120))
+        let focusedYesterday = TimelineDay(now.addingTimeInterval(-86_400), calendar: calendar)
+
+        var claimedOrder: [UUID] = []
+        while let work = try await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint,
+            focusedDay: focusedYesterday,
+            now: now,
+            calendar: calendar
+        ) {
+            guard case .analysis(let ticket) = work else { Issue.record("Expected analysis ticket"); break }
+            claimedOrder.append(ticket.sessionID)
+            try await completeSilence(ticket, store: store)
+        }
+        #expect(claimedOrder == [live.sessionID, yesterday.sessionID, morning.sessionID, twoDaysAgo.sessionID])
+    }
+
     private func nextAnalysis(_ store: ArchiveStore, at time: Date? = nil) async throws -> EpochAnalysisTicket {
         let work = try #require(await store.claimAutomaticWork(configurationFingerprint: fingerprint, now: time ?? now, calendar: calendar))
         guard case .analysis(let ticket) = work else { throw ArchiveError.invalidTranscript }

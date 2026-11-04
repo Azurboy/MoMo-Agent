@@ -122,3 +122,71 @@ import MoMoContracts
     #expect(cancelled)
     #expect(cancelStart.duration(to: ContinuousClock.now) < .milliseconds(500))
 }
+
+@Test func backgroundCPUPacerScalesRefillRateAcrossBudgetTiers() throws {
+    let manifest = try SpeechModelManifest(asrSHA256: String(repeating: "a", count: 64),
+                                           tokensSHA256: String(repeating: "b", count: 64),
+                                           vadSHA256: String(repeating: "c", count: 64))
+    let engine = try SpeechEngine(bundle: SpeechModelBundle(directory: URL(fileURLWithPath: "/unused"), manifest: manifest),
+                                  configuration: SpeechConfiguration())
+    #expect(engine.backgroundBudget == .standard)
+    engine.setBackgroundBudget(.elevatedSystemTask)
+    #expect(engine.backgroundBudget == .elevatedSystemTask)
+    engine.setBackgroundBudget(.externalPowerSystemTask)
+    #expect(engine.backgroundBudget == .externalPowerSystemTask)
+
+    let pacer = BackgroundCPUPacer(initiallyForeground: false, budget: .standard)
+    #expect(pacer.currentRefillRate == 0.65)
+    pacer.setBackgroundBudget(.elevatedSystemTask)
+    #expect(pacer.currentRefillRate == 1.35)
+    pacer.setBackgroundBudget(.externalPowerSystemTask)
+    #expect(pacer.currentRefillRate == 2.20)
+    pacer.setBackgroundBudget(.standard)
+    #expect(pacer.currentRefillRate == 0.65)
+}
+
+@Test func preparedAudioCacheProtectsActiveStreamFromCrossOwnerEvictionAndEvictsOtherOwnerTail() throws {
+    let cache = PreparedAudioCache(capacity: 16)
+    let batchOwner = UUID()
+    let liveOwner = UUID()
+    let sessionID = UUID()
+    let epochID = UUID()
+    let fingerprint = ContentHash.sha256(Data("cache-partition".utf8))
+    let attempt = SpeechAttempt()
+
+    func makeWindow(_ label: String, index: Int) throws -> SpeechWindow {
+        let frames = try FrameRange(start: Int64(index * 1_600), count: 1_600)
+        return SpeechWindow(
+            id: ContentHash.sha256(Data(label.utf8)),
+            sessionID: sessionID,
+            epochID: epochID,
+            analysisAnchor: 0,
+            coreFrames: frames,
+            contextFrames: frames,
+            modelCoreFrames: frames,
+            modelContextFrames: frames,
+            sources: [],
+            replayInputManifestHashes: [],
+            configurationFingerprint: fingerprint
+        )
+    }
+
+    let batchWindows = try (0..<14).map { try makeWindow("batch-\($0)", index: $0) }
+    for (idx, w) in batchWindows.enumerated() {
+        try cache.put(owner: batchOwner, window: w, samples: [Float(idx)], attempt: attempt)
+    }
+    let liveWindows = try (0..<4).map { try makeWindow("live-\($0)", index: 100 + $0) }
+    for (idx, w) in liveWindows.enumerated() {
+        try cache.put(owner: liveOwner, window: w, samples: [Float(100 + idx)], attempt: attempt)
+    }
+
+    // All 4 live Watch windows and the batch's immediate upcoming 12 windows must hit; only batch tail (12, 13) is evicted.
+    for (idx, w) in liveWindows.enumerated() {
+        #expect(cache.take(w) == [Float(100 + idx)])
+    }
+    for idx in 0..<12 {
+        #expect(cache.take(batchWindows[idx]) == [Float(idx)])
+    }
+    #expect(cache.take(batchWindows[12]) == nil)
+    #expect(cache.take(batchWindows[13]) == nil)
+}

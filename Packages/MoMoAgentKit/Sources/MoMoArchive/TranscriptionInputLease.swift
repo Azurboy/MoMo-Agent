@@ -30,7 +30,7 @@ extension ArchiveStore {
         try validateWindowTicket(ticket)
         guard let rate = ticket.inputs.first?.envelope.manifest.timebaseHz,
               rate.isFinite, rate > 0, rate <= 192_000 else { throw ArchiveError.invalidTranscript }
-        let (pageEnd, overflow) = ticket.window.analysisAnchor.addingReportingOverflow(Int64(rate * 120))
+        let (pageEnd, overflow) = ticket.window.analysisAnchor.addingReportingOverflow(Int64(rate * 300))
         guard !overflow else { throw ArchiveError.invalidTranscript }
         let through = max(pageEnd, ticket.window.contextFrames.end)
         let inputs = try contiguousInputs(epochID: ticket.window.epochID, from: ticket.window.analysisAnchor, through: through)

@@ -48,6 +48,20 @@ extension ArchiveStore {
         try registerOverlappingBatchWindows(batchID: execution.batchID, fingerprint: fingerprint)
     }
 
+    /// Counts runnable pending windows currently belonging to an active batch execution.
+    public func pendingBatchWindowCount(execution: TranscriptionBatchExecution,
+                                        configurationFingerprint: String) throws -> Int {
+        try registerPreparedBatchWindows(execution: execution, fingerprint: configurationFingerprint)
+        let count = try database.rows("""
+            SELECT COUNT(*) FROM transcription_batch_windows m
+            JOIN analysis_windows w ON w.id=m.window_id
+            JOIN sessions s ON s.id=w.session_id
+            WHERE m.batch_id=? AND w.configuration_hash=? AND w.state='pending'
+              AND s.deleted=0 AND s.projection_blocked=0 AND w.generation=s.generation
+            """, [.text(execution.batchID.uuidString), .text(configurationFingerprint)]).first?.integer(0) ?? 0
+        return Int(max(0, count))
+    }
+
     func registerOverlappingBatchWindows(batchID: UUID, fingerprint: String) throws {
         for row in try database.rows("""
             SELECT w.descriptor,w.state FROM analysis_windows w JOIN sessions s ON s.id=w.session_id
@@ -68,36 +82,77 @@ extension ArchiveStore {
 
     public func claimTranscriptionBatchAnalysis(execution: TranscriptionBatchExecution,
                                                 configurationFingerprint: String,
-                                                maxStepSeconds: Double = 120) throws -> EpochAnalysisTicket? {
+                                                maxStepSeconds: Double = 120,
+                                                focusedDay: TimelineDay? = nil,
+                                                now: Date = Date(),
+                                                calendar: Calendar = .current) throws -> EpochAnalysisTicket? {
         try validateBatchExecution(execution, fingerprint: configurationFingerprint)
-        for row in try database.rows("""
+        let rows = try database.rows("""
             SELECT DISTINCT r.epoch_id,r.session_id,s.generation FROM transcription_batch_ranges r
             JOIN sessions s ON s.id=r.session_id WHERE r.batch_id=? AND r.kind='unprepared' AND s.deleted=0
             ORDER BY s.recorded_at,r.epoch_id
-            """, [.text(execution.batchID.uuidString)]) {
+            """, [.text(execution.batchID.uuidString)])
+        var slices: [(order: Int, tier: Int, epochID: UUID, sessionID: UUID, generation: Int64, range: FrameRange)] = []
+        let policy = focusedDay != nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
+        for (order, row) in rows.enumerated() {
             let epochID = try row.requireUUID(0)
             let sessionID = try row.requireUUID(1)
             let generation = try row.requireInt(2)
             let pending = try CoverageRanges.subtract(batchPreparationRanges(id: execution.batchID, epochID: epochID),
                 analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint))
+            guard !pending.isEmpty else { continue }
+            let manifest: ChunkManifest?
+            if policy != nil, let data = try database.rows("""
+                SELECT c.manifest FROM epochs e
+                JOIN chunks c ON c.rowid=COALESCE(e.min_chunk_rowid, (SELECT rowid FROM chunks WHERE epoch_id=e.id ORDER BY start_frame LIMIT 1))
+                WHERE e.id=?
+                """, [.text(epochID.uuidString)]).first?.data(0) {
+                manifest = try? WireJSON.decode(ChunkManifest.self, from: data)
+            } else {
+                manifest = nil
+            }
             for range in pending {
-                if let ticket = try claimEpochAnalysis(configurationFingerprint: configurationFingerprint,
-                    sessionID: sessionID, expectedGeneration: generation,
-                    finalizeAvailablePrefixBefore: .distantFuture, isolateLocalFailures: true,
-                    selectedEpochID: epochID, processingRange: range,
-                    batchExecution: execution, maxStepSeconds: maxStepSeconds) {
-                    return ticket
-                }
-                let stillPending = try CoverageRanges.subtract(batchPreparationRanges(id: execution.batchID, epochID: epochID),
-                    analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint))
-                if try !CoverageRanges.intersection([range], stillPending).isEmpty {
-                    let activeAttempt = try database.rows(
-                        "SELECT attempt_id FROM analysis_epochs WHERE epoch_id=? AND configuration_hash=?",
-                        [.text(epochID.uuidString), .text(configurationFingerprint)]
-                    ).first?.string(0)
-                    if activeAttempt == nil {
-                        try deferBatchSlice(batchID: execution.batchID, sessionID: sessionID, epochID: epochID, frames: range)
+                let tier: Int
+                if let policy, let manifest {
+                    if let focusedDay, policy.overlapsDay(focusedDay, frames: range, manifest: manifest) {
+                        tier = policy.isHotLive(range, manifest: manifest) ? 0 : 1
+                    } else {
+                        tier = policy.freshnessTier(range, manifest: manifest, focusedDay: focusedDay)
                     }
+                } else {
+                    tier = 0
+                }
+                slices.append((order: order, tier: tier, epochID: epochID, sessionID: sessionID, generation: generation, range: range))
+            }
+        }
+        if focusedDay != nil {
+            slices.sort {
+                if $0.tier != $1.tier { return $0.tier < $1.tier }
+                if $0.order != $1.order { return $0.order < $1.order }
+                return $0.range.start < $1.range.start
+            }
+        }
+        for slice in slices {
+            let epochID = slice.epochID
+            let sessionID = slice.sessionID
+            let generation = slice.generation
+            let range = slice.range
+            if let ticket = try claimEpochAnalysis(configurationFingerprint: configurationFingerprint,
+                sessionID: sessionID, expectedGeneration: generation,
+                finalizeAvailablePrefixBefore: .distantFuture, isolateLocalFailures: true,
+                selectedEpochID: epochID, processingRange: range,
+                batchExecution: execution, maxStepSeconds: maxStepSeconds, now: now) {
+                return ticket
+            }
+            let stillPending = try CoverageRanges.subtract(batchPreparationRanges(id: execution.batchID, epochID: epochID),
+                analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint))
+            if try !CoverageRanges.intersection([range], stillPending).isEmpty {
+                let activeAttempt = try database.rows(
+                    "SELECT attempt_id FROM analysis_epochs WHERE epoch_id=? AND configuration_hash=?",
+                    [.text(epochID.uuidString), .text(configurationFingerprint)]
+                ).first?.string(0)
+                if activeAttempt == nil {
+                    try deferBatchSlice(batchID: execution.batchID, sessionID: sessionID, epochID: epochID, frames: range)
                 }
             }
         }
