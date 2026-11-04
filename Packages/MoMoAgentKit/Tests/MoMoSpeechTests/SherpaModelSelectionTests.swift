@@ -4,13 +4,15 @@ import MoMoContracts
 import MoMoSherpaBridge
 @testable import MoMoSpeech
 
-@Test func nanoCatalogPinsUpstreamFilesWithoutRequantization() throws {
+@Test func nanoCatalogPinsCoreMLANEBundle() throws {
     let catalog = try DownloadableSpeechModel.funASRNano()
-    #expect(catalog.files.count == 6)
-    #expect(catalog.files.contains { $0.path == "encoder_adaptor.int8.onnx" && $0.byteCount == 237_792_748 })
-    #expect(catalog.files.contains { $0.path == "llm.int8.onnx" && $0.byteCount == 600_356_593 })
-    #expect(catalog.baseURL.absoluteString.contains("6f16bd378457e13f36ccf3910df9017f96c346fb"))
-    #expect(catalog.files.allSatisfy { !$0.path.contains(".mlmodel") })
+    #expect(catalog.identifier == "momo-funasr-nano-2512-coreml-ane-int8-v1")
+    #expect(catalog.files.count == 14)
+    #expect(catalog.files.contains { $0.path == "FunASREncoderAdaptor.mlmodelc/weights/weight.bin" })
+    #expect(catalog.files.contains { $0.path == "FunASRLlm.mlmodelc/weights/weight.bin" })
+    #expect(catalog.files.contains { $0.path == "embedding.int8.bin" && $0.byteCount == 155_886_400 })
+    #expect(catalog.files.contains { $0.path == "Qwen3-0.6B/tokenizer.json" })
+    #expect(catalog.baseURL.absoluteString == "https://github.com/Miri-Labs/MoMo-Agent/releases/download/models-funasr-nano-coreml-v1/")
 }
 
 @Test func xASRCatalogPinsUpstreamFilesWithoutRequantization() throws {

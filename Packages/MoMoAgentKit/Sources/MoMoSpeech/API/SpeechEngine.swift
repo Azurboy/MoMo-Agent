@@ -1005,11 +1005,9 @@ public final class SpeechEngine: @unchecked Sendable {
         // Read the model and language together at the recognition boundary.
         let selected = selection.withLock { $0 }
         let download = selected.download, language = selected.language
-        let model = download?.model ?? .senseVoice
         let targetThreads = effectiveCPUThreads
-        let usesCoreML = recognitionBackend == .sherpaCoreML && model == .senseVoice
-        let cpuBoundASR = !usesCoreML
-        if let runtime, runtimeDownload == download, (!cpuBoundASR || runtimeCPUThreads == targetThreads) {
+        if let runtime, runtimeDownload == download,
+           (runtime.usesCoreMLAccelerator || runtimeCPUThreads == targetThreads) {
             if runtimeLanguage == language { return runtime }
             if download != nil, try runtime.updateLanguage(language) {
                 runtimeLanguage = language

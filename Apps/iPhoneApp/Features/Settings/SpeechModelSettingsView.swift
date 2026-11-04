@@ -18,8 +18,8 @@ struct SpeechModelSettingsView: View {
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.xASR, use: "使用 X-ASR")
                 }
-                modelCard(.funASRNano, subtitle: "实验性 · CPU 大模型推理") {
-                    Text("离线识别中文及方言、英文、日文；运行 0.6B 语言模型，转写速度显著慢于 SenseVoice 且耗电更高。")
+                modelCard(.funASRNano, subtitle: "神经网络引擎加速 · 0.6B 大模型推理") {
+                    Text("离线识别中文及方言、英文、日文；完整 Encoder + Adaptor + Qwen3-0.6B 运行于 Apple 神经网络引擎。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.funASRNano, use: "使用 FunASR Nano")
                 }

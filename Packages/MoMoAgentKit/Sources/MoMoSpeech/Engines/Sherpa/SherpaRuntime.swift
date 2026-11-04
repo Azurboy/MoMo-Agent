@@ -32,6 +32,8 @@ final class SherpaRuntime: @unchecked Sendable {
     private let runtimeTag: String
     private let model: SpeechModelChoice
     private var warmed = false
+    let usesCoreMLAccelerator: Bool
+    private(set) var acceleratorMask: Int = 0
 
     init(bundle: SpeechModelBundle, configuration: SpeechConfiguration,
          backend: SpeechRecognitionBackend, download: DownloadedSpeechModel?,
@@ -62,31 +64,48 @@ final class SherpaRuntime: @unchecked Sendable {
             revision = bundle.manifest.asrSHA256
         }
         self.revision = revision
+        let directory = download?.directory ?? bundle.directory
+        let coreMLEncoderPath = directory.appendingPathComponent("FunASREncoderAdaptor.mlmodelc").path
+        let coreMLLlmPath = directory.appendingPathComponent("FunASRLlm.mlmodelc").path
+        let coreMLEmbeddingPath = directory.appendingPathComponent("embedding.int8.bin").path
+        let onnxEncoderPath = directory.appendingPathComponent("encoder_adaptor.int8.onnx").path
+        let hasNanoCoreML = FileManager.default.fileExists(atPath: coreMLEncoderPath)
+            && FileManager.default.fileExists(atPath: coreMLLlmPath)
+            && FileManager.default.fileExists(atPath: coreMLEmbeddingPath)
+        let hasNanoONNX = FileManager.default.fileExists(atPath: onnxEncoderPath)
+        let nanoUsesCoreML = model == .funASRNano && hasNanoCoreML && (backend == .sherpaCoreML || !hasNanoONNX)
+        let useSenseVoiceCoreML = backend == .sherpaCoreML && model == .senseVoice
+        self.usesCoreMLAccelerator = useSenseVoiceCoreML || nanoUsesCoreML
+
         let runtimeTag = switch model {
         case .senseVoice: "sherpa-1.13.8-coreml-v1"
-        case .funASRNano: "funasr-nano-ort-cpu-naud-v2"
+        case .funASRNano: nanoUsesCoreML ? "funasr-nano-coreml-ane-v1" : "funasr-nano-ort-cpu-naud-v2"
         case .xASR: "sherpa-1.13.8-transducer-cpu-v1"
         }
         self.runtimeTag = runtimeTag
         fingerprint = ContentHash.sha256(Data(
             "\(revision):\(runtimeTag):\(configuration.language):\(configuration.useITN)".utf8))
         let provider = try Self.provider(backend: backend, revision: revision, model: model, cacheRoot: cacheRoot)
-        let directory = download?.directory ?? bundle.directory
         let cpuThreads = max(1, min(4, effectiveThreads ?? configuration.threads))
         var error = [CChar](repeating: 0, count: 2048)
 
         if model == .funASRNano {
-            let encoderPath = directory.appendingPathComponent("encoder_adaptor.int8.onnx").path
-            let llmPath = directory.appendingPathComponent("llm.int8.onnx").path
-            let embeddingPath = directory.appendingPathComponent("embedding.int8.onnx").path
+            let encoderPath = nanoUsesCoreML ? coreMLEncoderPath : onnxEncoderPath
+            let llmPath = nanoUsesCoreML
+                ? coreMLLlmPath
+                : directory.appendingPathComponent("llm.int8.onnx").path
+            let embeddingPath = nanoUsesCoreML
+                ? coreMLEmbeddingPath
+                : directory.appendingPathComponent("embedding.int8.onnx").path
             let tokenizerPath = directory.appendingPathComponent("Qwen3-0.6B").path
             nanoRuntime = MoMoCreateFunASRNanoRuntime(
                 encoderPath, llmPath, embeddingPath, tokenizerPath,
                 Int32(cpuThreads), &error, error.count)
-            guard nanoRuntime != nil else {
+            guard let nanoRuntime else {
                 throw SpeechNativeFailure(stage: .load,
                     detail: error.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
             }
+            self.acceleratorMask = Int(MoMoGetFunASRNanoAcceleratorMask(nanoRuntime))
             return
         }
 
