@@ -34,6 +34,7 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
+from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
 from superagent_computer import SuperAgentComputer
@@ -398,6 +399,7 @@ class SuperAgentGateway:
         self._source_meta_cache: dict[str, tuple[str | None, float | None]] = {}
         self._stopping = False
         self.computer = SuperAgentComputer(self.data, self._computer_ticket)
+        self.pim = ApplePIM(self.data)
 
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=8 * 1024 * 1024)
@@ -415,6 +417,7 @@ class SuperAgentGateway:
         app.router.add_get("/momo/internal/superagent/context", self.handle_internal_context)
         app.router.add_post("/momo/internal/superagent/outbound", self.handle_internal_outbound)
         app.router.add_post("/momo/internal/superagent/computer", self.handle_internal_computer)
+        app.router.add_post("/momo/internal/superagent/pim", self.handle_internal_pim)
         app.on_startup.append(self.on_startup)
         app.on_cleanup.append(self.on_cleanup)
         return app
@@ -3211,6 +3214,37 @@ class SuperAgentGateway:
         except (ValueError, RuntimeError, OSError, TimeoutError) as error:
             return web.json_response({"error": str(error)}, status=400)
 
+    async def handle_internal_pim(self, request: web.Request) -> web.Response:
+        if refused := self._check_bridge_secret(request):
+            return refused
+        try:
+            payload = await request.read()
+            if len(payload) > 65536:
+                raise ValueError("PIM request is too large")
+            body = json.loads(payload)
+            if not isinstance(body, dict) or not isinstance(body.get("args"), dict):
+                raise ValueError("Invalid PIM request")
+            ticket_id = str(body.get("ticket_id") or "").strip()
+            assignment_id = body.get("assignment_id")
+            if self.dsh_ready:
+                if not ticket_id:
+                    raise PermissionError("Ticket is not running")
+                ticket = await self._computer_ticket(ticket_id)
+                if ticket.get("state") != "running" or ticket.get("attention"):
+                    raise PermissionError("Ticket is not running")
+                running = next(
+                    (a for a in ticket.get("assignments") or () if isinstance(a, dict) and a.get("endedAt") is None),
+                    None,
+                )
+                if not running or running.get("id") != assignment_id:
+                    raise PermissionError("Ticket assignment is no longer running")
+            result = await self.pim.call(str(body.get("op") or ""), body["args"])
+            return web.json_response(result)
+        except PermissionError as error:
+            return web.json_response({"error": str(error)}, status=409)
+        except (ValueError, RuntimeError, OSError, TimeoutError) as error:
+            return web.json_response({"error": str(error)}, status=400)
+
     async def handle_internal_context(self, request: web.Request) -> web.Response:
         if refused := self._check_bridge_secret(request):
             return refused
@@ -3449,6 +3483,30 @@ class SuperAgentGateway:
             source_key=source_key,
         )
 
+    def _clean_outbound_reply_text(self, text: str, deliverables: list[dict] | None) -> str:
+        """Strip ugly raw workspace filesystem paths from chat bubbles once deliverables are attached."""
+        if not text or not deliverables:
+            return text
+        cleaned = text
+        roots: list[str] = ["$DSH_SUPERAGENT_MOMO_WORKSPACE"]
+        for root in (self.data / "workspace", self.dsh_work_dir):
+            for candidate in (str(root), str(root.expanduser())):
+                if candidate and candidate not in roots:
+                    roots.append(candidate)
+            with suppress(OSError):
+                resolved = str(root.expanduser().resolve())
+                if resolved and resolved not in roots:
+                    roots.append(resolved)
+        root_alt = "|".join(re.escape(r) for r in roots)
+        for att in deliverables:
+            name = str(att.get("name") or "").strip()
+            if not name:
+                continue
+            path_pat = rf"`?(?:{root_alt})/[^`\r\n]*?{re.escape(name)}`?"
+            cleaned = re.sub(rf"\s*[：:]\s*{path_pat}(?P<end>[。！？.!?\s]*)$", lambda m: "。" if "。" in m.group("end") or "." in m.group("end") else m.group("end"), cleaned)
+            cleaned = re.sub(path_pat, f"「{name}」", cleaned)
+        return cleaned.strip() or text
+
     async def handle_internal_outbound(self, request: web.Request) -> web.Response:
         if refused := self._check_bridge_secret(request):
             return refused
@@ -3543,9 +3601,10 @@ class SuperAgentGateway:
             text=text,
             source_key=f"superagent:{out_id}",
         )
+        cleaned_text = self._clean_outbound_reply_text(text, deliverables)
         msg_id = self.store.append_assistant(
             f"superagent:{out_id}",
-            text,
+            cleaned_text,
             now,
             run_id=run_id,
             attachments=deliverables,

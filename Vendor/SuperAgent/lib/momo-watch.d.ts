@@ -18,12 +18,12 @@ declare const MomoConfigSchema: z.ZodObject<{
   readPageSize: z.ZodDefault<z.ZodNumber>;
   chat: z.ZodDefault<z.ZodBoolean>;
   transcripts: z.ZodDefault<z.ZodEnum<{
-    none: "none";
     all: "all";
+    none: "none";
   }>>;
   lifeSignals: z.ZodDefault<z.ZodEnum<{
-    none: "none";
     all: "all";
+    none: "none";
   }>>;
 }, z.core.$strict>;
 type MomoConfig = z.infer<typeof MomoConfigSchema>;

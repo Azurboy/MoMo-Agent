@@ -104,25 +104,32 @@
     read_transcript: ['读取录音原文', '已读取录音原文', 'document'],
     memory: ['更新记忆', '已更新记忆', 'document']
   };
-  const systemWrites = new Set(['create_calendar_event','update_calendar_event','delete_calendar_event','create_reminder','update_reminder','complete_reminder','delete_reminder','schedule_alarm','reschedule_alarm','cancel_alarm']);
+  function baseToolName(name) {
+    return String(name || '').replace(/^mcp_momo_(?:pim|context|recordings|computer)_/, '');
+  }
+  const systemWrites = new Set(['create_calendar_event','update_calendar_event','delete_calendar_event','create_reminder','update_reminder','complete_reminder','delete_reminder','create_note','update_note','delete_note','schedule_alarm','reschedule_alarm','cancel_alarm']);
   const actionStates = new Set(['executing','succeeded','failed','needs_clarification','needs_permission','conflict','outcome_unknown','cancelled']);
   function actionReceipt(tool) {
-    if (!systemWrites.has(tool.name) || tool.output == null) return null;
+    const tName = baseToolName(tool.name);
+    if (!systemWrites.has(tName) || tool.output == null) return null;
     try {
       const value = JSON.parse(tool.output);
       return typeof value.actionID === 'string' && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.actionID) && actionStates.has(value.state) ? value : null;
     } catch { return null; }
   }
   function actionCard(tool, receipt) {
+    const tName = baseToolName(tool.name);
     const fields = receipt.resource?.fields || {};
-    const kinds = {schedule_alarm:'alarm',reschedule_alarm:'alarm',cancel_alarm:'alarm',create_reminder:'reminder',update_reminder:'reminder',complete_reminder:'reminder',delete_reminder:'reminder',create_calendar_event:'event',update_calendar_event:'event',delete_calendar_event:'event'};
-    const kind = receipt.resource?.kind || kinds[tool.name] || 'event';
-    const names = {alarm:t("闹钟"),reminder:t("待办"),event:t("日程")};
+    const kinds = {schedule_alarm:'alarm',reschedule_alarm:'alarm',cancel_alarm:'alarm',create_reminder:'reminder',update_reminder:'reminder',complete_reminder:'reminder',delete_reminder:'reminder',create_calendar_event:'event',update_calendar_event:'event',delete_calendar_event:'event',create_note:'note',update_note:'note',delete_note:'note'};
+    const kind = receipt.resource?.kind || kinds[tName] || 'event';
+    const names = {alarm:t("闹钟"),reminder:t("待办"),event:t("日程"),note:t("备忘录")};
     const states = {executing:t("正在处理"),succeeded:t("操作已确认"),failed:t("未完成"),needs_clarification:t("需要补充信息"),needs_permission:t("需要连接权限"),conflict:t("系统内容已变化"),outcome_unknown:t("结果待核对"),cancelled:t("已取消")};
-    const successes = {schedule_alarm:t("已设定"),reschedule_alarm:t("已更新"),cancel_alarm:t("已取消"),create_reminder:t("已添加"),update_reminder:t("已更新"),complete_reminder:t("已完成"),delete_reminder:t("已删除"),create_calendar_event:t("已添加"),update_calendar_event:t("已更新"),delete_calendar_event:t("已删除")};
+    const successes = {schedule_alarm:t("已设定"),reschedule_alarm:t("已更新"),cancel_alarm:t("已取消"),create_reminder:t("已添加"),update_reminder:t("已更新"),complete_reminder:t("已完成"),delete_reminder:t("已删除"),create_calendar_event:t("已添加"),update_calendar_event:t("已更新"),delete_calendar_event:t("已删除"),create_note:t("已添加"),update_note:t("已更新"),delete_note:t("已删除")};
     let time = null, detail = null;
     const weekly = fields.weeklySchedule;
-    if (kind === 'alarm' && weekly) {
+    if (kind === 'note') {
+      detail = typeof fields.folder === 'string' && fields.folder ? fields.folder : t("备忘录");
+    } else if (kind === 'alarm' && weekly) {
       if (Number.isInteger(weekly.hour) && Number.isInteger(weekly.minute)) time = [weekly.hour,weekly.minute].map(v => String(v).padStart(2,'0')).join(':');
       const weekdays = [t("周一"),t("周二"),t("周三"),t("周四"),t("周五"),t("周六"),t("周日")];
       const locale = globalThis.MoMoChatLocalization?.locale || 'zh-CN';
@@ -144,7 +151,7 @@
     }
     if (kind === 'reminder' && fields.completed === true) detail = detail ? t("已完成 · ")+detail : t("已完成");
     return {kind,kindLabel:names[kind] || t("系统事项"),title:typeof fields.title === 'string' && fields.title ? fields.title : names[kind] || t("系统事项"),
-      time,detail,status:receipt.state === 'succeeded' ? successes[tool.name] || states.succeeded : states[receipt.state],state:receipt.state};
+      time,detail,status:receipt.state === 'succeeded' ? successes[tName] || states.succeeded : states[receipt.state],state:receipt.state};
   }
   function toolDisplayState(tool) {
     const receipt = actionReceipt(tool);
@@ -159,12 +166,15 @@
     create_calendar_event:['添加日程','已添加日程'],update_calendar_event:['修改日程','已修改日程'],delete_calendar_event:['删除日程','已删除日程'],
     list_reminder_lists:['查看提醒事项列表','已查看提醒事项列表'],search_reminders:['查找待办','已查找待办'],read_reminder:['读取待办','已读取待办'],
     create_reminder:['添加待办','已添加待办'],update_reminder:['修改待办','已修改待办'],complete_reminder:['更新完成状态','已更新完成状态'],delete_reminder:['删除待办','已删除待办'],
+    list_note_folders:['查看备忘录文件夹','已查看备忘录文件夹'],search_notes:['查找备忘录','已查找备忘录'],read_note:['读取备忘录','已读取备忘录'],
+    create_note:['添加备忘录','已添加备忘录'],update_note:['修改备忘录','已修改备忘录'],delete_note:['删除备忘录','已删除备忘录'],
     list_alarms:['查看闹钟','已查看闹钟'],schedule_alarm:['设置闹钟','已设置闹钟'],reschedule_alarm:['调整闹钟','已调整闹钟'],cancel_alarm:['取消闹钟','已取消闹钟'],
     query_life_timeline:['查看生活事件','已查看生活事件'],get_health_summary:['查看健康摘要','已查看健康摘要'],get_system_capabilities:['检查系统连接','已检查系统连接'],
     get_mail_connection:['检查邮箱连接','已检查邮箱连接'],search_mail:['查找邮件','已查找邮件'],read_mail_thread:['读取邮件','已读取邮件'],create_mail_draft:['保存邮件草稿','已保存草稿'],send_mail:['发送邮件','已发送邮件'],reply_mail:['回复邮件','已回复邮件']
   });
   function toolLabel(tool) {
-    if (tool.name === 'memory') {
+    const tName = baseToolName(tool.name);
+    if (tName === 'memory') {
       try {
         if (JSON.parse(tool.input).action === 'read')
           return tool.state === 'succeeded' ? t("已查看记忆") : t("查看记忆");
@@ -172,7 +182,7 @@
     }
     const receipt = actionReceipt(tool);
     if (receipt && receipt.state !== 'succeeded') return ({executing:t("正在处理"),failed:t("操作未完成"),needs_clarification:t("需要补充信息"),needs_permission:t("需要连接权限"),conflict:t("系统内容已变化"),outcome_unknown:t("结果待核对"),cancelled:t("已取消")})[receipt.state];
-    const pair = labels[tool.name];
+    const pair = labels[tName];
     if (!pair) return tool.state === 'succeeded' ? t("操作已完成") : t("处理请求");
     return t(pair[tool.state === 'succeeded' ? 1 : 0]);
   }

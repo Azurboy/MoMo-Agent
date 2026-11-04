@@ -12,6 +12,7 @@ final class DesktopControlHost {
     private let key: String
     private let inputDriver = DesktopInputDriver()
     private let accessibilityDriver = AgentDesktopDriver()
+    private let pimDriver = DesktopPIMDriver()
     private let screenStream = DesktopScreenStream()
     private let videoHost: DesktopVideoHost
     private var inputOwner: String?
@@ -130,6 +131,15 @@ final class DesktopControlHost {
                 result["input_sequence"] = inputOrder.last(for: owner)
             }
             return result
+        }
+        if op == "pim" {
+            guard request["actor"] as? String == "agent",
+                  let pimOp = request["pim_op"] as? String else {
+                throw DesktopError.message("个人事项请求无效。")
+            }
+            let argsData = try JSONSerialization.data(withJSONObject: request["args"] as? [String: Any] ?? [:])
+            let responseData = try await pimDriver.perform(op: pimOp, argsData: argsData)
+            return (try JSONSerialization.jsonObject(with: responseData) as? [String: Any]) ?? [:]
         }
         let epoch = try admit(request, input: op == "input")
         if op == "video-offer" {

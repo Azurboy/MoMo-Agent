@@ -190,6 +190,15 @@ def _cmd_forget(data: Path, args: argparse.Namespace) -> dict:
     return HermesMemory(data / "hermes").forget(args.memory_id)
 
 
+def _cmd_pim(data: Path, args: argparse.Namespace) -> dict:
+    from apple_pim import ApplePIM
+
+    payload = json.loads(args.args_json) if args.args_json else {}
+    if not isinstance(payload, dict):
+        raise ValueError("--args-json must decode to a JSON object")
+    return ApplePIM(data).call_sync(args.op, payload)
+
+
 def _cmd_conversation(data: Path, args: argparse.Namespace) -> dict:
     import sqlite3
     db_path = data / "runtime/conversation.sqlite"
@@ -491,6 +500,10 @@ def main() -> int:
     wextract.add_argument("urls", nargs="+")
     wextract.add_argument("--char-limit", type=int, default=15000)
 
+    pim_cmd = sub.add_parser("pim", help="Manage Apple Reminders, Calendar events, and Notes")
+    pim_cmd.add_argument("op")
+    pim_cmd.add_argument("--args-json", default="{}")
+
     args = parser.parse_args()
     data = args.data_dir.expanduser().resolve()
     handlers = {
@@ -506,6 +519,7 @@ def main() -> int:
         "conversation": _cmd_conversation,
         "web-search": _cmd_web_search,
         "web-extract": _cmd_web_extract,
+        "pim": _cmd_pim,
     }
     try:
         output = handlers[args.command](data, args)
