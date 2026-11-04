@@ -313,6 +313,34 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["本机转写已就绪"].exists)
     }
 
+    func testDailyMemoryJournalCardOpensPostcardAndSwitchesStyles() {
+        let app = launch()
+        let journalCard = app.buttons["timeline.journal.card"]
+        XCTAssertTrue(journalCard.waitForExistence(timeout: 15))
+        XCTAssertTrue(journalCard.isHittable)
+        XCTAssertTrue(app.buttons["timeline.journal"].exists)
+        attach(app, name: "timeline-journal-banner")
+
+        journalCard.tap()
+        let postcard = app.otherElements["timeline.journal.postcard"]
+        XCTAssertTrue(postcard.waitForExistence(timeout: 10))
+        let regenerate = app.buttons["timeline.journal.regenerate"]
+        XCTAssertTrue(regenerate.exists)
+        XCTAssertTrue(app.buttons["timeline.journal.intervalPicker"].exists)
+        XCTAssertTrue(app.buttons["timeline.journal.locationButton"].exists)
+        XCTAssertTrue(app.buttons["timeline.journal.share"].waitForExistence(timeout: 5))
+        attach(app, name: "timeline-journal-sheet-chiikawa")
+
+        if app.buttons["素描手稿"].exists {
+            app.buttons["素描手稿"].tap()
+        }
+        regenerate.tap()
+        attach(app, name: "timeline-journal-sheet-sketch")
+
+        app.buttons["timeline.journal.close"].tap()
+        XCTAssertTrue(journalCard.waitForExistence(timeout: 5))
+    }
+
     private func launch(timelineFixture: String = "1") -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()

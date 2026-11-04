@@ -20,6 +20,7 @@ struct DesktopSources: View {
     @State private var query = ""
     @State private var searching = false
     @State private var choosingDate = false
+    @State private var showingJournal = false
     private let calendar = Calendar.current
     private static let clockFormat = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
 
@@ -128,13 +129,55 @@ struct DesktopSources: View {
         .onChange(of: ordered.map { $0.id + $0.source.revision }) {
             if selectedID != nil && selected == nil { selectedID = nil }
         }
+        .sheet(isPresented: $showingJournal) {
+            if let journalInput = currentDayJournalInput {
+                DailyMemoryJournalSheet(input: journalInput, macDataDirectory: model.dataDirectory)
+                    .frame(minWidth: 480, idealWidth: 520, minHeight: 640, idealHeight: 720)
+            }
+        }
+    }
+
+    private var currentDayJournalInput: DailyJournalInput? {
+        guard query.isEmpty, !visible.isEmpty else { return nil }
+        let segments: [DailyJournalSegment] = visible.compactMap { item in
+            let raw = item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? ""
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let start = item.recordedAt.map { Date(timeIntervalSince1970: $0) } ?? day
+            let end = item.endAt.map { Date(timeIntervalSince1970: $0) } ?? start
+            let hour = calendar.component(.hour, from: start)
+            let duration = max(0, end.timeIntervalSince(start))
+            return DailyJournalSegment(
+                hour: hour,
+                duration: duration,
+                text: trimmed,
+                isSummary: item.summary != nil,
+                timestamp: item.recordedAt
+            )
+        }
+        guard !segments.isEmpty else { return nil }
+        let parts = calendar.dateComponents([.year, .month, .day], from: day)
+        let key = String(format: "%04d-%02d-%02d", parts.year ?? 2026, parts.month ?? 1, parts.day ?? 1)
+        let input = DailyJournalInput(
+            dayKey: key,
+            dateLabel: dayTitle(day),
+            dayStartHour: model.dayStartHour,
+            segments: segments
+        )
+        return input.hasReadableContent ? input : nil
     }
 
     private var timeline: some View {
         VStack(spacing: 14) {
-            HStack {
+            HStack(spacing: 12) {
                 Text("转录").font(.system(size: 22, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 Spacer()
+                if currentDayJournalInput != nil {
+                    Button("每日记忆手账", systemImage: "photo.artframe") { showingJournal = true }
+                        .labelStyle(.iconOnly).buttonStyle(.plain)
+                        .help("每日记忆手账")
+                        .accessibilityIdentifier("desktop.transcripts.journal")
+                }
                 Button("刷新", systemImage: "arrow.clockwise") { Task { await model.loadContext() } }
                     .labelStyle(.iconOnly).buttonStyle(.plain).disabled(model.contextLoading)
                     .help("刷新转录").accessibilityIdentifier("desktop.transcripts.refresh")
@@ -152,6 +195,15 @@ struct DesktopSources: View {
             }
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    if let journalInput = currentDayJournalInput {
+                        DailyMemoryJournalBanner(
+                            input: journalInput,
+                            openSheet: { showingJournal = true },
+                            macDataDirectory: model.dataDirectory
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                    }
                     ForEach(visible) { item in
                         Button { selectedID = item.id } label: {
                             ClientTranscriptRow(
