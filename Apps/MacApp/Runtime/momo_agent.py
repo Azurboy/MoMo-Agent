@@ -354,8 +354,12 @@ def configure_context(data: Path, config: dict, yaml) -> None:
         "command": str(executable), "args": [str(REPOSITORY / "Apps/MacApp/Runtime/desktop_mcp.py")],
         "env": {"MOMO_AGENT_DIRECTORY": str(data), "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode")},
     }
+    config["mcp_servers"]["momo_pim"] = {
+        "command": str(executable), "args": [str(REPOSITORY / "Apps/MacApp/Runtime/pim_mcp.py")],
+        "env": {"MOMO_AGENT_DIRECTORY": str(data), "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode")},
+    }
     toolsets = config.setdefault("platform_toolsets", {}).setdefault("api_server", ["terminal", "file"])
-    for name in ("momo_context", "momo_recordings", "memory", "session_search", "momo_computer", "delegation", "momoagent_tasks"):
+    for name in ("momo_context", "momo_recordings", "memory", "session_search", "momo_computer", "momo_pim", "delegation", "momoagent_tasks"):
         if name not in toolsets:
             toolsets.append(name)
     config.setdefault("terminal", {})["cwd"] = str(data / "workspace")

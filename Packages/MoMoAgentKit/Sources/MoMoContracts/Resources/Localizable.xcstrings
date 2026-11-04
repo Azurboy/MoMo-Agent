@@ -6934,6 +6934,35 @@
         }
       }
     },
+    "修改备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update note"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 수정"
+          }
+        }
+      }
+    },
     "修改待办": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -8855,6 +8884,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "删除人物与声纹？"
+          }
+        }
+      }
+    },
+    "删除备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete note"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 삭제"
           }
         }
       }
@@ -13925,6 +13983,35 @@
         }
       }
     },
+    "备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모"
+          }
+        }
+      }
+    },
     "备注": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -15806,6 +15893,35 @@
         }
       }
     },
+    "已修改备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已修改备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note updated"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを更新しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 수정됨"
+          }
+        }
+      }
+    },
     "已修改待办": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -16088,6 +16204,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "已删除"
+          }
+        }
+      }
+    },
+    "已删除备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已删除备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note deleted"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを削除しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 삭제됨"
           }
         }
       }
@@ -17731,6 +17876,35 @@
         }
       }
     },
+    "已查找备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已查找备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes searched"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを検索しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 검색됨"
+          }
+        }
+      }
+    },
     "已查找录音": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -17882,6 +18056,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "已查看健康摘要"
+          }
+        }
+      }
+    },
+    "已查看备忘录文件夹": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已查看备忘录文件夹"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note folders viewed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモのフォルダを確認しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 폴더 확인됨"
           }
         }
       }
@@ -18195,6 +18398,35 @@
         }
       }
     },
+    "已添加备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已添加备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note added"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを追加しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 추가됨"
+          }
+        }
+      }
+    },
     "已添加待办": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -18481,6 +18713,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "已读"
+          }
+        }
+      }
+    },
+    "已读取备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已读取备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Note read"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを読み取りました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 읽음"
           }
         }
       }
@@ -32825,6 +33086,35 @@
         }
       }
     },
+    "查找备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查找备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search notes"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを検索"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 찾기"
+          }
+        }
+      }
+    },
     "查找录音": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -33218,6 +33508,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "查看全部 %lld 项"
+          }
+        }
+      }
+    },
+    "查看备忘录文件夹": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看备忘录文件夹"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View note folders"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモのフォルダを確認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 폴더 보기"
           }
         }
       }
@@ -38711,6 +39030,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "添加人物"
+          }
+        }
+      }
+    },
+    "添加备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add note"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを追加"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 추가"
           }
         }
       }
@@ -46551,6 +46899,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "读取原文"
+          }
+        }
+      }
+    },
+    "读取备忘录": {
+      "comment": "Chat renderer UI",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取备忘录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read note"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メモを読み取る"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메모 읽기"
           }
         }
       }

@@ -56,6 +56,7 @@
 		228312BAD974998C731712AA /* ChatRendererView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7842E2DCC6348BA6F7CE499D /* ChatRendererView.swift */; };
 		234C9EA5C723DFFCCF835DDD /* PhoneSpeechModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59F168E04C142BBDE1F0412B /* PhoneSpeechModelSettings.swift */; };
 		24FC81F957815916537BFC90 /* AgentDesktopDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 322FE2C94C3FEDFC361A7254 /* AgentDesktopDriver.swift */; };
+		24FC81FA57815916537BFC91 /* DesktopPIMDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 322FE2CA4C3FEDFC361A7255 /* DesktopPIMDriver.swift */; };
 		25662632574A03E89E5F7EFF /* ControlInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4F0CD832C0F480FDDB640BE /* ControlInbox.swift */; };
 		25B1E10AA34770B4129F3C5F /* TimelineModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 036F26E1E1B622C98210E99B /* TimelineModel.swift */; };
 		25F8D7E68A25DDFCB6578CE8 /* NetworkSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DE7184AF74701BC6CF9D64F /* NetworkSettingsTests.swift */; };
@@ -529,6 +530,7 @@
 		3075E0FF873CDCA2F6D54D30 /* PhoneBackgroundTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneBackgroundTasks.swift; sourceTree = "<group>"; };
 		31B5DFBA90206AC9E35BCE83 /* sherpa-onnx-APACHE-2.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "sherpa-onnx-APACHE-2.0.txt"; sourceTree = "<group>"; };
 		322FE2C94C3FEDFC361A7254 /* AgentDesktopDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDesktopDriver.swift; sourceTree = "<group>"; };
+		322FE2CA4C3FEDFC361A7255 /* DesktopPIMDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopPIMDriver.swift; sourceTree = "<group>"; };
 		32FD907E9CAC46F1F28652CE /* WebSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSettingsView.swift; sourceTree = "<group>"; };
 		3381ED36A496B9625B2046B7 /* WatchComposition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchComposition.swift; sourceTree = "<group>"; };
 		34552E8C91D67D82C7B0C528 /* AgentDesktop-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "AgentDesktop-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -846,6 +848,7 @@
 			children = (
 				34552E8C91D67D82C7B0C528 /* AgentDesktop-Bridging-Header.h */,
 				322FE2C94C3FEDFC361A7254 /* AgentDesktopDriver.swift */,
+				322FE2CA4C3FEDFC361A7255 /* DesktopPIMDriver.swift */,
 				26F7141C1586E92C11D68FD0 /* Assets.xcassets */,
 				9BB43E74E5348DF5339AFA00 /* DesktopCompanionController.swift */,
 				C3EC6738F46C706323D53A34 /* DesktopCompanionMenuBar.swift */,
@@ -2099,6 +2102,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				24FC81F957815916537BFC90 /* AgentDesktopDriver.swift in Sources */,
+				24FC81FA57815916537BFC91 /* DesktopPIMDriver.swift in Sources */,
 				7A4EA733C6124F55EA512890 /* AttachmentPresentation.swift in Sources */,
 				405849E51054EBA3961A03CF /* BrandPalette.swift in Sources */,
 				465FF4CD2001C163A94C8B77 /* ChatReadingPosition.swift in Sources */,

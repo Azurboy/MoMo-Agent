@@ -693,9 +693,12 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 from superagent_runtime import DEFAULT_PROACTIVE_RULES, LEGACY_PROACTIVE_RULE_IDS
 
                 self.assertIn(["focused_local_change", "grounded_artifact_and_audit"], LEGACY_PROACTIVE_RULE_IDS)
+                self.assertIn(["research_and_synthesis", "focused_local_change"], LEGACY_PROACTIVE_RULE_IDS)
                 self.assertEqual(DEFAULT_PROACTIVE_RULES[0]["id"], "research_and_synthesis")
                 self.assertTrue(DEFAULT_PROACTIVE_RULES[0].get("exploratory"))
                 self.assertEqual(DEFAULT_PROACTIVE_RULES[1]["id"], "focused_local_change")
+                self.assertEqual(DEFAULT_PROACTIVE_RULES[2]["id"], "personal_todo_and_schedule")
+                self.assertTrue(DEFAULT_PROACTIVE_RULES[2].get("exploratory"))
 
                 cursor_before_seg = (
                     await (await client.get("/momo/internal/superagent/triggers?after=0", headers=bridge_headers)).json()

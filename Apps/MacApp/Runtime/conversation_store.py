@@ -58,13 +58,20 @@ def collect_deliverable_attachments(
 ) -> list[dict] | None:
     """Resolve sandboxed workspace deliverable files (.html, .md, etc.) into AgentAttachment payloads."""
     resolved_roots: list[Path] = []
+    root_aliases: list[tuple[str, Path]] = []
     for root in allowed_roots:
         try:
-            r = Path(root).expanduser().resolve()
+            raw_root = Path(root)
+            exp_root = raw_root.expanduser()
+            r = exp_root.resolve()
         except OSError:
             continue
-        if r.is_dir() and r not in resolved_roots:
-            resolved_roots.append(r)
+        if r.is_dir():
+            if r not in resolved_roots:
+                resolved_roots.append(r)
+            for alias in (str(raw_root), str(exp_root), str(r)):
+                if alias and not any(a == alias for a, _ in root_aliases):
+                    root_aliases.append((alias.rstrip("/"), r))
     if not resolved_roots or max_items <= 0:
         return None
 
@@ -112,6 +119,15 @@ def collect_deliverable_attachments(
 
     body = text or ""
     if body:
+        for alias, r in root_aliases:
+            prefix = alias + "/"
+            if prefix in body:
+                for m in re.finditer(
+                    re.escape(prefix) + r"""(?P<subpath>[^\r\n`"'<>()\[\]{}，。；：！？）》】]+\.(?:html?|md|markdown|csv|json|txt|png|jpe?g))""",
+                    body,
+                    re.IGNORECASE,
+                ):
+                    _add(_is_allowed_file(r / _strip_path_punctuation(m.group("subpath")), allow_aux_doc=True))
         for m in _ABS_PATH_PATTERN.finditer(body):
             raw_p = _strip_path_punctuation(m.group("path"))
             if raw_p.startswith("$DSH_SUPERAGENT_MOMO_WORKSPACE"):
