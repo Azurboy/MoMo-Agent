@@ -166,10 +166,8 @@ class ContextService:
         threading.Thread(target=_ping, daemon=True).start()
 
     def dispatch(self):
-        # Only durable admission/reconciliation. Hermes owns model calls, tools and execution.
+        # Only durable admission/reconciliation. Active runtime owns model calls, tools and execution.
         while not self.stopped.wait(2):
-            if self.active_engine() == "superagent":
-                continue
             store = ContextStore(self.directory)
             try:
                 review = store.db.execute("SELECT * FROM memory_reviews WHERE state='running' OR (state='pending' AND first_attempt IS NOT NULL) ORDER BY rowid LIMIT 1").fetchone()
