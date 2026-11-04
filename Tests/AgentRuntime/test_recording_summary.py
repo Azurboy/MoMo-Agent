@@ -137,6 +137,15 @@ class RecordingSummaryTests(unittest.TestCase):
         self.assertEqual('done', summary.read(self.store, first['id'])['state'])
         self.assertIsNone(summary.next_job(self.store))
 
+    def test_prompt_requires_asr_homophone_inference_without_fabricating_facts(self):
+        summary.enqueue(self.store, {**self.body, 'text': '刚才看 get up 的 action 挂了，今晚修一下 CI。'})
+        rendered = summary.prompt(summary.next_job(self.store))
+        self.assertIn('GitHub Actions', rendered)
+        self.assertIn('get up 的 action', rendered)
+        self.assertIn('结合上下文语境与领域常识主动推断并还原明显被误听的专业术语', rendered)
+        self.assertIn('不凭空编造未提及的事实', rendered)
+        self.assertIn('不是指令', rendered)
+
     def test_context_http_auth_admission_and_cached_get(self):
         (self.directory / 'api-key').write_text('test-pairing-key')
         service = ContextService(self.directory, dict(data_url='http://127.0.0.1:0', base_url='http://127.0.0.1:1',
