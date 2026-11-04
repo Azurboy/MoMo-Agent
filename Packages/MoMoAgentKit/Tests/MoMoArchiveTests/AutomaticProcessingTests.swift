@@ -423,6 +423,101 @@ struct AutomaticProcessingTests {
         #expect(claimedOrder == [live.sessionID, yesterday.sessionID, morning.sessionID, twoDaysAgo.sessionID])
     }
 
+    @Test func focusedSessionAndMaxTierPrioritizeUnpreparedYesterdaySliceAheadOfPreparedTodayBatchWindows() async throws {
+        let yesterday = try Fixture(), morning = try Fixture()
+        defer { yesterday.remove(); morning.remove() }
+        let store = try yesterday.store()
+        // Ingest morning (today Tier 2) and prepare its window into `analysis_windows`, while leaving yesterday unprepared.
+        _ = try await ingest(yesterday, into: store, anchor: now.addingTimeInterval(-86_400))
+        _ = try await ingest(morning, into: store, anchor: now.addingTimeInterval(-10_800))
+
+        let morningPrep = try #require(await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint,
+            allowHistorical: false,
+            now: now,
+            calendar: calendar
+        ))
+        guard case .analysis(let morningTicket) = morningPrep else {
+            Issue.record("Expected morning analysis ticket")
+            return
+        }
+        let morningWindow = try makeWindow(morningTicket)
+        try await store.commitAnalysisBatch(
+            ticket: morningTicket,
+            windows: [morningWindow],
+            analyzedCoverage: [morningWindow.coreFrames],
+            noSpeechCoverage: [],
+            checkpoint: checkpoint(morningTicket, end: morningWindow.coreFrames.end),
+            waitingForMoreAudio: false
+        )
+
+        let frozen = try #require(await store.freezeTranscriptionBatch(
+            configurationFingerprint: fingerprint,
+            includingUnpreparedAudio: true
+        ))
+        let execution = try await store.beginTranscriptionBatch(id: frozen.id, origin: .foreground)
+
+        // Without Tier-1 cap or focus, morning's already-prepared Tier-2 window would be claimed first.
+        // With `focusedSessionID: yesterday.sessionID` and `maxTier: 1`, morning's Tier-2 window does NOT starve yesterday:
+        let tier1WindowBeforePrep = try await store.claimTranscriptionWindow(
+            configurationFingerprint: fingerprint,
+            batchExecution: execution,
+            focusedSessionID: yesterday.sessionID,
+            maxTier: 1,
+            now: now,
+            calendar: calendar
+        )
+        #expect(tier1WindowBeforePrep == nil)
+
+        let tier1Prep = try #require(await store.claimTranscriptionBatchAnalysis(
+            execution: execution,
+            configurationFingerprint: fingerprint,
+            focusedSessionID: yesterday.sessionID,
+            maxTier: 1,
+            now: now,
+            calendar: calendar
+        ))
+        #expect(tier1Prep.sessionID == yesterday.sessionID)
+        let yesterdayWindow = try makeWindow(tier1Prep)
+        try await store.commitAnalysisBatch(
+            ticket: tier1Prep,
+            windows: [yesterdayWindow],
+            analyzedCoverage: [yesterdayWindow.coreFrames],
+            noSpeechCoverage: [],
+            checkpoint: checkpoint(tier1Prep, end: yesterdayWindow.coreFrames.end),
+            waitingForMoreAudio: false
+        )
+
+        let tier1WindowAfterPrep = try #require(await store.claimTranscriptionWindow(
+            configurationFingerprint: fingerprint,
+            batchExecution: execution,
+            focusedSessionID: yesterday.sessionID,
+            maxTier: 1,
+            now: now,
+            calendar: calendar
+        ))
+        #expect(tier1WindowAfterPrep.window.sessionID == yesterday.sessionID)
+        _ = try await store.commitWindowTranscript(ticket: tier1WindowAfterPrep, text: "昨天优先完成", rawResult: Data())
+
+        // Once Tier 1 is drained, `maxTier: 1` yields nil and normal claim proceeds to morning's Tier-2 window.
+        #expect(try await store.claimTranscriptionBatchAnalysis(
+            execution: execution,
+            configurationFingerprint: fingerprint,
+            focusedSessionID: yesterday.sessionID,
+            maxTier: 1,
+            now: now,
+            calendar: calendar
+        ) == nil)
+        let fallbackWindow = try #require(await store.claimTranscriptionWindow(
+            configurationFingerprint: fingerprint,
+            batchExecution: execution,
+            focusedSessionID: yesterday.sessionID,
+            now: now,
+            calendar: calendar
+        ))
+        #expect(fallbackWindow.window.sessionID == morning.sessionID)
+    }
+
     @Test func thirtyMinuteHotWindowAndNewestFirstWithinBacklogTier() async throws {
         let earlyMorning = try Fixture(), lateMorning = try Fixture(), twelveMinWatchBatch = try Fixture()
         defer { earlyMorning.remove(); lateMorning.remove(); twelveMinWatchBatch.remove() }

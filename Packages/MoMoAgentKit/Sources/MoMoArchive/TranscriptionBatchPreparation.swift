@@ -84,6 +84,8 @@ extension ArchiveStore {
                                                 configurationFingerprint: String,
                                                 maxStepSeconds: Double = 120,
                                                 focusedDay: TimelineDay? = nil,
+                                                focusedSessionID: UUID? = nil,
+                                                maxTier: Int? = nil,
                                                 now: Date = Date(),
                                                 calendar: Calendar = .current) throws -> EpochAnalysisTicket? {
         try validateBatchExecution(execution, fingerprint: configurationFingerprint)
@@ -113,17 +115,20 @@ extension ArchiveStore {
                 manifest = nil
             }
             for range in pending {
-                let tier: Int
                 if let manifest {
-                    if let focusedDay, policy.overlapsDay(focusedDay, frames: range, manifest: manifest) {
-                        tier = policy.isHotLive(range, manifest: manifest) ? 0 : 1
-                    } else {
-                        tier = policy.freshnessTier(range, manifest: manifest, focusedDay: focusedDay)
+                    let segments = try policy.splitForScheduling(range, manifest: manifest, sessionID: sessionID,
+                        focusedDay: focusedDay, focusedSessionID: focusedSessionID)
+                    for segment in segments {
+                        if let maxTier, segment.tier > maxTier { continue }
+                        slices.append((order: order, tier: segment.tier, recordedAt: recordedAt,
+                            epochID: epochID, sessionID: sessionID, generation: generation, range: segment.frames))
                     }
                 } else {
-                    tier = 2
+                    let tier = (focusedSessionID != nil && sessionID == focusedSessionID) ? 1 : 2
+                    if let maxTier, tier > maxTier { continue }
+                    slices.append((order: order, tier: tier, recordedAt: recordedAt,
+                        epochID: epochID, sessionID: sessionID, generation: generation, range: range))
                 }
-                slices.append((order: order, tier: tier, recordedAt: recordedAt, epochID: epochID, sessionID: sessionID, generation: generation, range: range))
             }
         }
         slices.sort {

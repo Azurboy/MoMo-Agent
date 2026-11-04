@@ -322,6 +322,8 @@ struct RecordingDetailView: View {
                 }
             }
         }
+        .task(id: sessionID) { library.setFocusedSession(sessionID) }
+        .onDisappear { library.clearFocusedSession(sessionID) }
         .task(id: loadIdentity) { await load() }
         .task(id: coverageRefreshToken) { await refreshLiveCoverageIfNeeded() }
     }

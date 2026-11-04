@@ -333,7 +333,8 @@ extension ArchiveStore {
                                          inputLease: TranscriptionInputLease? = nil,
                                          sessionID: UUID? = nil, expectedGeneration: Int64? = nil, sources: [TimelineAudioSource]? = nil,
                                          isolateLocalFailures: Bool = false, selectedWindowID: String? = nil,
-                                         focusedDay: TimelineDay? = nil,
+                                         focusedDay: TimelineDay? = nil, focusedSessionID: UUID? = nil,
+                                         maxTier: Int? = nil,
                                          now: Date = Date(), calendar: Calendar = .current) throws -> TranscriptionWindowTicket? {
         if let batchExecution {
             try registerPreparedBatchWindows(execution: batchExecution, fingerprint: configurationFingerprint)
@@ -344,7 +345,10 @@ extension ArchiveStore {
         let policy = selectedWindowID == nil ? ProcessingDatePolicy(now: now, calendar: calendar) : nil
         let tierPasses: [Int?]
         if let policy {
-            tierPasses = (focusedDay != nil && focusedDay != policy.today) ? [0, 1, 2, 3] : [0, 2, 3]
+            let hasFocus = (focusedDay != nil && focusedDay != policy.today) || focusedSessionID != nil
+            let allTiers = hasFocus ? [0, 1, 2, 3] : [0, 2, 3]
+            let capped = maxTier.map { limit in allTiers.filter { $0 <= limit } } ?? allTiers
+            tierPasses = capped.map { Optional($0) }
         } else {
             tierPasses = [nil]
         }
@@ -363,8 +367,12 @@ extension ArchiveStore {
                 epochManifestCache[window.epochID] = loaded
                 manifest = loaded
             }
-            guard let manifest else { return 2 }
-            return policy.freshnessTier(window.coreFrames, manifest: manifest, focusedDay: focusedDay)
+            guard let manifest else {
+                if let focusedSessionID, window.sessionID == focusedSessionID { return 1 }
+                return 2
+            }
+            return policy.freshnessTier(window.coreFrames, manifest: manifest, sessionID: window.sessionID,
+                focusedDay: focusedDay, focusedSessionID: focusedSessionID)
         }
         for targetTier in tierPasses {
             var cursorRecordedAt: Double?

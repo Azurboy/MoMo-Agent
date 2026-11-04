@@ -8,11 +8,14 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -54,9 +57,9 @@ inline bool NormalizeN(float *vec, int dim) {
   return true;
 }
 
-void ExtractNormalizedEmbedding(const SherpaOnnxSpeakerEmbeddingExtractor *ext,
-                                int dim, const float *clip, int clip_samples,
-                                float out_emb[kMaxEmbDim]) {
+void ExtractCpuEmbedding(const SherpaOnnxSpeakerEmbeddingExtractor *ext,
+                         int dim, const float *clip, int clip_samples,
+                         float out_emb[kMaxEmbDim]) {
   auto stream = SherpaOnnxSpeakerEmbeddingExtractorCreateStream(ext);
   if (!stream) throw std::runtime_error("Cannot create embedding stream");
   std::unique_ptr<const SherpaOnnxOnlineStream,
@@ -77,6 +80,420 @@ void ExtractNormalizedEmbedding(const SherpaOnnxSpeakerEmbeddingExtractor *ext,
   if (!NormalizeN(out_emb, dim)) {
     throw std::runtime_error("Invalid embedding");
   }
+}
+
+// Kaldi 80-bin Mel-Fbank (snip_edges=false -> 300 frames for 48,000 samples at 16 kHz,
+// matching sherpa-onnx FeatureExtractorConfig default) with per-bin global-mean CMVN.
+class KaldiStaticFbank80 {
+ public:
+  static constexpr int kSampleRate = 16000;
+  static constexpr int kStaticSamples = 48000;  // 3.0 s
+  static constexpr int kWinLen = 400;           // 25 ms
+  static constexpr int kShift = 160;            // 10 ms
+  static constexpr int kStaticFrames = (kStaticSamples + kShift / 2) / kShift;  // 300
+  static constexpr int kNfft = 512;
+  static constexpr int kNumBins = kNfft / 2 + 1;
+  static constexpr int kNumMels = 80;
+  static constexpr float kPreemph = 0.97f;
+
+  KaldiStaticFbank80(float high_freq, bool use_povey) {
+    window_.resize(kWinLen);
+    constexpr double kTwoPi = 6.28318530717958647692;
+    for (int i = 0; i < kWinLen; ++i) {
+      if (use_povey) {
+        const double hann = 0.5 - 0.5 * std::cos(kTwoPi * i / (kWinLen - 1));
+        window_[static_cast<size_t>(i)] =
+            static_cast<float>(std::pow(std::max(0.0, hann), 0.85));
+      } else {
+        window_[static_cast<size_t>(i)] =
+            static_cast<float>(0.54 - 0.46 * std::cos(kTwoPi * i / (kWinLen - 1)));
+      }
+    }
+
+    bitrev_.assign(kNfft, 0);
+    for (int i = 1, j = 0; i < kNfft; ++i) {
+      int bit = kNfft >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      bitrev_[static_cast<size_t>(i)] = j;
+    }
+
+    twiddle_re_.resize(kNfft);
+    twiddle_im_.resize(kNfft);
+    for (int len = 2; len <= kNfft; len <<= 1) {
+      const int half = len >> 1;
+      const double ang = -kTwoPi / len;
+      for (int k = 0; k < half; ++k) {
+        twiddle_re_[static_cast<size_t>(half + k)] =
+            static_cast<float>(std::cos(ang * k));
+        twiddle_im_[static_cast<size_t>(half + k)] =
+            static_cast<float>(std::sin(ang * k));
+      }
+    }
+
+    auto mel = [](float f) -> float {
+      return 1127.0f * std::log(1.0f + f / 700.0f);
+    };
+    const float ml = mel(20.0f);
+    const float mh = mel(high_freq);
+    const float dm = (mh - ml) / static_cast<float>(kNumMels + 1);
+    const float bin_width = static_cast<float>(kSampleRate) / kNfft;
+
+    mel_bins_.resize(kNumMels);
+    for (int m = 0; m < kNumMels; ++m) {
+      const float L = ml + m * dm;
+      const float C = ml + (m + 1) * dm;
+      const float R = ml + (m + 2) * dm;
+      MelFilter flt;
+      flt.start_bin = kNumBins;
+      for (int k = 0; k < kNumBins; ++k) {
+        const float mf = mel(bin_width * k);
+        if (mf > L && mf < R) {
+          const float w = (mf <= C) ? ((mf - L) / (C - L)) : ((R - mf) / (R - C));
+          if (w > 0.0f) {
+            if (flt.weights.empty()) flt.start_bin = k;
+            flt.weights.push_back(w);
+          }
+        }
+      }
+      mel_bins_[static_cast<size_t>(m)] = std::move(flt);
+    }
+  }
+
+  void Compute48k(const float *samples_48k, float *out_fbank) const {
+    std::array<float, kWinLen> frame{};
+    std::array<float, kNfft> re{};
+    std::array<float, kNfft> im{};
+    std::array<float, kNumBins> power{};
+    std::array<double, kNumMels> col_sum{};
+    constexpr float kEps = std::numeric_limits<float>::epsilon();
+
+    for (int t = 0; t < kStaticFrames; ++t) {
+      const int first_sample = t * kShift + (kShift / 2) - (kWinLen / 2);  // t*160 - 120
+      double mean = 0.0;
+      for (int i = 0; i < kWinLen; ++i) {
+        int s = first_sample + i;
+        while (s < 0 || s >= kStaticSamples) {
+          if (s < 0) s = -s - 1;
+          else s = 2 * kStaticSamples - 1 - s;
+        }
+        const float v = samples_48k[s];
+        frame[static_cast<size_t>(i)] = v;
+        mean += v;
+      }
+      const float dc = static_cast<float>(mean / kWinLen);
+      for (int i = 0; i < kWinLen; ++i) {
+        frame[static_cast<size_t>(i)] -= dc;
+      }
+      for (int i = kWinLen - 1; i > 0; --i) {
+        frame[static_cast<size_t>(i)] -= kPreemph * frame[static_cast<size_t>(i - 1)];
+      }
+      frame[0] *= (1.0f - kPreemph);
+
+      re.fill(0.0f);
+      im.fill(0.0f);
+      for (int i = 0; i < kWinLen; ++i) {
+        re[static_cast<size_t>(bitrev_[static_cast<size_t>(i)])] =
+            frame[static_cast<size_t>(i)] * window_[static_cast<size_t>(i)];
+      }
+
+      for (int len = 2; len <= kNfft; len <<= 1) {
+        const int half = len >> 1;
+        for (int i = 0; i < kNfft; i += len) {
+          for (int k = 0; k < half; ++k) {
+            const float cr = twiddle_re_[static_cast<size_t>(half + k)];
+            const float ci = twiddle_im_[static_cast<size_t>(half + k)];
+            const size_t u_idx = static_cast<size_t>(i + k);
+            const size_t v_idx = static_cast<size_t>(i + k + half);
+            const float ur = re[u_idx], ui = im[u_idx];
+            const float vr = re[v_idx] * cr - im[v_idx] * ci;
+            const float vi = re[v_idx] * ci + im[v_idx] * cr;
+            re[u_idx] = ur + vr;
+            im[u_idx] = ui + vi;
+            re[v_idx] = ur - vr;
+            im[v_idx] = ui - vi;
+          }
+        }
+      }
+
+      for (int k = 0; k < kNumBins; ++k) {
+        const float r = re[static_cast<size_t>(k)];
+        const float m = im[static_cast<size_t>(k)];
+        power[static_cast<size_t>(k)] = r * r + m * m;
+      }
+
+      float *dst = out_fbank + static_cast<size_t>(t) * kNumMels;
+      for (int m = 0; m < kNumMels; ++m) {
+        const auto &flt = mel_bins_[static_cast<size_t>(m)];
+        float e = 0.0f;
+        for (size_t j = 0; j < flt.weights.size(); ++j) {
+          e += flt.weights[j] * power[static_cast<size_t>(flt.start_bin) + j];
+        }
+        const float val = std::log(std::max(e, kEps));
+        dst[m] = val;
+        col_sum[static_cast<size_t>(m)] += val;
+      }
+    }
+
+    std::array<float, kNumMels> col_mean{};
+    for (int m = 0; m < kNumMels; ++m) {
+      col_mean[static_cast<size_t>(m)] =
+          static_cast<float>(col_sum[static_cast<size_t>(m)] / kStaticFrames);
+    }
+    for (int t = 0; t < kStaticFrames; ++t) {
+      float *dst = out_fbank + static_cast<size_t>(t) * kNumMels;
+      for (int m = 0; m < kNumMels; ++m) {
+        dst[m] -= col_mean[static_cast<size_t>(m)];
+      }
+    }
+  }
+
+ private:
+  struct MelFilter {
+    int start_bin = 0;
+    std::vector<float> weights;
+  };
+  std::vector<float> window_;
+  std::vector<int> bitrev_;
+  std::vector<float> twiddle_re_;
+  std::vector<float> twiddle_im_;
+  std::vector<MelFilter> mel_bins_;
+};
+
+// Static-shape [1, 298, 80] CoreML ANE extractor for 192-d 3D-Speaker ERes2NetV2.
+// Fixing N=1, T=298 avoids CoreML E5RT dynamic statistical-pooling NaNs and
+// fuses 312/315 Conv+Pooling nodes onto Apple Neural Engine (~8.9x speedup).
+class Eres2NetCoreMLExtractor {
+ public:
+  static std::unique_ptr<Eres2NetCoreMLExtractor> TryCreate(
+      Ort::Env &env, const char *model_path, const std::string &cache_dir,
+      int32_t cpu_threads, const SherpaOnnxSpeakerEmbeddingExtractor *cpu_ref) {
+    if (!model_path || !cpu_ref) return nullptr;
+    try {
+      std::string in_name, out_name;
+      std::string sym_n = "N", sym_t = "T";
+      {
+        Ort::SessionOptions probe_opts;
+        probe_opts.SetIntraOpNumThreads(1);
+        probe_opts.SetInterOpNumThreads(1);
+        probe_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
+        Ort::Session probe(env, model_path, probe_opts);
+        if (probe.GetInputCount() != 1 || probe.GetOutputCount() < 1) {
+          return nullptr;
+        }
+        Ort::AllocatorWithDefaultOptions alloc;
+        auto in_alloc = probe.GetInputNameAllocated(0, alloc);
+        auto out_alloc = probe.GetOutputNameAllocated(0, alloc);
+        if (!in_alloc || !out_alloc) return nullptr;
+        in_name = in_alloc.get();
+        out_name = out_alloc.get();
+        auto ti = probe.GetInputTypeInfo(0);
+        auto ts = ti.GetTensorTypeAndShapeInfo();
+        auto shape = ts.GetShape();
+        if (shape.size() != 3 || (shape[2] > 0 && shape[2] != 80)) {
+          return nullptr;
+        }
+        std::vector<const char *> syms(shape.size(), nullptr);
+        ts.GetSymbolicDimensions(syms.data(), syms.size());
+        if (syms[0] && syms[0][0] != '\0') sym_n = syms[0];
+        if (syms[1] && syms[1][0] != '\0') sym_t = syms[1];
+      }
+
+      Ort::SessionOptions opts;
+      opts.SetIntraOpNumThreads(std::clamp<int32_t>(cpu_threads, 1, 2));
+      opts.SetInterOpNumThreads(1);
+      opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+      opts.AddConfigEntry("session.intra_op.allow_spinning", "0");
+      opts.AddConfigEntry("session.inter_op.allow_spinning", "0");
+      Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(
+          opts, sym_n.c_str(), 1));
+      Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(
+          opts, sym_t.c_str(), KaldiStaticFbank80::kStaticFrames));
+
+      std::unordered_map<std::string, std::string> coreml_opts{
+          {"ModelFormat", "NeuralNetwork"},
+          {"MLComputeUnits", "CPUAndNeuralEngine"},
+          {"RequireStaticInputShapes", "1"},
+      };
+      if (!cache_dir.empty()) {
+        ::mkdir(cache_dir.c_str(), 0755);
+        coreml_opts["ModelCacheDirectory"] = cache_dir;
+      }
+      opts.AppendExecutionProvider("CoreML", coreml_opts);
+
+      auto session = std::make_unique<Ort::Session>(env, model_path, opts);
+
+      // Calibrate Mel high_freq / window against SherpaOnnx CPU reference on a
+      // deterministic multi-harmonic + fricative 3.0 s signal and verify >= 0.995 cosine.
+      std::vector<float> test_sig(KaldiStaticFbank80::kStaticSamples, 0.0f);
+      constexpr double kTwoPi = 6.28318530717958647692;
+      for (int i = 0; i < KaldiStaticFbank80::kStaticSamples; ++i) {
+        const double t = double(i) / 16000.0;
+        const double env_mod = 0.35 + 0.65 * (0.5 - 0.5 * std::cos(kTwoPi * 2.3 * t));
+        const double f0 = 145.0 + 18.0 * std::sin(kTwoPi * 1.1 * t);
+        double s = 0.0;
+        for (int h = 1; h <= 24; ++h) {
+          s += (1.0 / double(h)) * std::sin(kTwoPi * f0 * h * t + 0.3 * h);
+        }
+        // High-frequency fricative energy across 7.2-7.95 kHz to disambiguate 7600 vs 8000 Hz.
+        s += 0.08 * std::sin(kTwoPi * 7750.0 * t) + 0.06 * std::cos(kTwoPi * 7910.0 * t);
+        test_sig[static_cast<size_t>(i)] = static_cast<float>(0.08 * env_mod * s);
+      }
+
+      std::array<float, kMaxEmbDim> ref_emb{};
+      ExtractCpuEmbedding(cpu_ref, 192, test_sig.data(),
+                          KaldiStaticFbank80::kStaticSamples, ref_emb.data());
+
+      // Verify exact Kaldi Fbank parity (7600 Hz Nyquist-400, Povey window -> >= 0.999 cosine)
+      // against SherpaOnnx CPU reference before promoting CoreML ANE session.
+      auto fb = std::make_unique<KaldiStaticFbank80>(7600.0f, true);
+      std::vector<float> feats(
+          static_cast<size_t>(KaldiStaticFbank80::kStaticFrames) *
+          KaldiStaticFbank80::kNumMels);
+      fb->Compute48k(test_sig.data(), feats.data());
+      Ort::MemoryInfo mem_info =
+          Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      std::array<int64_t, 3> shape{1, KaldiStaticFbank80::kStaticFrames,
+                                   KaldiStaticFbank80::kNumMels};
+      auto in_tensor = Ort::Value::CreateTensor<float>(
+          mem_info, feats.data(), feats.size(), shape.data(), shape.size());
+      const char *in_ptrs[] = {in_name.c_str()};
+      const char *out_ptrs[] = {out_name.c_str()};
+      auto outs = session->Run(Ort::RunOptions{nullptr}, in_ptrs, &in_tensor,
+                               1, out_ptrs, 1);
+      if (outs.empty() || !outs[0].IsTensor()) return nullptr;
+      auto out_shape = outs[0].GetTensorTypeAndShapeInfo().GetShape();
+      size_t elem_cnt = 1;
+      for (int64_t d : out_shape) {
+        if (d <= 0) elem_cnt = 0;
+        else elem_cnt *= static_cast<size_t>(d);
+      }
+      if (elem_cnt != 192) return nullptr;
+      const float *raw = outs[0].GetTensorData<float>();
+      std::array<float, kMaxEmbDim> cand_emb{};
+      for (int j = 0; j < 192; ++j) {
+        if (!std::isfinite(raw[j])) return nullptr;
+        cand_emb[static_cast<size_t>(j)] = raw[j];
+      }
+      if (!NormalizeN(cand_emb.data(), 192)) return nullptr;
+      const float best_sim = DotN(cand_emb.data(), ref_emb.data(), 192);
+      if (best_sim < 0.995f) {
+        return nullptr;
+      }
+
+      return std::unique_ptr<Eres2NetCoreMLExtractor>(
+          new Eres2NetCoreMLExtractor(std::move(session), std::move(fb),
+                                      std::move(in_name), std::move(out_name)));
+    } catch (...) {
+      return nullptr;
+    }
+  }
+
+  bool ComputeNormalized(const float *clip, int clip_samples,
+                         float out_emb[kMaxEmbDim]) const {
+    if (!clip || clip_samples <= 0) return false;
+    constexpr int kStatic = KaldiStaticFbank80::kStaticSamples;
+    if (clip_samples == kStatic) {
+      return RunSingle48k(clip, out_emb);
+    }
+    if (clip_samples > 54000) {
+      std::array<float, kMaxEmbDim> emb_a{}, emb_b{};
+      if (!RunSingle48k(clip, emb_a.data()) ||
+          !RunSingle48k(clip + (clip_samples - kStatic), emb_b.data())) {
+        return false;
+      }
+      for (int j = 0; j < 192; ++j) {
+        out_emb[j] = emb_a[static_cast<size_t>(j)] + emb_b[static_cast<size_t>(j)];
+      }
+      for (int j = 192; j < kMaxEmbDim; ++j) out_emb[j] = 0.0f;
+      return NormalizeN(out_emb, 192);
+    }
+    if (clip_samples > kStatic) {
+      const int origin = (clip_samples - kStatic) / 2;
+      return RunSingle48k(clip + origin, out_emb);
+    }
+
+    // Tile shorter speech clips (< 3.0 s) to static 48,000 samples with 64-sample
+    // raised-cosine crossfades; statistical mean+std pooling is duration-invariant.
+    std::vector<float> buf(kStatic, 0.0f);
+    constexpr int kFade = 64;
+    constexpr double kPi = 3.14159265358979323846;
+    int filled = clip_samples;
+    std::copy(clip, clip + clip_samples, buf.begin());
+    while (filled < kStatic) {
+      if (filled >= kFade && clip_samples > kFade * 2) {
+        for (int k = 0; k < kFade; ++k) {
+          const float alpha = static_cast<float>(
+              0.5 - 0.5 * std::cos(kPi * double(k + 1) / double(kFade + 1)));
+          const int dst = filled - kFade + k;
+          buf[static_cast<size_t>(dst)] =
+              (1.0f - alpha) * buf[static_cast<size_t>(dst)] + alpha * clip[k];
+        }
+        const int copy_n = std::min(kStatic - filled, clip_samples - kFade);
+        std::copy(clip + kFade, clip + kFade + copy_n, buf.begin() + filled);
+        filled += copy_n;
+      } else {
+        const int copy_n = std::min(kStatic - filled, clip_samples);
+        std::copy(clip, clip + copy_n, buf.begin() + filled);
+        filled += copy_n;
+      }
+    }
+    return RunSingle48k(buf.data(), out_emb);
+  }
+
+ private:
+  Eres2NetCoreMLExtractor(std::unique_ptr<Ort::Session> session,
+                          std::unique_ptr<KaldiStaticFbank80> fbank,
+                          std::string in_name, std::string out_name)
+      : session_(std::move(session)),
+        fbank_(std::move(fbank)),
+        in_name_(std::move(in_name)),
+        out_name_(std::move(out_name)) {}
+
+  bool RunSingle48k(const float *samples_48k, float out_emb[kMaxEmbDim]) const {
+    std::vector<float> feats(
+        static_cast<size_t>(KaldiStaticFbank80::kStaticFrames) *
+        KaldiStaticFbank80::kNumMels);
+    fbank_->Compute48k(samples_48k, feats.data());
+    std::array<int64_t, 3> shape{1, KaldiStaticFbank80::kStaticFrames,
+                                 KaldiStaticFbank80::kNumMels};
+    auto in_tensor = Ort::Value::CreateTensor<float>(
+        mem_info_, feats.data(), feats.size(), shape.data(), shape.size());
+    const char *in_ptrs[] = {in_name_.c_str()};
+    const char *out_ptrs[] = {out_name_.c_str()};
+    auto outs = session_->Run(Ort::RunOptions{nullptr}, in_ptrs, &in_tensor, 1,
+                              out_ptrs, 1);
+    if (outs.empty() || !outs[0].IsTensor()) return false;
+    const float *raw = outs[0].GetTensorData<float>();
+    for (int j = 0; j < 192; ++j) {
+      if (!std::isfinite(raw[j])) return false;
+      out_emb[j] = raw[j];
+    }
+    for (int j = 192; j < kMaxEmbDim; ++j) out_emb[j] = 0.0f;
+    return NormalizeN(out_emb, 192);
+  }
+
+  std::unique_ptr<Ort::Session> session_;
+  std::unique_ptr<KaldiStaticFbank80> fbank_;
+  std::string in_name_;
+  std::string out_name_;
+  Ort::MemoryInfo mem_info_ =
+      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+};
+
+struct SpeakerEmbeddingBackend {
+  const SherpaOnnxSpeakerEmbeddingExtractor *cpu_ext = nullptr;
+  std::unique_ptr<Eres2NetCoreMLExtractor> coreml_ext;
+};
+
+void ExtractNormalizedEmbedding(const SpeakerEmbeddingBackend &backend,
+                                int dim, const float *clip, int clip_samples,
+                                float out_emb[kMaxEmbDim]) {
+  if (dim == 192 && backend.coreml_ext &&
+      backend.coreml_ext->ComputeNormalized(clip, clip_samples, out_emb)) {
+    return;
+  }
+  ExtractCpuEmbedding(backend.cpu_ext, dim, clip, clip_samples, out_emb);
 }
 
 // Assemble clean speech spans with 64-sample raised-cosine joins.
@@ -401,7 +818,7 @@ void SplitSpansInHalf(const std::vector<std::pair<int, int>> &spans,
 }
 
 bool ExtractTurnEmbeddingWithPurity(
-    const SherpaOnnxSpeakerEmbeddingExtractor *ext, int emb_dim,
+    const SpeakerEmbeddingBackend &ext, int emb_dim,
     const float *raw_audio, const std::vector<std::pair<int, int>> &spans,
     int min_samples, MoMoCancelCallback is_cancelled, const void *cancel_context,
     const MoMoCancelToken *cancel_token,
@@ -678,7 +1095,9 @@ inline int MapPowersetClass(int c, int num_speakers, const int *pi) {
 struct MoMoSpeakerRuntime {
   Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "MoMoSpeakers"};
   std::unique_ptr<Ort::Session> segmentation;
-  const SherpaOnnxSpeakerEmbeddingExtractor *embedding = nullptr;
+  SpeakerEmbeddingBackend embedding;
+  bool seg_uses_coreml = false;
+  bool emb_uses_coreml = false;
   int window_samples = 160000;
   int half_window_samples = 80000;
   int shift = 270;
@@ -694,7 +1113,9 @@ struct MoMoSpeakerRuntime {
   std::mutex seg_scratch_mutex;
   std::vector<float> seg_padded;
   ~MoMoSpeakerRuntime() {
-    if (embedding) SherpaOnnxDestroySpeakerEmbeddingExtractor(embedding);
+    if (embedding.cpu_ext) {
+      SherpaOnnxDestroySpeakerEmbeddingExtractor(embedding.cpu_ext);
+    }
   }
 };
 
@@ -1101,30 +1522,131 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(
           std::next_permutation(p.begin(), p.begin() + runtime->num_speakers));
     }
 
-    // Dynamic-duration ERes2NetV2 (192-dim) must run on ORT CPU because Apple
-    // CoreML E5RT fails on unbounded pooling flatten dimensions and emits NaNs.
     const bool requested_coreml =
         provider && std::strncmp(provider, "coreml", 6) == 0;
+    std::string coreml_cache_root;
+    if (requested_coreml && provider[6] == ':') {
+      coreml_cache_root = provider + 7;
+      while (!coreml_cache_root.empty() &&
+             (coreml_cache_root.back() == '\n' ||
+              coreml_cache_root.back() == '\r')) {
+        coreml_cache_root.pop_back();
+      }
+      // SherpaOnnx passes "coreml:/path/to/file.config"; SpeakerRuntime passes
+      // "coreml:/path/to/dir". Strip trailing ".config" filename if present.
+      if (coreml_cache_root.size() > 7 &&
+          coreml_cache_root.compare(coreml_cache_root.size() - 7, 7, ".config") == 0) {
+        const size_t slash = coreml_cache_root.find_last_of('/');
+        if (slash != std::string::npos) {
+          coreml_cache_root.resize(slash);
+        }
+      }
+    }
+
+    // Upgrade segmentation (DiariZen WavLM / PyAnnote Community-1) to CoreML ANE
+    // with static window shape overrides and CPUAndNeuralEngine (background-safe!).
+    if (requested_coreml) {
+      try {
+        auto seg_in_ti = runtime->segmentation->GetInputTypeInfo(0);
+        auto seg_in_ts = seg_in_ti.GetTensorTypeAndShapeInfo();
+        auto seg_in_shape = seg_in_ts.GetShape();
+        if (seg_in_shape.size() == 3) {
+          std::vector<const char *> syms(3, nullptr);
+          seg_in_ts.GetSymbolicDimensions(syms.data(), syms.size());
+          Ort::SessionOptions coreml_seg_opts;
+          coreml_seg_opts.SetIntraOpNumThreads(std::clamp<int32_t>(threads, 1, 2));
+          coreml_seg_opts.SetInterOpNumThreads(1);
+          coreml_seg_opts.SetGraphOptimizationLevel(
+              GraphOptimizationLevel::ORT_ENABLE_ALL);
+          coreml_seg_opts.AddConfigEntry("session.intra_op.allow_spinning", "0");
+          coreml_seg_opts.AddConfigEntry("session.inter_op.allow_spinning", "0");
+          const int64_t target_dims[3] = {1, 1, runtime->window_samples};
+          for (size_t ax = 0; ax < 3; ++ax) {
+            if (syms[ax] && syms[ax][0] != '\0') {
+              Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(
+                  coreml_seg_opts, syms[ax], target_dims[ax]));
+            }
+          }
+          std::unordered_map<std::string, std::string> ep_opts{
+              {"ModelFormat", "MLProgram"},
+              {"MLComputeUnits", "CPUAndNeuralEngine"},
+              {"RequireStaticInputShapes", "1"},
+          };
+          if (!coreml_cache_root.empty()) {
+            ::mkdir(coreml_cache_root.c_str(), 0755);
+            const std::string seg_cache = coreml_cache_root + "/seg";
+            ::mkdir(seg_cache.c_str(), 0755);
+            ep_opts["ModelCacheDirectory"] = seg_cache;
+          }
+          coreml_seg_opts.AppendExecutionProvider("CoreML", ep_opts);
+          auto coreml_seg = std::make_unique<Ort::Session>(
+              runtime->env, segmentation, coreml_seg_opts);
+
+          // Verify finite output on static window shape before promoting.
+          int64_t test_shape[3] = {1, 1, runtime->window_samples};
+          auto test_in = Ort::Value::CreateTensor<float>(
+              runtime->seg_memory, runtime->seg_padded.data(),
+              runtime->seg_padded.size(), test_shape, 3);
+          const char *in_names[] = {runtime->seg_in_name.c_str()};
+          const char *out_names[] = {runtime->seg_out_name.c_str()};
+          auto test_out = coreml_seg->Run(Ort::RunOptions{nullptr}, in_names,
+                                          &test_in, 1, out_names, 1);
+          if (!test_out.empty() && test_out[0].IsTensor()) {
+            auto td = test_out[0].GetTensorTypeAndShapeInfo().GetShape();
+            if (td.size() == 3 && td[0] == 1 && td[2] == runtime->num_classes &&
+                td[1] >= 1) {
+              const float *ptr = test_out[0].GetTensorData<float>();
+              const size_t total_out =
+                  static_cast<size_t>(td[1]) * static_cast<size_t>(td[2]);
+              bool all_finite = true;
+              for (size_t u = 0; u < total_out; ++u) {
+                if (!std::isfinite(ptr[u])) {
+                  all_finite = false;
+                  break;
+                }
+              }
+              if (all_finite) {
+                runtime->segmentation = std::move(coreml_seg);
+                runtime->seg_uses_coreml = true;
+              }
+            }
+          }
+        }
+      } catch (...) {
+        // Keep the initialized CPU segmentation session on any CoreML error.
+      }
+    }
+
     SherpaOnnxSpeakerEmbeddingExtractorConfig config{};
     config.model = embedding;
     config.num_threads = threads;
     config.provider = requested_coreml ? "cpu" : (provider ? provider : "cpu");
-    runtime->embedding = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
-    if (!runtime->embedding) {
+    runtime->embedding.cpu_ext = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
+    if (!runtime->embedding.cpu_ext) {
       throw std::runtime_error("Cannot create speaker embedding extractor");
     }
-    const int dim = SherpaOnnxSpeakerEmbeddingExtractorDim(runtime->embedding);
+    const int dim =
+        SherpaOnnxSpeakerEmbeddingExtractorDim(runtime->embedding.cpu_ext);
     if (dim != 192 && dim != 256) {
       throw std::runtime_error("Unsupported speaker embedding dimension");
     }
-    if (dim == 256 && requested_coreml) {
-      SherpaOnnxDestroySpeakerEmbeddingExtractor(runtime->embedding);
+    if (dim == 192 && requested_coreml) {
+      const std::string emb_cache =
+          coreml_cache_root.empty() ? std::string{} : (coreml_cache_root + "/emb");
+      runtime->embedding.coreml_ext = Eres2NetCoreMLExtractor::TryCreate(
+          runtime->env, embedding, emb_cache, threads, runtime->embedding.cpu_ext);
+      runtime->emb_uses_coreml = (runtime->embedding.coreml_ext != nullptr);
+    } else if (dim == 256 && requested_coreml) {
+      SherpaOnnxDestroySpeakerEmbeddingExtractor(runtime->embedding.cpu_ext);
       config.provider = provider;
-      runtime->embedding = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
-      if (!runtime->embedding ||
-          SherpaOnnxSpeakerEmbeddingExtractorDim(runtime->embedding) != 256) {
+      runtime->embedding.cpu_ext =
+          SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
+      if (!runtime->embedding.cpu_ext ||
+          SherpaOnnxSpeakerEmbeddingExtractorDim(runtime->embedding.cpu_ext) !=
+              256) {
         throw std::runtime_error("Invalid 256-dim speaker extractor");
       }
+      runtime->emb_uses_coreml = true;
     }
     runtime->embedding_dim = dim;
     return runtime.release();
@@ -1142,6 +1664,14 @@ void MoMoDestroySpeakerRuntime(MoMoSpeakerRuntime *runtime) { delete runtime; }
 
 int32_t MoMoGetSpeakerEmbeddingDim(const MoMoSpeakerRuntime *runtime) {
   return runtime ? runtime->embedding_dim : 0;
+}
+
+int32_t MoMoGetSpeakerAcceleratorMask(const MoMoSpeakerRuntime *runtime) {
+  if (!runtime) return 0;
+  int32_t mask = 0;
+  if (runtime->seg_uses_coreml) mask |= 1;
+  if (runtime->emb_uses_coreml) mask |= 2;
+  return mask;
 }
 
 int MoMoExtractCleanVoiceprint(
@@ -1445,7 +1975,7 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
     const int split_trigger_samples = is_eres2net ? 28800 : 25600;
     constexpr int kScanStepSamples = 6400;          // 0.40 s boundary scan step
     const int disjoint_wing_samples = 3 * kScanStepSamples;  // 19200 (1.20 s)
-    constexpr int kMinSplitPieceSamples = 12000;    // 0.75 s minimum turn piece
+    const int kMinSplitPieceSamples = is_eres2net ? 16800 : 12000;  // 1.05 s for 192-d ERes2NetV2
 
     std::vector<float> clip_buf;
     clip_buf.reserve(96000);
@@ -1996,8 +2526,8 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
           cand.enrolled_trig = two_sided_enrolled || one_sided_enrolled;
         };
 
-        const float abs_switch_th = is_eres2net ? 0.40f : 0.64f;
-        const float strong_switch_th = is_eres2net ? 0.34f : 0.58f;
+        const float abs_switch_th = is_eres2net ? 0.34f : 0.64f;
+        const float strong_switch_th = is_eres2net ? 0.26f : 0.58f;
         const float base_min = is_eres2net ? 0.64f : 0.80f;
         const float dip_min = is_eres2net ? 0.20f : 0.14f;
         const float dip_ceil = is_eres2net ? 0.48f : 0.72f;
@@ -2188,8 +2718,10 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
                             &has_halves);
         }
 
+        const int min_purity_split_span =
+            is_eres2net ? 44800 : (2 * kMinSplitPieceSamples);
         if (purity < purity_split_th &&
-            rt.end - rt.start >= 2 * kMinSplitPieceSamples) {
+            rt.end - rt.start >= min_purity_split_span) {
           const int mid = (rt.start + rt.end) / 2;
           const int lo = std::max(rt.start + kMinSplitPieceSamples, mid - 5600);
           const int hi = std::min(rt.end - kMinSplitPieceSamples, mid + 5600);
@@ -2204,7 +2736,8 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
             left_rt.orig_track = label;
             left_rt.local_speaker = label;
             left_rt.was_split = true;
-            left_rt.strong_split_after = true;
+            left_rt.strong_split_after =
+                purity < (is_eres2net ? 0.28f : 0.50f);
 
             RawTurn right_rt;
             right_rt.start = valley;
@@ -2410,17 +2943,20 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
     const int step_frames =
         std::max(1, runtime->half_window_samples / runtime->shift);
     const int win_step = step_frames * runtime->shift;
+    const int min_cooccur_samples = is_eres2net ? 9600 : 3200;
     for (int win_idx = 0;; ++win_idx) {
       const int w_lo = win_idx * win_step;
       if (w_lo >= count) break;
       const int w_hi = std::min<int>(count, w_lo + runtime->window_samples);
       for (size_t a = 0; a < num_tr; ++a) {
         if (tracklets[a].orig_track > K) continue;
-        if (tracklet_active_samples_in(a, w_lo, w_hi) < 3200) continue;
+        if (tracklet_active_samples_in(a, w_lo, w_hi) < min_cooccur_samples) {
+          continue;
+        }
         for (size_t b = a + 1; b < num_tr; ++b) {
           if (tracklets[b].orig_track > K) continue;
           if (tracklets[a].orig_track == tracklets[b].orig_track) continue;
-          if (tracklet_active_samples_in(b, w_lo, w_hi) >= 3200) {
+          if (tracklet_active_samples_in(b, w_lo, w_hi) >= min_cooccur_samples) {
             tr_cannot_link[a][b] = true;
             tr_cannot_link[b][a] = true;
           }
@@ -2462,8 +2998,8 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
     std::vector<int> tr_cluster(num_tr);
     std::iota(tr_cluster.begin(), tr_cluster.end(), 0);
     std::vector<bool> tr_alive(num_tr, true);
-    const float ahc_same_enrolled = is_eres2net ? 0.54f : 0.74f;
-    const float ahc_anon = is_eres2net ? 0.60f : 0.78f;
+    const float ahc_same_enrolled = is_eres2net ? 0.52f : 0.74f;
+    const float ahc_anon = is_eres2net ? 0.50f : 0.78f;
 
     while (true) {
       int best_a = -1, best_b = -1;
@@ -2529,6 +3065,85 @@ int MoMoAnalyzeSpeakersWithProfilesCancellable(
       }
       NormalizeN(tracklets[ka].proto.data(), emb_dim);
       tr_alive[kb] = false;
+    }
+
+    // Absorb unverified sub-second noise/backchannel clusters (< 0.95 s active,
+    // < 0.55 s clean) into their nearest compatible dominant speaker cluster so
+    // Watch far-field noise cannot spawn 8-11 phantom speakers per 15 s window.
+    if (is_eres2net && num_tr > 1) {
+      std::vector<int> cluster_samples(num_tr, 0);
+      std::vector<float> cluster_clean(num_tr, 0.0f);
+      for (size_t c = 0; c < num_tr; ++c) {
+        if (!tr_alive[c]) continue;
+        for (size_t idx : tracklets[c].turn_indices) {
+          cluster_samples[c] +=
+              std::max(0, raw_turns[idx].end - raw_turns[idx].start);
+          cluster_clean[c] += raw_turns[idx].clean_seconds;
+        }
+      }
+      for (size_t c = 0; c < num_tr; ++c) {
+        if (!tr_alive[c]) continue;
+        if (cluster_samples[c] >= 15200 || cluster_clean[c] >= 0.55f) continue;
+        EnrolledMatch mc{};
+        if (tracklets[c].has_proto) {
+          mc = MatchEnrolledPerson(tracklets[c].proto.data(), emb_dim,
+                                   enrolled_embeddings, enrolled_person_ids,
+                                   enrolled_count);
+          if (mc.person_id >= 0) continue;
+        }
+        int best_target = -1;
+        int best_gap = std::numeric_limits<int>::max();
+        for (size_t idx : tracklets[c].turn_indices) {
+          const auto &micro = raw_turns[idx];
+          for (int dir : {-1, 1}) {
+            const int nb = static_cast<int>(idx) + dir;
+            if (nb < 0 || nb >= static_cast<int>(raw_turns.size())) continue;
+            const auto &nb_turn = raw_turns[static_cast<size_t>(nb)];
+            if (nb_turn.orig_track < 1) continue;
+            const int nb_tr = turn_to_tracklet[static_cast<size_t>(nb)];
+            if (nb_tr < 0) continue;
+            const size_t cand =
+                static_cast<size_t>(tr_cluster[static_cast<size_t>(nb_tr)]);
+            if (cand == c || !tr_alive[cand]) continue;
+            if (cluster_samples[cand] < 16000) continue;
+            if (tracklets[c].has_proto && tr_cannot_link[c][cand]) continue;
+            if (tracklets[c].has_proto && tracklets[cand].has_proto) {
+              const float sim = DotN(tracklets[c].proto.data(),
+                                     tracklets[cand].proto.data(), emb_dim);
+              if (sim < 0.32f) continue;
+              if (HasOneSidedEnrolledDropoff(
+                      tracklets[cand].proto.data(), tracklets[c].proto.data(),
+                      emb_dim, sim, enrolled_embeddings, enrolled_person_ids,
+                      enrolled_count)) {
+                continue;
+              }
+            }
+            const int gap =
+                dir < 0 ? std::max(0, micro.start - nb_turn.end)
+                        : std::max(0, nb_turn.start - micro.end);
+            if (gap <= 48000 && gap < best_gap) {
+              best_gap = gap;
+              best_target = static_cast<int>(cand);
+            }
+          }
+        }
+        if (best_target >= 0) {
+          const size_t kt = static_cast<size_t>(best_target);
+          for (size_t idx : tracklets[c].turn_indices) {
+            raw_turns[idx].clean_seconds = 0.0f;
+          }
+          for (size_t t = 0; t < num_tr; ++t) {
+            if (tr_cluster[t] == static_cast<int>(c)) {
+              tr_cluster[t] = best_target;
+            }
+          }
+          tracklets[kt].turn_indices.insert(tracklets[kt].turn_indices.end(),
+                                            tracklets[c].turn_indices.begin(),
+                                            tracklets[c].turn_indices.end());
+          cluster_samples[kt] += cluster_samples[c];
+          tr_alive[c] = false;
+        }
+      }
     }
 
     std::vector<int> cluster_to_speaker(num_tr, 0);

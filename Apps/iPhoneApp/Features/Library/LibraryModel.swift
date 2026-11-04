@@ -46,6 +46,20 @@ final class LibraryModel {
     private var searchGeneration: UInt64 = 0
     private var searchedRecordings: [UUID: RecordingSummary] = [:]
     @ObservationIgnored private var readingPositions: [UUID: RecordingReadingPosition] = [:]
+    @ObservationIgnored private(set) var focusedSessionID: UUID?
+    @ObservationIgnored var onFocusedSessionChanged: (@MainActor (UUID?) -> Void)?
+
+    func setFocusedSession(_ sessionID: UUID) {
+        guard focusedSessionID != sessionID else { return }
+        focusedSessionID = sessionID
+        onFocusedSessionChanged?(sessionID)
+    }
+
+    func clearFocusedSession(_ sessionID: UUID) {
+        guard focusedSessionID == sessionID else { return }
+        focusedSessionID = nil
+        onFocusedSessionChanged?(nil)
+    }
 
     @ObservationIgnored private var transcriptCache: [RecordingReadIdentity: RecordingTranscriptSnapshot] = [:]
     @ObservationIgnored private var transcriptRecency: [RecordingReadIdentity] = []

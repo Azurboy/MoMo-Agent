@@ -60,6 +60,7 @@ MoMoSpeakerRuntime *MoMoCreateSpeakerRuntimeWithThreads(const char *segmentation
     char *error, size_t capacity);
 void MoMoDestroySpeakerRuntime(MoMoSpeakerRuntime *runtime);
 int32_t MoMoGetSpeakerEmbeddingDim(const MoMoSpeakerRuntime *runtime);
+int32_t MoMoGetSpeakerAcceleratorMask(const MoMoSpeakerRuntime *runtime);
 // Overlapping segmentation windows with permutation stitching.
 // Returns >= 0 turn count on success, -2 if cancelled, -1 on error.
 int MoMoAnalyzeSpeakers(MoMoSpeakerRuntime *runtime, const float *samples,
