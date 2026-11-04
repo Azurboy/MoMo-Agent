@@ -57,37 +57,54 @@ extension WindowPlanner {
     private func pauseCut(after start: Int64, through limit: Int64,
                           ranges: [Range<Int64>], energy: [SpeechEnergyFrame]) -> Int64 {
         let lower = start + configuration.maximumCoreFrames / 2
+        let singlePassLimit = min(limit, start + 256_000)
         // Prefer detected pauses; ignore the one-frame gap introduced by Flush.
         let pauses = zip(ranges, ranges.dropFirst()).compactMap { a, b -> (Int64, Int64)? in
             let gap = b.lowerBound - a.upperBound
             let middle = a.upperBound + gap / 2
             return gap >= 1_920 && middle >= lower && middle <= limit ? (middle, gap) : nil
         }
-        // Prefer a complete utterance around 13s within the 20s memory ceiling.
-        // Filling every request to the ceiling can degrade SenseVoice on repeated
-        // clauses. A substantial pause is stronger evidence than target duration.
+        // Prefer a complete utterance around 13s within DiariZen's 16s single-pass
+        // ceiling when a >=300ms pause exists <=16s; otherwise consider up to 20s.
         let target = start + configuration.maximumCoreFrames * 13 / 20
-        if let best = pauses.min(by: {
+        let singlePassPauses = pauses.filter { $0.0 <= singlePassLimit && $0.1 >= 4_800 }
+        let pausePool = singlePassPauses.isEmpty ? pauses : singlePassPauses
+        if let best = pausePool.min(by: {
             if ($0.1 >= 16_000) != ($1.1 >= 16_000) { return $0.1 >= 16_000 }
             let a = abs($0.0 - target), b = abs($1.0 - target)
             return a == b ? $0.0 < $1.0 : a < b
         }) { return best.0 }
         // Uninterrupted speech still needs a bounded window. Use a relative 160 ms
         // energy valley when available; absolute amplitude would reject quiet Watch speech.
+        // Prefer a natural breath/syllable valley <= 16.0s (256,000 frames) so DiariZen
+        // executes one 16s WavLM pass instead of two overlapping passes.
         let candidates = energy.filter { $0.start >= lower && $0.start + 512 <= limit }
         guard candidates.count >= 5 else { return limit }
         let mean = candidates.reduce(Float(0)) { $0 + $1.rms * $1.rms } / Float(candidates.count)
         guard mean > 0 else { return limit }
-        var best: (frame: Int64, power: Float)?
+        let quietestLower = start + configuration.maximumCoreFrames * 3 / 5
+        var bestSinglePass: (frame: Int64, power: Float)?
+        var bestFallback: (frame: Int64, power: Float)?
+        var quietestSinglePass: (frame: Int64, power: Float)?
         for index in 0...(candidates.count - 5) {
             let slice = candidates[index..<(index + 5)]
             guard slice.last!.start - slice.first!.start == 4 * 512 else { continue }
             let power = slice.reduce(Float(0)) { $0 + $1.rms * $1.rms } / 5
-            if power < mean * 0.0625, best == nil || power < best!.power {
-                best = (candidates[index + 2].start + 256, power)
+            let cutFrame = candidates[index + 2].start + 256
+            if cutFrame <= singlePassLimit {
+                if power < mean * 0.14, bestSinglePass == nil || power < bestSinglePass!.power {
+                    bestSinglePass = (cutFrame, power)
+                }
+                if cutFrame >= quietestLower, power < mean * 0.85,
+                   quietestSinglePass == nil || power < quietestSinglePass!.power {
+                    quietestSinglePass = (cutFrame, power)
+                }
+            }
+            if power < mean * 0.0625, bestFallback == nil || power < bestFallback!.power {
+                bestFallback = (cutFrame, power)
             }
         }
-        return best?.frame ?? limit
+        return bestSinglePass?.frame ?? bestFallback?.frame ?? quietestSinglePass?.frame ?? limit
     }
 }
 

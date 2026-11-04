@@ -1302,9 +1302,146 @@ struct MoMoFunASRNanoRuntime {
   std::vector<float> decode_logits;
   size_t dirty_kv_len = 0;
 
+  // Persistent Ort::Value views and IoBindings reused across every decode token.
+  std::array<int64_t, 4> kv_cache_shape{1, 512, 8, 128};
+  std::array<int64_t, 4> kv_delta_shape{1, 1, 8, 128};
+  std::array<int64_t, 3> decode_logits_shape{1, 1, 151936};
+  std::array<int64_t, 3> decode_emb_shape{1, 1, 1024};
+  std::array<int64_t, 1> decode_pos_shape{1};
+  std::array<int64_t, 2> decode_id_shape{1, 1};
+  std::vector<Ort::Value> kv_cache_tensors;
+  std::vector<Ort::Value> kv_delta_tensors;
+  Ort::Value decode_logits_tensor{nullptr};
+  std::vector<float> next_embed;
+  int64_t decode_cache_pos = 0;
+  Ort::Value decode_in_emb{nullptr};
+  Ort::Value decode_in_pos{nullptr};
+  std::unique_ptr<Ort::IoBinding> decode_llm_binding;
+
+  ONNXTensorElementDataType emb_out_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  int64_t decode_token_id = 0;
+  std::vector<float> decode_emb_f32;
+  std::vector<uint16_t> decode_emb_f16;
+  Ort::Value decode_id_tensor{nullptr};
+  Ort::Value decode_emb_out_tensor{nullptr};
+  std::unique_ptr<Ort::IoBinding> decode_emb_binding;
+
+  bool emb_is_token_independent = false;
+  struct CachedTokenEmbed {
+    int64_t id = -1;
+    std::vector<float> vec;
+  };
+  std::vector<CachedTokenEmbed> token_embed_cache;
+
+  struct CachedPrompt {
+    std::string key;
+    std::vector<int64_t> ids_before;
+    std::vector<int64_t> ids_after;
+    std::vector<float> embeds_before;
+    std::vector<float> embeds_after;
+  };
+  CachedPrompt cached_prompt;
+
   KaldiFbankFrontend frontend;
   std::unique_ptr<Qwen3Tokenizer> tokenizer;
 };
+
+namespace {
+
+void LookupSingleTokenEmbed(MoMoFunASRNanoRuntime *runtime, int64_t token_id,
+                            Ort::RunOptions &run_opts, float *out_vec) {
+  const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
+  if (runtime->emb_is_token_independent && !runtime->token_embed_cache.empty()) {
+    const size_t slot =
+        static_cast<size_t>(token_id) & (runtime->token_embed_cache.size() - 1);
+    auto &entry = runtime->token_embed_cache[slot];
+    if (entry.id == token_id && entry.vec.size() == hidden_u) {
+      std::memcpy(out_vec, entry.vec.data(), hidden_u * sizeof(float));
+      return;
+    }
+  }
+
+  runtime->decode_token_id = token_id;
+  if (runtime->decode_emb_binding) {
+    runtime->embedding_sess->Run(run_opts, *runtime->decode_emb_binding);
+    if (runtime->emb_out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      const uint16_t *src = runtime->decode_emb_f16.data();
+      for (size_t d = 0; d < hidden_u; ++d) {
+        float v = HalfBitsToFloat(src[d]);
+        out_vec[d] = std::isfinite(v) ? v : 0.0f;
+      }
+    } else {
+      const float *src = runtime->decode_emb_f32.data();
+      for (size_t d = 0; d < hidden_u; ++d) {
+        out_vec[d] = std::isfinite(src[d]) ? src[d] : 0.0f;
+      }
+    }
+  } else {
+    std::array<int64_t, 2> one_shape{1, 1};
+    Ort::Value one_id = Ort::Value::CreateTensor<int64_t>(
+        runtime->cpu_mem, &runtime->decode_token_id, 1, one_shape.data(),
+        one_shape.size());
+    auto next_emb_out = runtime->embedding_sess->Run(
+        run_opts, runtime->emb_in_ptrs.data(), &one_id, 1,
+        runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+    if (next_emb_out.empty() || !next_emb_out[0].IsTensor()) {
+      throw std::runtime_error("Empty decode embedding output");
+    }
+    if (next_emb_out[0].GetTensorTypeAndShapeInfo().GetElementType() ==
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      const uint16_t *src = next_emb_out[0].GetTensorData<uint16_t>();
+      for (size_t d = 0; d < hidden_u; ++d) {
+        float v = HalfBitsToFloat(src[d]);
+        out_vec[d] = std::isfinite(v) ? v : 0.0f;
+      }
+    } else {
+      const float *src = next_emb_out[0].GetTensorData<float>();
+      for (size_t d = 0; d < hidden_u; ++d) {
+        out_vec[d] = std::isfinite(src[d]) ? src[d] : 0.0f;
+      }
+    }
+  }
+
+  if (runtime->emb_is_token_independent && !runtime->token_embed_cache.empty()) {
+    const size_t slot =
+        static_cast<size_t>(token_id) & (runtime->token_embed_cache.size() - 1);
+    auto &entry = runtime->token_embed_cache[slot];
+    entry.id = token_id;
+    entry.vec.assign(out_vec, out_vec + hidden_u);
+  }
+}
+
+void EmbedTokenSpan(MoMoFunASRNanoRuntime *runtime, const int64_t *ids,
+                    size_t count, Ort::RunOptions &run_opts, float *out_embeds) {
+  if (count == 0) return;
+  const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
+  std::array<int64_t, 2> shape{1, static_cast<int64_t>(count)};
+  Ort::Value ids_tensor = Ort::Value::CreateTensor<int64_t>(
+      runtime->cpu_mem, const_cast<int64_t *>(ids), count, shape.data(),
+      shape.size());
+  auto outs = runtime->embedding_sess->Run(
+      run_opts, runtime->emb_in_ptrs.data(), &ids_tensor, 1,
+      runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
+  if (outs.empty() || !outs[0].IsTensor()) {
+    throw std::runtime_error("Empty embedding output");
+  }
+  const size_t total = count * hidden_u;
+  if (outs[0].GetTensorTypeAndShapeInfo().GetElementType() ==
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    const uint16_t *src = outs[0].GetTensorData<uint16_t>();
+    for (size_t i = 0; i < total; ++i) {
+      float v = HalfBitsToFloat(src[i]);
+      out_embeds[i] = std::isfinite(v) ? v : 0.0f;
+    }
+  } else {
+    const float *src = outs[0].GetTensorData<float>();
+    for (size_t i = 0; i < total; ++i) {
+      out_embeds[i] = std::isfinite(src[i]) ? src[i] : 0.0f;
+    }
+  }
+}
+
+}  // namespace
 
 MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     const char *encoder_adaptor_path, const char *llm_path,
@@ -1334,6 +1471,7 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
 
     auto enc_opts = make_cpu_options();
     auto emb_opts = make_cpu_options();
+    emb_opts.SetIntraOpNumThreads(1);
     auto llm_opts = make_cpu_options();
 
     rt->encoder_sess = std::make_unique<Ort::Session>(
@@ -1437,8 +1575,111 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     rt->delta_v_bytes.assign(static_cast<size_t>(rt->num_layers),
                              std::vector<uint8_t>(kv_delta_bytes, 0));
     rt->decode_logits.assign(static_cast<size_t>(rt->vocab_size), 0.0f);
+    rt->next_embed.assign(static_cast<size_t>(rt->hidden_size), 0.0f);
+
+    // Pre-build reusable Ort::Value views and persistent decode IoBindings.
+    rt->kv_cache_shape = {1, static_cast<int64_t>(rt->max_total_len),
+                          rt->kv_heads, rt->head_dim};
+    rt->kv_delta_shape = {1, 1, rt->kv_heads, rt->head_dim};
+    rt->decode_logits_shape = {1, 1, static_cast<int64_t>(rt->vocab_size)};
+    rt->decode_emb_shape = {1, 1, static_cast<int64_t>(rt->hidden_size)};
+    rt->decode_pos_shape = {1};
+    rt->decode_id_shape = {1, 1};
+
+    rt->kv_cache_tensors.reserve(static_cast<size_t>(rt->num_layers) * 2);
+    rt->kv_delta_tensors.reserve(static_cast<size_t>(rt->num_layers) * 2);
+    for (size_t l = 0; l < static_cast<size_t>(rt->num_layers); ++l) {
+      rt->kv_cache_tensors.push_back(Ort::Value::CreateTensor(
+          rt->cpu_mem, rt->cache_k_bytes[l].data(),
+          rt->cache_k_bytes[l].size(), rt->kv_cache_shape.data(),
+          rt->kv_cache_shape.size(), rt->kv_type));
+      rt->kv_cache_tensors.push_back(Ort::Value::CreateTensor(
+          rt->cpu_mem, rt->cache_v_bytes[l].data(),
+          rt->cache_v_bytes[l].size(), rt->kv_cache_shape.data(),
+          rt->kv_cache_shape.size(), rt->kv_type));
+      rt->kv_delta_tensors.push_back(Ort::Value::CreateTensor(
+          rt->cpu_mem, rt->delta_k_bytes[l].data(),
+          rt->delta_k_bytes[l].size(), rt->kv_delta_shape.data(),
+          rt->kv_delta_shape.size(), rt->kv_type));
+      rt->kv_delta_tensors.push_back(Ort::Value::CreateTensor(
+          rt->cpu_mem, rt->delta_v_bytes[l].data(),
+          rt->delta_v_bytes[l].size(), rt->kv_delta_shape.data(),
+          rt->kv_delta_shape.size(), rt->kv_type));
+    }
+    rt->decode_logits_tensor = Ort::Value::CreateTensor<float>(
+        rt->cpu_mem, rt->decode_logits.data(), rt->decode_logits.size(),
+        rt->decode_logits_shape.data(), rt->decode_logits_shape.size());
+    rt->decode_in_emb = Ort::Value::CreateTensor<float>(
+        rt->cpu_mem, rt->next_embed.data(), rt->next_embed.size(),
+        rt->decode_emb_shape.data(), rt->decode_emb_shape.size());
+    rt->decode_in_pos = Ort::Value::CreateTensor<int64_t>(
+        rt->cpu_mem, &rt->decode_cache_pos, 1, rt->decode_pos_shape.data(),
+        rt->decode_pos_shape.size());
+
+    rt->decode_llm_binding = std::make_unique<Ort::IoBinding>(*rt->llm_sess);
+    rt->decode_llm_binding->BindInput(rt->llm_in_ptrs[0], rt->decode_in_emb);
+    rt->decode_llm_binding->BindInput(rt->llm_in_ptrs[2], rt->decode_in_pos);
+    for (size_t i = 0; i < rt->kv_cache_tensors.size(); ++i) {
+      rt->decode_llm_binding->BindInput(rt->llm_in_ptrs[3 + i],
+                                        rt->kv_cache_tensors[i]);
+    }
+    rt->decode_llm_binding->BindOutput(rt->llm_out_ptrs[0],
+                                       rt->decode_logits_tensor);
+    for (size_t i = 0; i < rt->kv_delta_tensors.size(); ++i) {
+      rt->decode_llm_binding->BindOutput(rt->llm_out_ptrs[1 + i],
+                                         rt->kv_delta_tensors[i]);
+    }
+
+    rt->emb_out_type = rt->embedding_sess->GetOutputTypeInfo(0)
+                           .GetTensorTypeAndShapeInfo()
+                           .GetElementType();
+    rt->decode_id_tensor = Ort::Value::CreateTensor<int64_t>(
+        rt->cpu_mem, &rt->decode_token_id, 1, rt->decode_id_shape.data(),
+        rt->decode_id_shape.size());
+    if (rt->emb_out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        rt->emb_out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      if (rt->emb_out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        rt->decode_emb_f16.assign(static_cast<size_t>(rt->hidden_size), 0);
+        rt->decode_emb_out_tensor = Ort::Value::CreateTensor(
+            rt->cpu_mem, rt->decode_emb_f16.data(),
+            rt->decode_emb_f16.size() * sizeof(uint16_t),
+            rt->decode_emb_shape.data(), rt->decode_emb_shape.size(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+      } else {
+        rt->decode_emb_f32.assign(static_cast<size_t>(rt->hidden_size), 0.0f);
+        rt->decode_emb_out_tensor = Ort::Value::CreateTensor<float>(
+            rt->cpu_mem, rt->decode_emb_f32.data(), rt->decode_emb_f32.size(),
+            rt->decode_emb_shape.data(), rt->decode_emb_shape.size());
+      }
+      rt->decode_emb_binding =
+          std::make_unique<Ort::IoBinding>(*rt->embedding_sess);
+      rt->decode_emb_binding->BindInput(rt->emb_in_ptrs[0],
+                                        rt->decode_id_tensor);
+      rt->decode_emb_binding->BindOutput(rt->emb_out_ptrs[0],
+                                         rt->decode_emb_out_tensor);
+    }
 
     rt->tokenizer = std::make_unique<Qwen3Tokenizer>(tokenizer_dir);
+
+    // Self-verify whether embedding_sess is purely token-indexed (Gather) so
+    // prompt prefix/suffix embeddings and frequent decode tokens can be cached
+    // with proven bit-for-bit numerical equivalence.
+    {
+      Ort::RunOptions probe_opts{nullptr};
+      const size_t hidden_u = static_cast<size_t>(rt->hidden_size);
+      std::array<int64_t, 2> pair_ids{rt->tokenizer->pad_id(),
+                                      rt->tokenizer->eos_id()};
+      std::vector<float> pair_out(2 * hidden_u, 0.0f);
+      std::vector<float> single_out(hidden_u, 0.0f);
+      EmbedTokenSpan(rt.get(), pair_ids.data(), 2, probe_opts, pair_out.data());
+      EmbedTokenSpan(rt.get(), &pair_ids[1], 1, probe_opts, single_out.data());
+      if (std::memcmp(pair_out.data() + hidden_u, single_out.data(),
+                      hidden_u * sizeof(float)) == 0) {
+        rt->emb_is_token_independent = true;
+        rt->token_embed_cache.resize(512);
+      }
+    }
+
     return rt.release();
   } catch (const std::exception &e) {
     SaveError(error, error_capacity, e.what());
@@ -1552,13 +1793,10 @@ int MoMoTranscribeFunASRNanoCancellable(
           enc_in_shape.size());
     }
 
-    std::vector<Ort::Value> enc_outputs;
-    {
-      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-      enc_outputs = runtime->encoder_sess->Run(
-          run_opts.get(), runtime->enc_in_ptrs.data(), &enc_input, 1,
-          runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
-    }
+    momo_bridge::ScopedCancellableRunOptions shared_run_opts(cancel_token);
+    std::vector<Ort::Value> enc_outputs = runtime->encoder_sess->Run(
+        shared_run_opts.get(), runtime->enc_in_ptrs.data(), &enc_input, 1,
+        runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
     if (enc_outputs.empty() || !enc_outputs[0].IsTensor()) {
       throw std::runtime_error("Empty encoder_adaptor output");
     }
@@ -1579,25 +1817,46 @@ int MoMoTranscribeFunASRNanoCancellable(
     ol = 1 + (ol - 3 + 2) / 2;
     int32_t n_aud = std::clamp<int32_t>((ol - 1) / 2 + 1, 1, t_enc);
 
-    // 2. Build Qwen3 ChatML prompt + audio placeholder sequence.
+    // 2. Build Qwen3 ChatML prompt + audio placeholder sequence (cached per language/ITN).
     const std::string lang = language ? language : "";
-    std::string user_task =
-        lang.empty() ? "语音转写" : ("语音转写成" + lang);
-    if (use_itn == 0) {
-      user_task += "，不进行文本规整";
+    const std::string prompt_key = lang + "|" + (use_itn == 0 ? "0" : "1");
+    const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
+
+    if (runtime->cached_prompt.key != prompt_key) {
+      std::string user_task =
+          lang.empty() ? "语音转写" : ("语音转写成" + lang);
+      if (use_itn == 0) {
+        user_task += "，不进行文本规整";
+      }
+      user_task += "：";
+
+      const std::string prefix_text =
+          "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+          "<|im_start|>user\n" +
+          user_task;
+      const std::string suffix_text = "<|im_end|>\n<|im_start|>assistant\n";
+
+      MoMoFunASRNanoRuntime::CachedPrompt next_prompt;
+      next_prompt.key = prompt_key;
+      next_prompt.ids_before = runtime->tokenizer->Encode(prefix_text);
+      next_prompt.ids_after = runtime->tokenizer->Encode(suffix_text);
+      if (runtime->emb_is_token_independent) {
+        next_prompt.embeds_before.resize(next_prompt.ids_before.size() *
+                                         hidden_u);
+        next_prompt.embeds_after.resize(next_prompt.ids_after.size() *
+                                        hidden_u);
+        EmbedTokenSpan(runtime, next_prompt.ids_before.data(),
+                       next_prompt.ids_before.size(), shared_run_opts.get(),
+                       next_prompt.embeds_before.data());
+        EmbedTokenSpan(runtime, next_prompt.ids_after.data(),
+                       next_prompt.ids_after.size(), shared_run_opts.get(),
+                       next_prompt.embeds_after.data());
+      }
+      runtime->cached_prompt = std::move(next_prompt);
     }
-    user_task += "：";
 
-    const std::string prefix_text =
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n" +
-        user_task;
-    const std::string suffix_text = "<|im_end|>\n<|im_start|>assistant\n";
-
-    const std::vector<int64_t> ids_before =
-        runtime->tokenizer->Encode(prefix_text);
-    const std::vector<int64_t> ids_after =
-        runtime->tokenizer->Encode(suffix_text);
+    const auto &ids_before = runtime->cached_prompt.ids_before;
+    const auto &ids_after = runtime->cached_prompt.ids_after;
 
     const int32_t max_audio_slots =
         runtime->max_total_len - static_cast<int32_t>(ids_before.size()) -
@@ -1606,49 +1865,38 @@ int MoMoTranscribeFunASRNanoCancellable(
       throw std::runtime_error("Prompt exceeds LLM KV capacity");
     }
     const int32_t audio_len = std::min<int32_t>(n_aud, max_audio_slots);
-
-    std::vector<int64_t> source_ids;
-    source_ids.reserve(ids_before.size() + static_cast<size_t>(audio_len) +
-                       ids_after.size());
-    source_ids.insert(source_ids.end(), ids_before.begin(), ids_before.end());
-    source_ids.insert(source_ids.end(), static_cast<size_t>(audio_len),
-                      runtime->tokenizer->pad_id());
-    source_ids.insert(source_ids.end(), ids_after.begin(), ids_after.end());
-
-    const int32_t context_len = static_cast<int32_t>(source_ids.size());
     const int32_t fbank_beg = static_cast<int32_t>(ids_before.size());
-    const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
-
-    std::array<int64_t, 2> src_shape{1, static_cast<int64_t>(context_len)};
-    Ort::Value src_ids_tensor = Ort::Value::CreateTensor<int64_t>(
-        runtime->cpu_mem, source_ids.data(), source_ids.size(),
-        src_shape.data(), src_shape.size());
-    std::vector<Ort::Value> emb_outputs;
-    {
-      momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-      emb_outputs = runtime->embedding_sess->Run(
-          run_opts.get(), runtime->emb_in_ptrs.data(), &src_ids_tensor, 1,
-          runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
-    }
-    if (emb_outputs.empty() || !emb_outputs[0].IsTensor()) {
-      throw std::runtime_error("Empty embedding output");
-    }
+    const int32_t context_len =
+        fbank_beg + audio_len + static_cast<int32_t>(ids_after.size());
 
     std::vector<float> prefill_embeds(static_cast<size_t>(context_len) *
                                       hidden_u);
-    const auto emb_et =
-        emb_outputs[0].GetTensorTypeAndShapeInfo().GetElementType();
-    if (emb_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      const uint16_t *src = emb_outputs[0].GetTensorData<uint16_t>();
-      for (size_t i = 0; i < prefill_embeds.size(); ++i) {
-        float v = HalfBitsToFloat(src[i]);
-        prefill_embeds[i] = std::isfinite(v) ? v : 0.0f;
+    if (runtime->emb_is_token_independent &&
+        runtime->cached_prompt.embeds_before.size() ==
+            ids_before.size() * hidden_u &&
+        runtime->cached_prompt.embeds_after.size() ==
+            ids_after.size() * hidden_u) {
+      if (!runtime->cached_prompt.embeds_before.empty()) {
+        std::memcpy(
+            prefill_embeds.data(), runtime->cached_prompt.embeds_before.data(),
+            runtime->cached_prompt.embeds_before.size() * sizeof(float));
+      }
+      if (!runtime->cached_prompt.embeds_after.empty()) {
+        std::memcpy(
+            prefill_embeds.data() +
+                static_cast<size_t>(fbank_beg + audio_len) * hidden_u,
+            runtime->cached_prompt.embeds_after.data(),
+            runtime->cached_prompt.embeds_after.size() * sizeof(float));
       }
     } else {
-      const float *src = emb_outputs[0].GetTensorData<float>();
-      for (size_t i = 0; i < prefill_embeds.size(); ++i) {
-        prefill_embeds[i] = std::isfinite(src[i]) ? src[i] : 0.0f;
-      }
+      std::vector<int64_t> source_ids;
+      source_ids.reserve(static_cast<size_t>(context_len));
+      source_ids.insert(source_ids.end(), ids_before.begin(), ids_before.end());
+      source_ids.insert(source_ids.end(), static_cast<size_t>(audio_len),
+                        runtime->tokenizer->pad_id());
+      source_ids.insert(source_ids.end(), ids_after.begin(), ids_after.end());
+      EmbedTokenSpan(runtime, source_ids.data(), source_ids.size(),
+                     shared_run_opts.get(), prefill_embeds.data());
     }
 
     // Splice first audio_len (= n_aud) projected audio queries into prefill_embeds.
@@ -1676,20 +1924,10 @@ int MoMoTranscribeFunASRNanoCancellable(
       }
     }
 
-    // 3. Reset pre-allocated KV cache buffers and bind reusable Ort::Value views.
-    const std::array<int64_t, 4> kv_cache_shape{
-        1, static_cast<int64_t>(runtime->max_total_len), runtime->kv_heads,
-        runtime->head_dim};
-    const std::array<int64_t, 4> kv_delta_shape{1, 1, runtime->kv_heads,
-                                                runtime->head_dim};
+    // 3. Reset only previously dirtied KV cache positions.
     const size_t bytes_per_pos = static_cast<size_t>(runtime->kv_heads) *
                                  static_cast<size_t>(runtime->head_dim) *
                                  runtime->kv_elem_bytes;
-
-    std::vector<Ort::Value> kv_cache_tensors;
-    kv_cache_tensors.reserve(static_cast<size_t>(runtime->num_layers) * 2);
-    std::vector<Ort::Value> kv_delta_tensors;
-    kv_delta_tensors.reserve(static_cast<size_t>(runtime->num_layers) * 2);
 
     for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
       const size_t zero_bytes =
@@ -1699,31 +1937,8 @@ int MoMoTranscribeFunASRNanoCancellable(
         std::memset(runtime->cache_k_bytes[l].data(), 0, zero_bytes);
         std::memset(runtime->cache_v_bytes[l].data(), 0, zero_bytes);
       }
-      kv_cache_tensors.push_back(Ort::Value::CreateTensor(
-          runtime->cpu_mem, runtime->cache_k_bytes[l].data(),
-          runtime->cache_k_bytes[l].size(), kv_cache_shape.data(),
-          kv_cache_shape.size(), runtime->kv_type));
-      kv_cache_tensors.push_back(Ort::Value::CreateTensor(
-          runtime->cpu_mem, runtime->cache_v_bytes[l].data(),
-          runtime->cache_v_bytes[l].size(), kv_cache_shape.data(),
-          kv_cache_shape.size(), runtime->kv_type));
-      kv_delta_tensors.push_back(Ort::Value::CreateTensor(
-          runtime->cpu_mem, runtime->delta_k_bytes[l].data(),
-          runtime->delta_k_bytes[l].size(), kv_delta_shape.data(),
-          kv_delta_shape.size(), runtime->kv_type));
-      kv_delta_tensors.push_back(Ort::Value::CreateTensor(
-          runtime->cpu_mem, runtime->delta_v_bytes[l].data(),
-          runtime->delta_v_bytes[l].size(), kv_delta_shape.data(),
-          kv_delta_shape.size(), runtime->kv_type));
     }
-    runtime->dirty_kv_len = static_cast<size_t>(runtime->max_total_len);
-
-    std::array<int64_t, 3> decode_logits_shape{
-        1, 1, static_cast<int64_t>(runtime->vocab_size)};
-    Ort::Value decode_logits_tensor = Ort::Value::CreateTensor<float>(
-        runtime->cpu_mem, runtime->decode_logits.data(),
-        runtime->decode_logits.size(), decode_logits_shape.data(),
-        decode_logits_shape.size());
+    runtime->dirty_kv_len = 0;
 
     std::vector<int64_t> attention_mask(
         static_cast<size_t>(runtime->max_total_len), 0);
@@ -1747,8 +1962,12 @@ int MoMoTranscribeFunASRNanoCancellable(
 
     std::vector<int64_t> generated_ids;
     generated_ids.reserve(static_cast<size_t>(max_new_tokens));
-    std::vector<float> step_logits(static_cast<size_t>(runtime->vocab_size));
-    std::vector<float> next_embed(hidden_u);
+    std::vector<int64_t> recent;
+    recent.reserve(kPenaltyWindow);
+    std::vector<std::pair<size_t, float>> saved_logits;
+    saved_logits.reserve(kPenaltyWindow + 32);
+    float *logits_buf = runtime->decode_logits.data();
+    const size_t vocab_u = static_cast<size_t>(runtime->vocab_size);
     int32_t valid_len = context_len;
 
     for (int32_t step = 0; step < max_new_tokens; ++step) {
@@ -1776,16 +1995,14 @@ int MoMoTranscribeFunASRNanoCancellable(
         binding.BindInput(runtime->llm_in_ptrs[0], in_emb);
         binding.BindInput(runtime->llm_in_ptrs[1], in_mask);
         binding.BindInput(runtime->llm_in_ptrs[2], in_pos);
-        for (size_t i = 0; i < kv_cache_tensors.size(); ++i) {
-          binding.BindInput(runtime->llm_in_ptrs[3 + i], kv_cache_tensors[i]);
+        for (size_t i = 0; i < runtime->kv_cache_tensors.size(); ++i) {
+          binding.BindInput(runtime->llm_in_ptrs[3 + i],
+                            runtime->kv_cache_tensors[i]);
         }
         for (size_t i = 0; i < runtime->llm_out_ptrs.size(); ++i) {
           binding.BindOutput(runtime->llm_out_ptrs[i], runtime->cpu_mem);
         }
-        {
-          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-          runtime->llm_sess->Run(run_opts.get(), binding);
-        }
+        runtime->llm_sess->Run(shared_run_opts.get(), binding);
         auto outs = binding.GetOutputValues();
         if (outs.size() != runtime->llm_out_ptrs.size()) {
           throw std::runtime_error("Incomplete LLM prefill outputs");
@@ -1802,15 +2019,15 @@ int MoMoTranscribeFunASRNanoCancellable(
             static_cast<size_t>(seq_out - 1) * static_cast<size_t>(vocab_out);
         if (log_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
           const uint16_t *p = outs[0].GetTensorData<uint16_t>() + last_off;
-          ConvertHalfToFloatRaw(p, step_logits.data(), step_logits.size());
+          ConvertHalfToFloatRaw(p, logits_buf, vocab_u);
         } else {
           const float *p = outs[0].GetTensorData<float>() + last_off;
-          std::memcpy(step_logits.data(), p,
-                      step_logits.size() * sizeof(float));
+          std::memcpy(logits_buf, p, vocab_u * sizeof(float));
         }
 
         const size_t copy_bytes =
             static_cast<size_t>(context_len) * bytes_per_pos;
+        runtime->dirty_kv_len = static_cast<size_t>(context_len);
         for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
           std::memcpy(runtime->cache_k_bytes[l].data(),
                       outs[1 + 2 * l].GetTensorData<void>(), copy_bytes);
@@ -1818,74 +2035,29 @@ int MoMoTranscribeFunASRNanoCancellable(
                       outs[2 + 2 * l].GetTensorData<void>(), copy_bytes);
         }
       } else {
-        int64_t last_id = generated_ids.back();
-        std::array<int64_t, 2> one_shape{1, 1};
-        Ort::Value one_id = Ort::Value::CreateTensor<int64_t>(
-            runtime->cpu_mem, &last_id, 1, one_shape.data(), one_shape.size());
-        std::vector<Ort::Value> next_emb_out;
-        {
-          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-          next_emb_out = runtime->embedding_sess->Run(
-              run_opts.get(), runtime->emb_in_ptrs.data(), &one_id, 1,
-              runtime->emb_out_ptrs.data(), runtime->emb_out_ptrs.size());
-        }
-        if (next_emb_out.empty() || !next_emb_out[0].IsTensor()) {
-          throw std::runtime_error("Empty decode embedding output");
-        }
-        if (next_emb_out[0].GetTensorTypeAndShapeInfo().GetElementType() ==
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-          const uint16_t *src = next_emb_out[0].GetTensorData<uint16_t>();
-          for (size_t d = 0; d < hidden_u; ++d) {
-            float v = HalfBitsToFloat(src[d]);
-            next_embed[d] = std::isfinite(v) ? v : 0.0f;
-          }
-        } else {
-          const float *src = next_emb_out[0].GetTensorData<float>();
-          for (size_t d = 0; d < hidden_u; ++d) {
-            next_embed[d] = std::isfinite(src[d]) ? src[d] : 0.0f;
-          }
-        }
+        LookupSingleTokenEmbed(runtime, generated_ids.back(),
+                               shared_run_opts.get(),
+                               runtime->next_embed.data());
 
         const int32_t mask_len = valid_len + 1;
         attention_mask[static_cast<size_t>(valid_len)] = 1;
-        int64_t cache_pos_val = valid_len;
+        runtime->decode_cache_pos = valid_len;
 
-        std::array<int64_t, 3> emb_shape{
-            1, 1, static_cast<int64_t>(runtime->hidden_size)};
         std::array<int64_t, 2> mask_shape{1, static_cast<int64_t>(mask_len)};
-        std::array<int64_t, 1> pos_shape{1};
-
-        Ort::Value in_emb = Ort::Value::CreateTensor<float>(
-            runtime->cpu_mem, next_embed.data(), next_embed.size(),
-            emb_shape.data(), emb_shape.size());
         Ort::Value in_mask = Ort::Value::CreateTensor<int64_t>(
             runtime->cpu_mem, attention_mask.data(),
             static_cast<size_t>(mask_len), mask_shape.data(),
             mask_shape.size());
-        Ort::Value in_pos = Ort::Value::CreateTensor<int64_t>(
-            runtime->cpu_mem, &cache_pos_val, 1, pos_shape.data(),
-            pos_shape.size());
 
-        Ort::IoBinding binding(*runtime->llm_sess);
-        binding.BindInput(runtime->llm_in_ptrs[0], in_emb);
-        binding.BindInput(runtime->llm_in_ptrs[1], in_mask);
-        binding.BindInput(runtime->llm_in_ptrs[2], in_pos);
-        for (size_t i = 0; i < kv_cache_tensors.size(); ++i) {
-          binding.BindInput(runtime->llm_in_ptrs[3 + i], kv_cache_tensors[i]);
-        }
-        binding.BindOutput(runtime->llm_out_ptrs[0], decode_logits_tensor);
-        for (size_t i = 0; i < kv_delta_tensors.size(); ++i) {
-          binding.BindOutput(runtime->llm_out_ptrs[1 + i], kv_delta_tensors[i]);
-        }
-        {
-          momo_bridge::ScopedCancellableRunOptions run_opts(cancel_token);
-          runtime->llm_sess->Run(run_opts.get(), binding);
-        }
-
-        std::memcpy(step_logits.data(), runtime->decode_logits.data(),
-                    step_logits.size() * sizeof(float));
+        // Only in_mask changes shape across decode steps; the remaining 58 inputs
+        // and 57 outputs remain bound on runtime->decode_llm_binding.
+        runtime->decode_llm_binding->BindInput(runtime->llm_in_ptrs[1],
+                                               in_mask);
+        runtime->llm_sess->Run(shared_run_opts.get(),
+                               *runtime->decode_llm_binding);
 
         const size_t dst_off = static_cast<size_t>(valid_len) * bytes_per_pos;
+        runtime->dirty_kv_len = static_cast<size_t>(valid_len + 1);
         for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
           std::memcpy(runtime->cache_k_bytes[l].data() + dst_off,
                       runtime->delta_k_bytes[l].data(), bytes_per_pos);
@@ -1895,20 +2067,23 @@ int MoMoTranscribeFunASRNanoCancellable(
         valid_len += 1;
       }
 
-      // Apply llama.cpp-style windowed repetition penalty on non-exempt tokens.
+      saved_logits.clear();
+
+      // Apply llama.cpp-style windowed repetition penalty in-place (zero 607 KB memcpy).
       if (!generated_ids.empty()) {
         const size_t win_start = generated_ids.size() > kPenaltyWindow
                                      ? (generated_ids.size() - kPenaltyWindow)
                                      : 0;
-        std::vector<int64_t> recent(generated_ids.begin() + win_start,
-                                    generated_ids.end());
+        recent.assign(generated_ids.begin() + win_start, generated_ids.end());
         std::sort(recent.begin(), recent.end());
         recent.erase(std::unique(recent.begin(), recent.end()), recent.end());
         for (int64_t tid : recent) {
           if (tid < 0 || tid >= runtime->vocab_size) continue;
           if (runtime->tokenizer->IsPenaltyExempt(tid)) continue;
-          float &lv = step_logits[static_cast<size_t>(tid)];
+          const size_t idx = static_cast<size_t>(tid);
+          float &lv = logits_buf[idx];
           if (!std::isfinite(lv)) continue;
+          saved_logits.emplace_back(idx, lv);
           lv = (lv > 0.0f) ? (lv / kRepeatPenalty) : (lv * kRepeatPenalty);
         }
       }
@@ -1932,7 +2107,9 @@ int MoMoTranscribeFunASRNanoCancellable(
               const int64_t banned = generated_ids[idx + prefix_len];
               if (banned >= 0 && banned < runtime->vocab_size &&
                   banned != eos_id && banned != im_end_id) {
-                step_logits[static_cast<size_t>(banned)] = -1e30f;
+                const size_t b_idx = static_cast<size_t>(banned);
+                saved_logits.emplace_back(b_idx, logits_buf[b_idx]);
+                logits_buf[b_idx] = -1e30f;
               }
             }
           }
@@ -1943,19 +2120,22 @@ int MoMoTranscribeFunASRNanoCancellable(
       float best_val = -1e30f;
       bool found = false;
       for (int32_t v = 0; v < runtime->vocab_size; ++v) {
-        const float lv = step_logits[static_cast<size_t>(v)];
+        const float lv = logits_buf[static_cast<size_t>(v)];
         if (std::isfinite(lv) && (!found || lv > best_val)) {
           best_val = lv;
           best_id = v;
           found = true;
         }
       }
+      for (auto it = saved_logits.rbegin(); it != saved_logits.rend(); ++it) {
+        logits_buf[it->first] = it->second;
+      }
       if (!found || best_id == eos_id || best_id == im_end_id) break;
       generated_ids.push_back(best_id);
     }
     runtime->dirty_kv_len =
         std::min<size_t>(static_cast<size_t>(runtime->max_total_len),
-                         static_cast<size_t>(valid_len) + 1);
+                         static_cast<size_t>(valid_len));
 
     CheckCancel(is_cancelled, cancel_context, cancel_token);
 

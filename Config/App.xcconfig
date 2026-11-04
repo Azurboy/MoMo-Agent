@@ -2,8 +2,8 @@
 // Gmail clients are supplied by the user in Settings; no shared OAuth credentials ship in the app.
 
 // Shared by iPhone and Watch. Update both values before delivering a new app.
-MARKETING_VERSION = 0.3.4
-CURRENT_PROJECT_VERSION = 47
+MARKETING_VERSION = 0.3.5
+CURRENT_PROJECT_VERSION = 49
 
 MOMO_PHONE_BUNDLE_ID = com.momoagent.ios
 MOMO_MAC_BUNDLE_ID = com.momoagent.mac.dev

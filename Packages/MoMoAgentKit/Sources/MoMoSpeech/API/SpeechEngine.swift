@@ -653,7 +653,7 @@ public final class SpeechEngine: @unchecked Sendable {
                             totalRecognizedFrames += clips.reduce(0) { $0 + Int64($1.samples.count) }
                         }
                         let severeCleanTurnDrop = decodedPieces.contains {
-                            !$0.hasWords && $0.turn.evidence.cleanSeconds >= 2.2 && $0.turn.frames.count >= 35_200
+                            !$0.hasWords && $0.turn.evidence.cleanSeconds >= 3.0 && $0.turn.frames.count >= 48_000
                         }
                         if let firstNonEmpty = decodedPieces.firstIndex(where: \.hasWords) {
                             var merged: [SpeakerTurnTranscript] = []
@@ -695,7 +695,7 @@ public final class SpeechEngine: @unchecked Sendable {
                                 let mergedWordCount = mergedText.filter { $0.isLetter || $0.isNumber }.count
                                 let totalTurnSeconds = Double(turns.reduce(0) { $0 + $1.frames.count }) / 16_000
                                 let droppedCleanTurn = severeCleanTurnDrop
-                                    && mergedWordCount < max(4, Int(totalTurnSeconds * 1.2))
+                                    && mergedWordCount < max(3, Int(totalTurnSeconds * 0.75))
                                 if !droppedCleanTurn || !backgroundCPUPacer.sceneForeground {
                                     return split
                                 }

@@ -87,13 +87,15 @@ struct LibraryView: View {
                     if let discussSources { discussSources(sources) }
                     else if let first = sources.first { discuss(first) }
                 }, initialMarkID: destination.markID, onSpeakersChanged: onSpeakersChanged,
-                resolveFiles: resolveFiles, openRecording: { openRecording($0) })
+                resolveFiles: resolveFiles, openRecording: { openRecording($0) },
+                requestWatchStatus: requestWatchStatus)
         }
         .navigationDestination(item: $recordingID) { id in
             RecordingDetailView(sessionID: id, library: model, playback: playback,
                 transcription: transcription, retryTranscription: retryTranscription,
                 delete: delete, canDiscuss: canDiscuss, discuss: discuss,
-                onSpeakersChanged: onSpeakersChanged, resolveFiles: resolveFiles)
+                onSpeakersChanged: onSpeakersChanged, resolveFiles: resolveFiles,
+                requestWatchStatus: requestWatchStatus)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

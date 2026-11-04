@@ -66,7 +66,7 @@ struct TranscriptionRefreshGate {
         }
         wasSettled = false
         guard completedNewWindow else { return false }
-        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(2) { return false }
+        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(1) { return false }
         lastRefresh = now
         return true
     }
@@ -1028,7 +1028,7 @@ public actor TranscriptionCoordinator {
                             continue
                         }
                     }
-                    let stepSeconds: Double = 90
+                    let stepSeconds: Double = 240
                     let epochClaim = Task { [archive, fingerprint = speech.configurationFingerprint] in
                         try await archive.claimTranscriptionBatchAnalysis(
                             execution: batch,
@@ -1721,7 +1721,7 @@ private final class BatchAnalysisPrefetch: Sendable {
             guard let ticket = try await archive.claimTranscriptionBatchAnalysis(
                 execution: execution,
                 configurationFingerprint: speech.configurationFingerprint,
-                maxStepSeconds: 90,
+                maxStepSeconds: 240,
                 focusedDay: focusedDay
             ) else { return nil as EpochAnalysisTicket? }
             return try await analysisTicketWithContext(ticket, archive: archive, speech: speech)

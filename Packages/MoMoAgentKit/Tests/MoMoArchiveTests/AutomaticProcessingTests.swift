@@ -423,6 +423,26 @@ struct AutomaticProcessingTests {
         #expect(claimedOrder == [live.sessionID, yesterday.sessionID, morning.sessionID, twoDaysAgo.sessionID])
     }
 
+    @Test func thirtyMinuteHotWindowAndNewestFirstWithinBacklogTier() async throws {
+        let earlyMorning = try Fixture(), lateMorning = try Fixture(), twelveMinWatchBatch = try Fixture()
+        defer { earlyMorning.remove(); lateMorning.remove(); twelveMinWatchBatch.remove() }
+        let store = try earlyMorning.store()
+        _ = try await ingest(earlyMorning, into: store, anchor: now.addingTimeInterval(-14_400))
+        _ = try await ingest(lateMorning, into: store, anchor: now.addingTimeInterval(-7_200))
+        _ = try await ingest(twelveMinWatchBatch, into: store, anchor: now.addingTimeInterval(-720))
+
+        let summary = try await store.livePriorityWorkSummary(configurationFingerprint: fingerprint, now: now, calendar: calendar)
+        #expect(summary.hasHotLiveWork)
+
+        var claimedOrder: [UUID] = []
+        while let work = try await store.claimAutomaticWork(configurationFingerprint: fingerprint, now: now, calendar: calendar) {
+            guard case .analysis(let ticket) = work else { Issue.record("Expected analysis ticket"); break }
+            claimedOrder.append(ticket.sessionID)
+            try await completeSilence(ticket, store: store)
+        }
+        #expect(claimedOrder == [twelveMinWatchBatch.sessionID, lateMorning.sessionID, earlyMorning.sessionID])
+    }
+
     private func nextAnalysis(_ store: ArchiveStore, at time: Date? = nil) async throws -> EpochAnalysisTicket {
         let work = try #require(await store.claimAutomaticWork(configurationFingerprint: fingerprint, now: time ?? now, calendar: calendar))
         guard case .analysis(let ticket) = work else { throw ArchiveError.invalidTranscript }

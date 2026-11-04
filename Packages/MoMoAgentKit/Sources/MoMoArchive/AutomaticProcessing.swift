@@ -244,7 +244,7 @@ extension ArchiveStore {
             if $0.tier != $1.tier { return $0.tier < $1.tier }
             if $0.priority != $1.priority { return $0.priority < $1.priority }
             if $0.turn != $1.turn { return $0.turn < $1.turn }
-            if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
+            if $0.recordedAt != $1.recordedAt { return $0.recordedAt > $1.recordedAt }
             if $0.epochRowID != $1.epochRowID { return $0.epochRowID < $1.epochRowID }
             if $0.epochID != $1.epochID { return $0.epochID.uuidString < $1.epochID.uuidString }
             if ($0.windowID != nil) != ($1.windowID != nil) { return $0.windowID != nil }
@@ -267,10 +267,12 @@ extension ArchiveStore {
                     inputLease: inputLease, isolateLocalFailures: true, selectedWindowID: windowID, now: now) else { continue }
                 work = .transcription(ticket)
             } else {
+                let analysisStepSeconds: Double = candidate.tier == 0 ? 120 : 300
                 guard let ticket = try claimEpochAnalysis(configurationFingerprint: configurationFingerprint,
                     sessionID: candidate.sessionID, expectedGeneration: candidate.generation,
                     finalizeAvailablePrefixBefore: now.addingTimeInterval(-1_800), isolateLocalFailures: true,
-                    selectedEpochID: candidate.epochID, processingRange: candidate.frames, now: now) else { continue }
+                    selectedEpochID: candidate.epochID, processingRange: candidate.frames,
+                    maxStepSeconds: analysisStepSeconds, now: now) else { continue }
                 work = .analysis(ticket)
             }
             do {
@@ -327,7 +329,7 @@ private struct AutomaticCandidate {
 
 /// Classification follows the recorded local day; recent UTC time protects the midnight handoff.
 struct ProcessingDatePolicy {
-    static let hotWindowSeconds: TimeInterval = 300
+    static let hotWindowSeconds: TimeInterval = 1_800
     static let hotCutQuantumSeconds: TimeInterval = 120
     static let ultraHotWindowSeconds: TimeInterval = 180
 

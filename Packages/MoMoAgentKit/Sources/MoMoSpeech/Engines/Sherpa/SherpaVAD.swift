@@ -29,11 +29,16 @@ final class SherpaVAD: @unchecked Sendable {
         acceptedFrames = 0; flushedThrough = nil
     }
     var speechDetected: Bool { SherpaOnnxVoiceActivityDetectorDetected(pointer) != 0 }
-    func accept(_ samples: [Float]) throws {
+    func accept(_ samples: UnsafeBufferPointer<Float>, alreadyVerifiedFinite: Bool = false) throws {
         precondition(samples.count == 512)
-        guard samples.allSatisfy(\.isFinite) else { throw SpeechError.invalidAudio("non_finite_sample") }
-        samples.withUnsafeBufferPointer { SherpaOnnxVoiceActivityDetectorAcceptWaveform(pointer, $0.baseAddress, 512) }
+        if !alreadyVerifiedFinite {
+            guard samples.allSatisfy(\.isFinite) else { throw SpeechError.invalidAudio("non_finite_sample") }
+        }
+        SherpaOnnxVoiceActivityDetectorAcceptWaveform(pointer, samples.baseAddress, 512)
         acceptedFrames += 512
+    }
+    func accept(_ samples: [Float]) throws {
+        try samples.withUnsafeBufferPointer { try accept($0) }
     }
     func flush() {
         if speechDetected { flushedThrough = acceptedFrames }

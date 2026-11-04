@@ -55,7 +55,10 @@ struct SpeakerTurn: Sendable {
         }.sorted { $0.start < $1.start }
         var groups: [(first: SpeakerEvidence, last: SpeakerEvidence, members: [SpeakerEvidence])] = []
         for value in audible {
-            if let last = groups.last, sameVoice(last.last, value), value.start - last.last.end <= 6.0 {
+            if let last = groups.last,
+               value.start - last.last.end <= 6.0,
+               sameVoice(last.last, value)
+                   || (last.members.last(where: \.hasVoiceprint).map { sameVoice($0, value) } ?? false) {
                 groups[groups.count - 1].last = value
                 groups[groups.count - 1].members.append(value)
             } else { groups.append((value, value, [value])) }

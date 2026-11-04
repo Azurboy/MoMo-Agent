@@ -53,7 +53,7 @@ public enum SpeechBackgroundBudget: String, Sendable, Equatable {
 
     var parameters: (maxCapacity: Double, initialBurst: Double, refillRate: Double) {
         switch self {
-        case .standard: return (6.0, 6.0, 0.65)
+        case .standard: return (9.5, 9.5, 0.65)
         case .elevatedSystemTask: return (10.0, 8.0, 1.35)
         case .externalPowerSystemTask: return (14.0, 12.0, 2.20)
         }

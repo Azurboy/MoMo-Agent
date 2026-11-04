@@ -155,10 +155,18 @@ final class VADContinuation {
         if recentPCM == nil, processed - nativeOrigin >= nativeFrameLimit - warmupFrames {
             recentPCM = AnalysisAudioBuffer(capacity: Int(warmupFrames), start: processed)
         }
-        let samples = Array(pendingStorage[pendingHead..<(pendingHead + 512)])
-        let normalized = normalizeForVAD(samples, at: origin + processed)
-        try detector.accept(normalized)
-        recentPCM?.append(normalized)
+        if let normalized = try normalizeForVADSlice(at: origin + processed) {
+            try detector.accept(normalized)
+            recentPCM?.append(normalized)
+        } else {
+            try pendingStorage.withUnsafeBufferPointer { fullBuffer in
+                let slice = UnsafeBufferPointer(rebasing: fullBuffer[pendingHead..<(pendingHead + 512)])
+                try detector.accept(slice, alreadyVerifiedFinite: true)
+            }
+            if recentPCM != nil {
+                recentPCM?.append(Array(pendingStorage[pendingHead..<(pendingHead + 512)]))
+            }
+        }
         pendingHead += 512
         if pendingHead == pendingStorage.count {
             pendingStorage.removeAll(keepingCapacity: true)
@@ -188,6 +196,9 @@ final class VADContinuation {
             if quietFrames >= 32_000 {
                 lastFlushWasForced = false
                 undrainedSpeechFloor = nil
+                if ranges.isEmpty && quietFrames >= 64_000 && energy.count >= 512 {
+                    energy.removeFirst(energy.count - 128)
+                }
             }
         }
         return true
@@ -262,11 +273,16 @@ final class VADContinuation {
     }
 
     /// Causal 1.024s P98 envelope normalizer for sleeve-attenuated Watch speech.
-    /// Normal-volume speech (maxAbs >= 0.25) and low-crest stationary noise stay at gain 1.0.
-    private func normalizeForVAD(_ samples: [Float], at globalFrame: Int64) -> [Float] {
+    /// Normal-volume speech (maxAbs >= 0.25) and low-crest stationary noise stay at gain 1.0
+    /// and return `nil` so callers pass the slice zero-copy into Silero VAD without allocating.
+    private func normalizeForVADSlice(at globalFrame: Int64) throws -> [Float]? {
+        let startIdx = pendingHead
+        let endIdx = pendingHead + 512
         var maxAbs: Float = 0
         var sumSq: Double = 0
-        for sample in samples {
+        for idx in startIdx..<endIdx {
+            let sample = pendingStorage[idx]
+            guard sample.isFinite else { throw SpeechError.invalidAudio("non_finite_sample") }
             let mag = abs(sample)
             if mag > maxAbs { maxAbs = mag }
             sumSq += Double(sample) * Double(sample)
@@ -275,7 +291,8 @@ final class VADContinuation {
         if maxAbs < 0.002 || maxAbs >= 0.25 {
             stat = VADFrameStat(maxAbs: maxAbs, sumSq: sumSq, cachedP90: maxAbs, samples: nil)
         } else {
-            stat = VADFrameStat(maxAbs: maxAbs, sumSq: sumSq, cachedP90: nil, samples: samples)
+            stat = VADFrameStat(maxAbs: maxAbs, sumSq: sumSq, cachedP90: nil,
+                samples: Array(pendingStorage[startIdx..<endIdx]))
         }
         energy.append(SpeechEnergyFrame(start: processed, rms: Float((sumSq / 512).squareRoot())))
         if vadGainRing.count < 32 {
@@ -311,14 +328,14 @@ final class VADContinuation {
         }
         let targetGain = heldVADGain
         if targetGain == 1.0 && previousVADGain == 1.0 {
-            return samples
+            return nil
         }
         var output = [Float]()
         output.reserveCapacity(512)
         for index in 0..<512 {
             let alpha = Float(index) / 512.0
             let gain = previousVADGain + (targetGain - previousVADGain) * alpha
-            output.append(tanh(samples[index] * gain))
+            output.append(tanh(pendingStorage[startIdx + index] * gain))
         }
         previousVADGain = targetGain
         return output

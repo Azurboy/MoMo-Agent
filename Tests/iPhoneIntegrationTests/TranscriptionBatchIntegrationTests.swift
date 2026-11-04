@@ -816,8 +816,8 @@ final class TranscriptionBatchIntegrationTests: XCTestCase {
         XCTAssertFalse(outcomes.withLock { $0.contains(.cancelled) },
                        "Continued processing live interleaving and batch VAD prefetch must never cancel native operations.")
         let order = transcribedSessions.withLock { $0 }
-        XCTAssertEqual(order, [first.sessionID, liveSessionID, second.sessionID],
-                       "Continued processing must interleave Tier-0 live Watch audio while ignoring older unreserved morning backlog.")
+        XCTAssertEqual(order, [second.sessionID, liveSessionID, first.sessionID],
+                       "Continued processing must schedule newer batch sessions first and interleave Tier-0 live Watch audio while ignoring older unreserved morning backlog.")
         XCTAssertEqual(completions.withLock { $0.map(\.reason) }, [.completed])
         try await assertOfficialTranscript(first.sessionID, archive: archive)
         try await assertOfficialTranscript(liveSessionID, archive: archive)
