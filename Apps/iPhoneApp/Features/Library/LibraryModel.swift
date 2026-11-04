@@ -31,6 +31,7 @@ final class LibraryModel {
     var failure: String?
     @ObservationIgnored let archive: ArchiveStore
     @ObservationIgnored private var refreshRequested = false
+    @ObservationIgnored private var pendingFileInspection = false
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private var speakerFeedbackChain: Task<Void, Never>?
     @ObservationIgnored private var inFlightSpeakerFeedbackCount = 0
@@ -102,7 +103,7 @@ final class LibraryModel {
         return value
     }
 
-    private func updateTranscriptCache() {
+    private func updateTranscriptCache(allowBackgroundPrefetch: Bool = true) {
         let valid = Set((recordings + Array(searchedRecordings.values)).filter { fileIssues[$0.id] == nil }.map(RecordingReadIdentity.init))
         transcriptCache = transcriptCache.filter { valid.contains($0.key) }
         transcriptRecency.removeAll { !valid.contains($0) }
@@ -110,8 +111,18 @@ final class LibraryModel {
             request.1.cancel(); transcriptLoads.removeValue(forKey: key)
         }
         prefetchTask?.cancel()
-        // Only the first two visible recordings; never predecode raw audio speculatively.
-        let candidates = recordings.filter { $0.transcriptVersion > 0 && fileIssues[$0.id] == nil }.prefix(2).map(\.id)
+        // Only the first two visible recordings when settled; during streaming progress ticks,
+        // only prefetch a recording actively open in detail view so background ASR isn't starved.
+        let candidates: [UUID]
+        if allowBackgroundPrefetch {
+            candidates = recordings.filter { $0.transcriptVersion > 0 && fileIssues[$0.id] == nil }.prefix(2).map(\.id)
+        } else if let focused = focusedSessionID,
+                  recordings.contains(where: { $0.id == focused && $0.transcriptVersion > 0 && fileIssues[$0.id] == nil }) {
+            candidates = [focused]
+        } else {
+            candidates = []
+        }
+        guard !candidates.isEmpty else { return }
         prefetchTask = Task(priority: .utility) { [weak self] in
             for id in candidates {
                 guard !Task.isCancelled, let self else { return }
@@ -207,15 +218,25 @@ final class LibraryModel {
 
     private func transcriptPreviews(for recordings: [RecordingSummary], issues: Set<UUID>) async -> [UUID: String] {
         var result: [UUID: String] = [:]
+        var missingRequests: [(sessionID: UUID, expectedVersion: Int64, expectedGeneration: Int64)] = []
+        let previousByID = Dictionary(uniqueKeysWithValues: self.recordings.map { ($0.id, $0) })
         for recording in recordings where recording.transcriptVersion > 0 && !issues.contains(recording.id) {
-            if let previous = self.recordings.first(where: { $0.id == recording.id }),
-               previous.transcriptVersion == recording.transcriptVersion, previous.generation == recording.generation,
+            if let previous = previousByID[recording.id],
+               previous.transcriptVersion == recording.transcriptVersion,
+               previous.generation == recording.generation,
                let preview = previews[recording.id] {
                 result[recording.id] = preview
                 continue
             }
-            result[recording.id] = try? await archive.transcriptPreview(sessionID: recording.id,
-                expectedVersion: recording.transcriptVersion, expectedGeneration: recording.generation)
+            missingRequests.append((
+                sessionID: recording.id,
+                expectedVersion: recording.transcriptVersion,
+                expectedGeneration: recording.generation
+            ))
+        }
+        if !missingRequests.isEmpty,
+           let fetched = try? await archive.transcriptPreviews(requests: missingRequests) {
+            result.merge(fetched) { _, latest in latest }
         }
         return result
     }
@@ -455,13 +476,16 @@ final class LibraryModel {
         if isLoading || isLoadingMore { refreshRequested = true }
     }
 
-    func refresh() async {
+    func refresh(inspectFiles: Bool = true) async {
         refreshRequested = true
+        if inspectFiles { pendingFileInspection = true }
         guard !isLoading, !isLoadingMore else { return }
         isLoading = true
         defer { isLoading = false }
         while refreshRequested {
             refreshRequested = false
+            let runFileInspection = pendingFileInspection
+            pendingFileInspection = false
             let selection = generation
             do {
                 let visibleCount = max(50, self.recordings.count)
@@ -472,7 +496,7 @@ final class LibraryModel {
                     recordings.append(contentsOf: page.items)
                     cursor = page.nextCursor
                 } while cursor != nil && recordings.count < visibleCount && generation == selection
-                let issues = try await archive.recordingFileIssues()
+                let issues = runFileInspection ? try await archive.recordingFileIssues() : Array(self.fileIssues.values)
                 let loadedProfiles = (try? await archive.speakerProfiles()) ?? self.speakerProfiles
                 let previews = await transcriptPreviews(for: recordings, issues: Set(issues.map(\.sessionID)))
                 var searched: [UUID: RecordingSummary] = [:]
@@ -524,13 +548,15 @@ final class LibraryModel {
                 nextRecordingsCursor = cursor
                 fileIssues = issuesByID
                 snapshotRevision &+= 1
-                updateTranscriptCache()
                 failure = nil
+                // Render the selected timeline day before background detail prefetch touches ArchiveStore.
+                await timeline.refresh()
+                updateTranscriptCache(allowBackgroundPrefetch: runFileInspection)
             } catch {
                 if generation == selection { failure = String(localized: "读取本机资料失败：\(error.localizedDescription)") }
+                await timeline.refresh()
             }
         }
-        await timeline.refresh()
     }
 
     func loadMoreRecordings() async {

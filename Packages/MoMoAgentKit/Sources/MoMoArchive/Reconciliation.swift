@@ -14,7 +14,9 @@ public enum ReconcileResponseRequeueResult: Sendable, Equatable {
 extension ArchiveStore {
     /// Each request and its replayable response survive transport submission and process restart.
     public func receiveReconcileRequest(_ request: ReconcileRequest) throws -> ReconcileResponse {
-        try refreshReconcileResponse(request)
+        try performanceMonitor.measure(.receiveReconcileRequest, itemCount: request.items.count) {
+            try refreshReconcileResponse(request)
+        }
     }
 
     public func pendingReconcileResponses(limit: Int = 32) throws -> [ReconcileResponse] {

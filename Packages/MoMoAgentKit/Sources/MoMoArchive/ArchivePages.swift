@@ -33,6 +33,19 @@ extension ArchiveStore {
 
     public func recordingsPage(limit: Int = 50, cursor: String? = nil,
                                from: Date? = nil, before: Date? = nil) throws -> RecordingPage {
+        let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
+        do {
+            let page = try recordingsPageImpl(limit: limit, cursor: cursor, from: from, before: before)
+            performanceMonitor.record(.recordingsPage, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: page.items.count)
+            return page
+        } catch {
+            performanceMonitor.record(.recordingsPage, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: 0, failed: true)
+            throw error
+        }
+    }
+
+    private func recordingsPageImpl(limit: Int = 50, cursor: String? = nil,
+                                    from: Date? = nil, before: Date? = nil) throws -> RecordingPage {
         guard (1...200).contains(limit) else { throw ArchiveError.invalidQuery }
         let scope = try pageScope(kind: "recordings", query: nil, from: from, before: before)
         let position = try pagePosition(cursor, scope: scope, search: false)

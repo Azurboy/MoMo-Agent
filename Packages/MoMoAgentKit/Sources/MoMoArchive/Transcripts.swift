@@ -32,8 +32,16 @@ extension ArchiveStore {
         }
     }
 
+    private static let discardedPunctuationMigrationKey = "discarded_punctuation_only_transcripts_v1"
+
     /// Remove old recognition noise through the normal revision/source-invalidation path.
     public func discardPunctuationOnlyTranscripts() throws {
+        if try !database.rows(
+            "SELECT 1 FROM metadata WHERE key=? LIMIT 1",
+            [.text(Self.discardedPunctuationMigrationKey)]
+        ).isEmpty {
+            return
+        }
         for row in try database.rows("SELECT id FROM sessions WHERE deleted=0 AND projection_blocked=0 AND transcript_version>0") {
             let sessionID = try row.requireUUID(0)
             guard let document = try currentTranscriptOrNil(sessionID: sessionID) else { continue }
@@ -42,6 +50,10 @@ extension ArchiveStore {
                 _ = try reviseTranscript(sessionID: sessionID, expectedVersion: document.version, spans: kept)
             }
         }
+        try database.execute(
+            "INSERT INTO metadata(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value='1'",
+            [.text(Self.discardedPunctuationMigrationKey)]
+        )
     }
 
     public func readTranscript(sessionID: UUID) throws -> TranscriptDocument {
@@ -90,9 +102,17 @@ extension ArchiveStore {
 
     /// Read text and its clock mapping in one actor turn, before ASR can append another version.
     public func transcriptSnapshot(sessionID: UUID, version: Int64? = nil) throws -> (document: TranscriptDocument, locations: [UUID: TranscriptSpanLocation]) {
-        let current = try readTranscript(sessionID: sessionID)
-        let document = try snapshotDocument(current: current, version: version)
-        return (document, try locationsForValidatedTranscript(document))
+        let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
+        do {
+            let current = try readTranscript(sessionID: sessionID)
+            let document = try snapshotDocument(current: current, version: version)
+            let locations = try locationsForValidatedTranscript(document)
+            performanceMonitor.record(.transcriptSnapshot, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: document.spans.count)
+            return (document, locations)
+        } catch {
+            performanceMonitor.record(.transcriptSnapshot, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: 0, failed: true)
+            throw error
+        }
     }
 
     private func snapshotDocument(current: TranscriptDocument, version: Int64?) throws -> TranscriptDocument {
@@ -315,6 +335,7 @@ extension ArchiveStore {
         if externalVersion != transcriptReadDataVersion {
             transcriptReadCache.removeAll(); transcriptReadRecency.removeAll(); transcriptReadCacheCost = 0
             transcriptBlockPrefixCache.removeAll()
+            chunkOrderCache.removeAll(); chunkOrderRecency.removeAll()
             transcriptReadDataVersion = externalVersion
         }
         let version = try state.requireInt(1), generation = try state.requireInt(2)
@@ -357,6 +378,7 @@ extension ArchiveStore {
            externalVersion != transcriptReadDataVersion {
             transcriptReadCache.removeAll(); transcriptReadRecency.removeAll(); transcriptReadCacheCost = 0
             transcriptBlockPrefixCache.removeAll()
+            chunkOrderCache.removeAll(); chunkOrderRecency.removeAll()
             transcriptReadDataVersion = externalVersion
         }
         removeTranscriptReadCache(document.sessionID)
@@ -394,18 +416,54 @@ extension ArchiveStore {
         return row?.string(0)
     }
 
+    /// Batched preview lookup for an entire library page in one actor turn and one SQL query.
+    public func transcriptPreviews(
+        requests: [(sessionID: UUID, expectedVersion: Int64, expectedGeneration: Int64)]
+    ) throws -> [UUID: String] {
+        guard !requests.isEmpty else { return [:] }
+        return try performanceMonitor.measure(.transcriptPreviewsBatch, itemCount: requests.count) {
+            let expectedByID = Dictionary(
+                requests.map { ($0.sessionID, (version: $0.expectedVersion, generation: $0.expectedGeneration)) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            let placeholders = Array(repeating: "?", count: expectedByID.count).joined(separator: ",")
+            let parameters = expectedByID.keys.map { SQLValue.text($0.uuidString) }
+            let rows = try database.rows("""
+                SELECT id, transcript_version, generation, transcript_preview
+                FROM sessions
+                WHERE id IN (\(placeholders)) AND deleted=0 AND projection_blocked=0 AND transcript_preview IS NOT NULL
+                """, parameters)
+            var result: [UUID: String] = [:]
+            result.reserveCapacity(rows.count)
+            for row in rows {
+                let id = try row.requireUUID(0)
+                guard let expected = expectedByID[id],
+                      try row.requireInt(1) == expected.version,
+                      try row.requireInt(2) == expected.generation,
+                      let preview = row.string(3) else { continue }
+                result[id] = preview
+            }
+            return result
+        }
+    }
+
     @discardableResult
     func storeDocument(_ document: TranscriptDocument, invalidatesExistingSources: Bool = false,
                        appendingSpans: [TranscriptSpan]? = nil,
                        knownPrevious: TranscriptDocument?? = nil,
                        trustedPreviousBlockPrefix: (fullSpanCount: Int, blockIDs: [Int64])? = nil,
                        preencodedDocument: Data? = nil) throws -> (encodedBytes: Int, compactedPrefix: (fullSpanCount: Int, blockIDs: [Int64])?) {
+        if document.spans.contains(where: { !TranscriptText.hasContent($0.text) }) {
+            try database.execute("DELETE FROM metadata WHERE key=?", [.text(Self.discardedPunctuationMigrationKey)])
+        }
         let previous = try knownPrevious ?? currentTranscriptOrNil(sessionID: document.sessionID)
         removeTranscriptReadCache(document.sessionID)
         if appendingSpans == nil {
             transcriptBlockPrefixCache.removeValue(forKey: document.sessionID)
         }
-        verifiedRecordingFilesCache.removeValue(forKey: document.sessionID)
+        if verifiedRecordingFilesCache[document.sessionID]?.independentOfTranscriptVersion != true {
+            verifiedRecordingFilesCache.removeValue(forKey: document.sessionID)
+        }
         var compactedPrefix: (fullSpanCount: Int, blockIDs: [Int64])?
         if let previous {
             let previousCompacted = try compactTranscriptVersion(
@@ -458,12 +516,44 @@ extension ArchiveStore {
     }
 
     func orderedSpans(_ spans: [TranscriptSpan], sessionID: UUID) throws -> [TranscriptSpan] {
-        var order: [UUID: (Double, UUID)] = [:]
-        for row in try database.rows("SELECT id,wall_clock_anchor,epoch_id FROM chunks WHERE session_id=?", [.text(sessionID.uuidString)]) {
-            order[try row.requireUUID(0)] = (row.double(1) ?? 0, try row.requireUUID(2))
+        guard spans.count > 1 else { return spans }
+        var order = chunkOrderCache[sessionID]
+        if let cached = order, spans.allSatisfy({ cached[$0.chunkID] != nil }) {
+            // Reuse cached immutable (wall_clock_anchor, epoch_id) map when every referenced chunk is present.
+        } else {
+            var loaded: [UUID: (Double, UUID)] = [:]
+            for row in try database.rows("SELECT id,wall_clock_anchor,epoch_id FROM chunks WHERE session_id=?", [.text(sessionID.uuidString)]) {
+                loaded[try row.requireUUID(0)] = (row.double(1) ?? 0, try row.requireUUID(2))
+            }
+            order = loaded
+            if !database.isInTransaction || loaded.count <= 4_096 {
+                chunkOrderCache[sessionID] = loaded
+                chunkOrderRecency.removeAll { $0 == sessionID }
+                chunkOrderRecency.append(sessionID)
+                while chunkOrderRecency.count > 16 {
+                    let evicted = chunkOrderRecency.removeFirst()
+                    chunkOrderCache.removeValue(forKey: evicted)
+                }
+            }
         }
+        let map = order!
+        func precedesOrEquals(_ lhs: TranscriptSpan, _ rhs: TranscriptSpan) -> Bool {
+            guard let left = map[lhs.chunkID], let right = map[rhs.chunkID] else {
+                return lhs.id.uuidString <= rhs.id.uuidString
+            }
+            if left.1 == right.1 { return lhs.frames.start <= rhs.frames.start }
+            return left.0 <= right.0
+        }
+        var alreadyOrdered = true
+        for idx in 1..<spans.count {
+            if !precedesOrEquals(spans[idx - 1], spans[idx]) {
+                alreadyOrdered = false
+                break
+            }
+        }
+        if alreadyOrdered { return spans }
         return spans.sorted {
-            guard let left = order[$0.chunkID], let right = order[$1.chunkID] else { return $0.id.uuidString < $1.id.uuidString }
+            guard let left = map[$0.chunkID], let right = map[$1.chunkID] else { return $0.id.uuidString < $1.id.uuidString }
             if left.1 == right.1 { return $0.frames.start < $1.frames.start }
             return left.0 < right.0
         }

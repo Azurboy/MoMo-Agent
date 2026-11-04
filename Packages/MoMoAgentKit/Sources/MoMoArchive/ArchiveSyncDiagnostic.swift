@@ -25,13 +25,23 @@ extension ArchiveStore {
     public func writeSyncDiagnostic(now: Date = Date()) throws {
         guard lastSyncDiagnosticAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true else { return }
         lastSyncDiagnosticAt = now
+        let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
         let rows = try database.rows("""
             SELECT s.source_device,
-              date(julianday(json_extract(CAST(c.manifest AS TEXT),'$.wallClockAnchor')) +
-                (json_extract(CAST(c.manifest AS TEXT),'$.timezoneOffset') +
-                 1.0*json_extract(CAST(c.manifest AS TEXT),'$.frames.start') /
-                 json_extract(CAST(c.manifest AS TEXT),'$.timebaseHz')) / 86400.0),
-              c.id,c.retention,json_extract(CAST(c.manifest AS TEXT),'$.byteCount')
+              CASE
+                WHEN c.timebase_hz > 0 AND c.wall_clock_anchor != 0 THEN
+                  date(c.wall_clock_anchor + c.timezone_offset + 1.0 * c.start_frame / c.timebase_hz, 'unixepoch')
+                ELSE
+                  date(julianday(json_extract(CAST(c.manifest AS TEXT),'$.wallClockAnchor')) +
+                    (json_extract(CAST(c.manifest AS TEXT),'$.timezoneOffset') +
+                     1.0*json_extract(CAST(c.manifest AS TEXT),'$.frames.start') /
+                     json_extract(CAST(c.manifest AS TEXT),'$.timebaseHz')) / 86400.0)
+              END,
+              c.id,c.retention,
+              CASE
+                WHEN c.byte_count > 0 THEN c.byte_count
+                ELSE json_extract(CAST(c.manifest AS TEXT),'$.byteCount')
+              END
             FROM chunks c JOIN sessions s ON s.id=c.session_id WHERE s.deleted=0
             ORDER BY s.source_device,2,c.rowid
             """)
@@ -52,6 +62,7 @@ extension ArchiveStore {
         let snapshot = ArchiveSyncDiagnostic(observedAt: now, libraryInstanceID: libraryInstanceID,
             pendingReceiptCount: try pendingReceiptCount(), latestCommit: latest, days: days)
         try ArchiveFilePolicy.write(WireJSON.encode(snapshot), to: rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/sync-receive-diagnostic.json"))
+        performanceMonitor.record(.writeSyncDiagnostic, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: rows.count)
     }
 
     func recordReceiveCommit(chunkID: UUID) throws {

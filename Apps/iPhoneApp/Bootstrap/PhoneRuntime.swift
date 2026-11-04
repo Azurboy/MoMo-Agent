@@ -167,7 +167,7 @@ final class PhoneRuntime {
                         }
                     } else if refreshProgress {
                         if completedNewWindows { self.remoteAgent.sourcesChanged() }
-                        await self.library.refresh()
+                        await self.library.refresh(inspectFiles: false)
                     }
                     if refreshProgress {
                         self.requestAudioMaintenance(force: becameIdle)
@@ -387,10 +387,11 @@ final class PhoneRuntime {
                 uiTestConfiguration = nil
             }
 #endif
+            let coldStartStartedMs = APIPerformanceMonitor.uptimeMilliseconds()
             try await archive.recoverInterruptedJobs()
             try await archive.recoverPendingExpirations()
             if backgroundOnly, !isForeground { libraryPresentationDeferred = true }
-            else { try await prepareLibraryPresentation() }
+            else { try await prepareLibraryPresentation(coldStartStartedMs: coldStartStartedMs) }
             ready = true
             if isForeground { playback.requestWaveformPreparation() }
             if !libraryPresentationDeferred { await refreshBatches() }
@@ -402,9 +403,19 @@ final class PhoneRuntime {
         } catch { failure = String(localized: "本机资料恢复未完成：\(error.localizedDescription)") }
     }
 
-    private func prepareLibraryPresentation() async throws {
+    private func prepareLibraryPresentation(coldStartStartedMs: Double? = nil) async throws {
         try await archive.discardPunctuationOnlyTranscripts()
         try await archive.upgradeSpeakerProfilesIfNeeded()
+        // Populate Timeline & Library directly from SQLite first so "正在读取记录" clears in < 200ms,
+        // before running multi-session file verification and document projection.
+        await library.refresh(inspectFiles: false)
+        if let coldStartStartedMs {
+            archive.performanceMonitor.record(
+                .coldStartToTimelineInteractive,
+                durationMs: APIPerformanceMonitor.uptimeMilliseconds() - coldStartStartedMs,
+                itemCount: library.recordings.count
+            )
+        }
         do { try await archive.removeAbandonedExports() }
         catch { failure = String(localized: "上次导出的临时文件尚未清理：\(error.localizedDescription)") }
         do { try await archive.cleanDeletedFiles() }
@@ -586,6 +597,7 @@ final class PhoneRuntime {
         if let transcription, !(await transcription.snapshot()).userPaused {
             await backgroundTasks?.scheduleAutomatic()
         }
+        try? archive.performanceMonitor.flushNow()
     }
 
     /// UIKit expiration revokes the scene continuation, while a separately admitted BGTask keeps its grant.
@@ -605,10 +617,13 @@ final class PhoneRuntime {
         guard isForeground, PhoneBackgroundTasks.resourcesAllowProcessing(foreground: true), let speech,
               !speechWarmed, speechWarmup == nil, Date() >= speechWarmupRetryAt else { return }
         modelStatus = .preparing
+        let archive = self.archive
         speechWarmup = Task(priority: .utility) { [weak self, speech] in
             defer { self?.speechWarmup = nil }
+            let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
             do {
                 try await speech.warmUp()
+                archive.performanceMonitor.record(.speechWarmUp, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs)
                 self?.speechWarmed = true
                 self?.modelStatus = .ready
             } catch is CancellationError {
@@ -616,6 +631,7 @@ final class PhoneRuntime {
             } catch SpeechError.cancelled {
                 if self?.speechWarmed == false { self?.modelStatus = .awaitingValidation }
             } catch {
+                archive.performanceMonitor.record(.speechWarmUp, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, failed: true)
                 guard let self, !speechWarmed else { return }
                 speechWarmupRetryAt = Date().addingTimeInterval(60)
                 modelStatus = .preparationDeferred
@@ -856,7 +872,9 @@ final class PhoneRuntime {
                 if reconciled.contains(where: { $0.didRevise || $0.didUnblock }) { await transcription?.requestWork() }
                 await refreshBatches()
                 stage = String(localized: "保存转录文件")
-                try await archive.projectPendingDocuments(includeUnchanged: reconcileFiles)
+                // reconcileDocumentFiles above already inspected unchanged sessions on disk when reconcileFiles == true;
+                // only project sessions with pending transcript/manifest updates (plus pending/deleted plans).
+                try await archive.projectPendingDocuments(includeUnchanged: false)
                 stage = String(localized: "更新资料引用")
                 try await invalidatePendingContexts()
                 stage = String(localized: "清理失效聊天引用")

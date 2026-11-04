@@ -66,7 +66,7 @@ struct TranscriptionRefreshGate {
         }
         wasSettled = false
         guard completedNewWindow else { return false }
-        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(1) { return false }
+        if let lastRefresh, lastRefresh.duration(to: now) < .seconds(2) { return false }
         lastRefresh = now
         return true
     }
@@ -1433,8 +1433,9 @@ public actor TranscriptionCoordinator {
             let allowForegroundBatching = !systemSuspended
                 && (managed == nil || managed?.handle.origin == .foreground || managed?.handle.origin == .continuedProcessing)
             let allowCompanionBatching = !isHotLive && (allowForegroundBatching || allowBackgroundBatching)
-            if allowCompanionBatching, retryScope == nil, !batchDecodeFailed, speech.archiveBatchSize > 1 {
-                let companions = Task { [archive, limit = speech.archiveBatchSize] in
+            let windowBatchLimit = speech.coordinatorWindowBatchSize
+            if allowCompanionBatching, retryScope == nil, !batchDecodeFailed, windowBatchLimit > 1 {
+                let companions = Task { [archive, limit = windowBatchLimit] in
                     try await archive.claimCompanionWindows(after: ticket, inputLease: sequence.lease, maximumCount: limit)
                 }
                 pendingClaim = .companions(companions)
@@ -1506,30 +1507,51 @@ public actor TranscriptionCoordinator {
             try token.checkCancellation()
             guard results.count == tickets.count else { throw SpeechError.incompatibleWindow }
             let commitStarted = DispatchTime.now().uptimeNanoseconds
+            var batchCommits: [ArchiveStore.WindowTranscriptCommit] = []
+            batchCommits.reserveCapacity(tickets.count)
+            var inMemoryPrevious: (endFrame: Int64, payload: (result: SpeechRecognition, window: SpeechWindow)?)?
             for (current, result) in zip(tickets, results) {
                 try Task.checkCancellation()
                 try token.checkCancellation()
                 guard result.windowID == current.window.id,
                       result.configurationFingerprint == current.window.configurationFingerprint else { throw SpeechError.incompatibleWindow }
                 var previous: (result: SpeechRecognition, window: SpeechWindow)?
-                if speech.continuousArchive,
-                   let saved = try await archive.precedingWindowResult(for: current),
-                   let recognition = try? WireJSON.decode(SpeechRecognition.self, from: saved.rawResult) {
-                    previous = (recognition, speechWindow(saved.window))
+                if speech.continuousArchive {
+                    if let prev = inMemoryPrevious, prev.endFrame == current.window.coreFrames.start {
+                        previous = prev.payload
+                    } else if let saved = try await archive.precedingWindowResult(for: current),
+                              let recognition = try? WireJSON.decode(SpeechRecognition.self, from: saved.rawResult) {
+                        previous = (recognition, speechWindow(saved.window))
+                    }
                 }
                 let window = speechWindow(current.window)
                 if let failure = result.speakerFailure {
                     performanceLogger.error("Speaker attribution incomplete: \(failure, privacy: .public), window=\(result.windowID, privacy: .public)")
                 }
                 let text = speech.archiveText(result, window: window, after: previous)
-                _ = try await archive.commitWindowTranscript(ticket: current, text: text,
-                    rawResult: WireJSON.encode(result), speakerParts: result.speakerParts(text: text, window: window))
+                let hasWords = !text.unicodeScalars.allSatisfy {
+                    CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines).contains($0)
+                }
+                inMemoryPrevious = (
+                    endFrame: current.window.coreFrames.end,
+                    payload: hasWords ? (result, window) : nil
+                )
+                batchCommits.append(ArchiveStore.WindowTranscriptCommit(
+                    ticket: current,
+                    text: text,
+                    rawResult: try WireJSON.encode(result),
+                    speakerParts: try result.speakerParts(text: text, window: window)
+                ))
+            }
+            _ = try await archive.commitWindowTranscripts(batchCommits)
+            for current in tickets {
                 committedIDs.insert(current.window.id)
                 lastTranscribedWindowCount += 1
                 completedWindows += 1
-                if let index = readingSequences.firstIndex(where: { $0.decoder === sequence.decoder }) {
-                    readingSequences[index].coreEnd = current.window.modelCoreFrames.end
-                }
+            }
+            if let lastTicket = tickets.last,
+               let index = readingSequences.firstIndex(where: { $0.decoder === sequence.decoder }) {
+                readingSequences[index].coreEnd = lastTicket.window.modelCoreFrames.end
             }
             let committedAt = DispatchTime.now().uptimeNanoseconds
             resultCommitted = true

@@ -144,13 +144,21 @@ enum PhoneComposition {
     }
 
     private static func pruneStaleCoreMLCaches(in cacheRoot: URL, retainingASRHash: String) {
-        let activeName = "sherpa-coreml-v2-\(retainingASRHash)"
+        var retainedNames: Set<String> = ["sherpa-coreml-v2-\(retainingASRHash)"]
+        for model in PhoneSpeechModelSettings.downloadable {
+            if let revision = try? model.catalog()?.revision {
+                retainedNames.insert("sherpa-coreml-v2-\(revision)")
+            }
+        }
+        for model in SpeakerSegmentationModel.allCases {
+            retainedNames.insert("speaker-coreml-v2-\(model.sha256.prefix(16))")
+        }
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: cacheRoot,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return }
-        for entry in entries where entry.lastPathComponent != activeName {
+        for entry in entries where !retainedNames.contains(entry.lastPathComponent) {
             try? FileManager.default.removeItem(at: entry)
         }
     }

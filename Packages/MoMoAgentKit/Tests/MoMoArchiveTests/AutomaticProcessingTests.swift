@@ -538,6 +538,107 @@ struct AutomaticProcessingTests {
         #expect(claimedOrder == [twelveMinWatchBatch.sessionID, lateMorning.sessionID, earlyMorning.sessionID])
     }
 
+    @Test func fractionalMillisecondAnchorSplitsCleanlyWithoutTierPreemptionLivelock() async throws {
+        let yesterday = try Fixture(), openToday = try Fixture()
+        defer { yesterday.remove(); openToday.remove() }
+
+        let probeNow = Date(timeIntervalSince1970: 1_793_792_522.0) // 2026-11-04T11:42:02Z
+        let probeAnchor = Date(timeIntervalSince1970: 1_793_784_570.783) // 2026-11-04T09:29:30.783Z
+        let probeManifest = try manifest(openToday, anchor: probeAnchor, offset: 28_800)
+        let probePolicy = ProcessingDatePolicy(now: probeNow, calendar: calendar)
+        let unanalyzedRange = try FrameRange(start: 77_743_760, count: 111_360_000 - 77_743_760)
+        let segments = try probePolicy.splitForScheduling(unanalyzedRange, manifest: probeManifest)
+        #expect(segments.count == 2)
+        #expect(segments[0].tier == 2)
+        #expect(!probePolicy.isHotLive(segments[0].frames, manifest: probeManifest))
+        #expect(segments[1].tier == 0)
+        #expect(probePolicy.isHotLive(segments[1].frames, manifest: probeManifest))
+
+        // End-to-end ArchiveStore check: a multi-chunk today epoch with `.783` subsecond anchor spanning
+        // Tier 2 -> Tier 0 alongside a focused historical Tier-1 session must never ping-pong preempt.
+        let store = try yesterday.store()
+        var cst = Calendar(identifier: .gregorian)
+        cst.timeZone = try #require(TimeZone(secondsFromGMT: 28_800))
+        let focusedYesterday = TimelineDay(probeNow.addingTimeInterval(-86_400), calendar: cst)
+        _ = try await ingest(yesterday, into: store, anchor: probeNow.addingTimeInterval(-86_400))
+
+        let wavTemplate = try openToday.envelope(frameCount: 960_000).manifest
+        let todayStartAnchor = Date(timeIntervalSince1970: probePolicy.quantizedHotCutoff.timeIntervalSince1970 - 150 + 0.783)
+        // 6 x 60s chunks = 6 minutes: [0..2.5m] is Tier 2 (>30m ago), [2.5m..6m] is Tier 0 (<30m ago, >120s step).
+        for seq in 0..<6 {
+            let start = Int64(seq) * 960_000
+            let chunkManifest = try ChunkManifest(
+                sessionID: openToday.sessionID, epochID: openToday.epochID, sourceDeviceID: openToday.deviceID,
+                sourceBuild: "priority-test", sequence: Int64(seq), frames: FrameRange(start: start, count: 960_000),
+                timebaseHz: 16_000, wallClockAnchor: todayStartAnchor, timezoneOffset: 28_800, codec: .pcmInt16,
+                sampleRate: 16_000, channels: 1, decodedFrameCount: 960_000, byteCount: wavTemplate.byteCount,
+                audioSHA256: wavTemplate.audioSHA256,
+                sealedAt: todayStartAnchor.addingTimeInterval(Double(start + 960_000) / 16_000), sourceKind: .fixture
+            )
+            let env = try ManifestEnvelope(manifest: chunkManifest)
+            _ = try await store.commitReceivedChunk(openToday.deliver(env, to: store))
+        }
+
+        let firstWork = try #require(await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint, focusedDay: focusedYesterday, now: probeNow, calendar: cst
+        ))
+        guard case .analysis(let firstTicket) = firstWork else {
+            Issue.record("Expected Tier-0 hot live analysis first")
+            return
+        }
+        #expect(firstTicket.sessionID == openToday.sessionID)
+        #expect((firstTicket.checkpoint?.sourceFrame ?? 0) > 0)
+        #expect(store.isHotLiveAnalysis(firstTicket, now: probeNow, calendar: cst))
+
+        // Next drain iteration (~1ms later) with `activeAnalysis: firstTicket` MUST return nil (no Tier-1 preemption!).
+        #expect(try await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint, focusedDay: focusedYesterday,
+            now: probeNow, calendar: cst, activeAnalysis: firstTicket
+        ) == nil)
+
+        // Drain all Tier-0 steps on `openToday`.
+        var currentTicket: EpochAnalysisTicket? = firstTicket
+        while let ticket = currentTicket {
+            try await completeSilence(ticket, store: store)
+            if let nextHot = try await store.claimAutomaticWork(
+                configurationFingerprint: fingerprint, hotOnly: true,
+                focusedDay: focusedYesterday, now: probeNow, calendar: cst
+            ) {
+                guard case .analysis(let hotTicket) = nextHot else { break }
+                currentTicket = hotTicket
+            } else {
+                currentTicket = nil
+            }
+        }
+
+        // Once Tier 0 is complete, focused yesterday (Tier 1) runs ahead of openToday's Tier-2 prefix and is NOT preempted!
+        let yesterdayWork = try #require(await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint, focusedDay: focusedYesterday, now: probeNow, calendar: cst
+        ))
+        guard case .analysis(let yesterdayTicket) = yesterdayWork else {
+            Issue.record("Expected focused yesterday Tier-1 analysis ahead of Tier-2 prefix")
+            return
+        }
+        #expect(yesterdayTicket.sessionID == yesterday.sessionID)
+        #expect(try await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint, focusedDay: focusedYesterday,
+            now: probeNow, calendar: cst, activeAnalysis: yesterdayTicket
+        ) == nil)
+        try await completeSilence(yesterdayTicket, store: store)
+
+        // Finally, openToday's Tier-2 prefix drains cleanly.
+        let prefixWork = try #require(await store.claimAutomaticWork(
+            configurationFingerprint: fingerprint, focusedDay: focusedYesterday, now: probeNow, calendar: cst
+        ))
+        guard case .analysis(let prefixTicket) = prefixWork else {
+            Issue.record("Expected remaining Tier-2 prefix analysis")
+            return
+        }
+        #expect(prefixTicket.sessionID == openToday.sessionID)
+        #expect((prefixTicket.checkpoint?.sourceFrame ?? 0) == 0)
+        try await store.cancelEpochAnalysis(ticket: prefixTicket)
+    }
+
     private func nextAnalysis(_ store: ArchiveStore, at time: Date? = nil) async throws -> EpochAnalysisTicket {
         let work = try #require(await store.claimAutomaticWork(configurationFingerprint: fingerprint, now: time ?? now, calendar: calendar))
         guard case .analysis(let ticket) = work else { throw ArchiveError.invalidTranscript }

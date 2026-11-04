@@ -63,6 +63,7 @@ public actor ArchiveStore {
     public nonisolated let rootURL: URL
     public nonisolated let inbox: InboxCustodian
     public nonisolated let libraryInstanceID: UUID
+    public nonisolated let performanceMonitor: APIPerformanceMonitor
     let database: ArchiveDatabase
     let receiverDeviceID: UUID
     let files = FileManager.default
@@ -72,9 +73,12 @@ public actor ArchiveStore {
     var transcriptReadCacheCost = 0
     var transcriptReadDataVersion: Int64 = -1
     var transcriptBlockPrefixCache: [UUID: (version: Int64, generation: Int64, fullSpanCount: Int, blockIDs: [Int64])] = [:]
+    var chunkOrderCache: [UUID: [UUID: (Double, UUID)]] = [:]
+    var chunkOrderRecency: [UUID] = []
     var speakerObservationEvidenceCache: [UUID: [UUID: (byteCount: Int, checksum: UInt64, evidence: SpeakerEvidence?)]] = [:]
     var speakerObservationSessionOrder: [UUID] = []
     var lastSyncDiagnosticAt: Date?
+    var cachedEarliestTimelineDay: (dataVersion: Int64, timelineRevision: UInt64, value: TimelineDay?)?
     var insightCatalogCache: InsightCatalogCache?
     var hasPendingFileDeletions = false
     var compactedBytesPendingVacuum: Int64 = 0
@@ -97,7 +101,12 @@ public actor ArchiveStore {
     var planBoundaryObserver: (@Sendable (ArchivePlanBoundary) -> Void)?
     #endif
 
-    public init(rootURL: URL, receiverDeviceID: UUID) throws {
+    public init(
+        rootURL: URL,
+        receiverDeviceID: UUID,
+        marketingVersion: String? = nil,
+        buildVersion: String? = nil
+    ) throws {
         self.rootURL = rootURL
         self.receiverDeviceID = receiverDeviceID
         let support = rootURL.appendingPathComponent("Library/Application Support/MoMoAgent", isDirectory: true)
@@ -111,6 +120,11 @@ public actor ArchiveStore {
                           rootURL.appendingPathComponent("tmp/Exports", isDirectory: true)] {
             try ArchiveFilePolicy.prepareDirectory(directory)
         }
+        self.performanceMonitor = APIPerformanceMonitor(
+            fileURL: support.appendingPathComponent("api-performance.json"),
+            marketingVersion: marketingVersion,
+            buildVersion: buildVersion
+        )
         inbox = try InboxCustodian(rootURL: support.appendingPathComponent("Inbox", isDirectory: true))
         let database = try ArchiveDatabase(url: support.appendingPathComponent("archive.sqlite"))
         self.database = database
@@ -275,6 +289,20 @@ public actor ArchiveStore {
         _ item: InboxItem,
         preverifiedAudioSHA256: String? = nil,
         skipVerifiedSourceAudio: Bool = false
+    ) throws -> ReceiveResult {
+        try performanceMonitor.measure(.commitReceivedChunk) {
+            try commitReceivedChunkImpl(
+                item,
+                preverifiedAudioSHA256: preverifiedAudioSHA256,
+                skipVerifiedSourceAudio: skipVerifiedSourceAudio
+            )
+        }
+    }
+
+    private func commitReceivedChunkImpl(
+        _ item: InboxItem,
+        preverifiedAudioSHA256: String?,
+        skipVerifiedSourceAudio: Bool
     ) throws -> ReceiveResult {
         guard item.directoryURL.deletingLastPathComponent().standardizedFileURL.path == inbox.rootURL.standardizedFileURL.path,
               item.directoryURL.lastPathComponent == item.id.uuidString else {
@@ -647,6 +675,7 @@ public actor ArchiveStore {
                 invalidateTransductiveVoiceprintCache()
             }
             try database.execute("DELETE FROM metadata WHERE key=?", [.text("recording_projection_pending/" + id.uuidString)])
+            try database.execute("DELETE FROM metadata WHERE key=?", [.text("manifest_projection_hash/" + id.uuidString)])
             try invalidateAgentSources(sessionID: id)
             try database.execute("UPDATE transcription_jobs SET state='deleted',attempt_id=NULL WHERE chunk_id IN (SELECT id FROM chunks WHERE session_id=?)", [.text(id.uuidString)])
             try database.execute("DELETE FROM capture_events WHERE session_id=?", [.text(id.uuidString)])
@@ -674,6 +703,8 @@ public actor ArchiveStore {
             }
         }
         transcriptBlockPrefixCache.removeValue(forKey: id)
+        chunkOrderCache.removeValue(forKey: id)
+        chunkOrderRecency.removeAll { $0 == id }
         speakerObservationEvidenceCache.removeValue(forKey: id)
         speakerObservationSessionOrder.removeAll { $0 == id }
         hasPendingFileDeletions = true

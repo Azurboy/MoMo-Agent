@@ -464,21 +464,62 @@ extension ArchiveStore {
         return (try WireJSON.decode(ArchiveAnalysisWindow.self, from: row.requireData(0)), raw)
     }
 
+    public struct WindowTranscriptCommit: Sendable {
+        public let ticket: TranscriptionWindowTicket
+        public let text: String
+        public let rawResult: Data
+        public let speakerParts: [SpeakerTranscriptPart]?
+
+        public init(ticket: TranscriptionWindowTicket, text: String, rawResult: Data,
+                    speakerParts: [SpeakerTranscriptPart]? = nil) {
+            self.ticket = ticket
+            self.text = text
+            self.rawResult = rawResult
+            self.speakerParts = speakerParts
+        }
+    }
+
     public func commitWindowTranscript(ticket: TranscriptionWindowTicket, text: String, rawResult: Data,
                                        speakerParts: [SpeakerTranscriptPart]? = nil) throws -> TranscriptDocument {
-        guard text.utf8.count <= 65_536, rawResult.count <= 8 * 1024 * 1024 else { throw ArchiveError.invalidTranscript }
+        try commitWindowTranscripts([WindowTranscriptCommit(ticket: ticket, text: text, rawResult: rawResult, speakerParts: speakerParts)])
+    }
+
+    public func commitWindowTranscripts(_ commits: [WindowTranscriptCommit]) throws -> TranscriptDocument {
+        try performanceMonitor.measure(.commitWindowTranscripts, itemCount: commits.count) {
+            try commitWindowTranscriptsImpl(commits)
+        }
+    }
+
+    private func commitWindowTranscriptsImpl(_ commits: [WindowTranscriptCommit]) throws -> TranscriptDocument {
+        guard let firstCommit = commits.first else { throw ArchiveError.invalidTranscript }
+        let sessionID = firstCommit.ticket.window.sessionID
+        let epochID = firstCommit.ticket.window.epochID
+        let expectedGeneration = firstCommit.ticket.expectedGeneration
+        let fingerprint = firstCommit.ticket.window.configurationFingerprint
+        for item in commits {
+            guard item.text.utf8.count <= 65_536,
+                  item.rawResult.count <= 8 * 1024 * 1024,
+                  item.ticket.window.sessionID == sessionID,
+                  item.ticket.window.epochID == epochID,
+                  item.ticket.expectedGeneration == expectedGeneration,
+                  item.ticket.window.configurationFingerprint == fingerprint else {
+                throw ArchiveError.invalidTranscript
+            }
+        }
         let preloadedPrevious = !database.isInTransaction
-            ? (try? currentTranscriptOrNil(sessionID: ticket.window.sessionID))
+            ? (try? currentTranscriptOrNil(sessionID: sessionID))
             : nil
         let preloadedBlockPrefix = !database.isInTransaction
-            ? transcriptBlockPrefixCache[ticket.window.sessionID]
+            ? transcriptBlockPrefixCache[sessionID]
             : nil
         let (document, storedMeta) = try database.transaction {
-            try validateWindowTicket(ticket)
+            for item in commits {
+                try validateWindowTicket(item.ticket)
+            }
             let previous: TranscriptDocument?
             if let state = try database.rows(
                 "SELECT deleted,transcript_version,generation FROM sessions WHERE id=?",
-                [.text(ticket.window.sessionID.uuidString)]
+                [.text(sessionID.uuidString)]
             ).first, state.integer(0) == 0,
                let dbVersion = try? state.requireInt(1),
                let dbGen = try? state.requireInt(2) {
@@ -487,81 +528,107 @@ extension ArchiveStore {
                 } else if let pre = preloadedPrevious, pre.version == dbVersion, pre.generation == dbGen {
                     previous = pre
                 } else {
-                    previous = try currentTranscriptOrNil(sessionID: ticket.window.sessionID)
+                    previous = try currentTranscriptOrNil(sessionID: sessionID)
                 }
             } else {
-                previous = try currentTranscriptOrNil(sessionID: ticket.window.sessionID)
+                previous = try currentTranscriptOrNil(sessionID: sessionID)
             }
             var spans = previous?.spans ?? []
             var appendedSpans: [TranscriptSpan] = []
-            let hasContent = TranscriptText.hasContent(text)
             var sharedPreparedBanks: [String: [Int: VoiceprintMatcher.PreparedBank]] = [:]
-            if hasContent {
-              let parts = speakerParts ?? [.init(text: text, frames: ticket.window.coreFrames, evidence: nil)]
-              guard !parts.isEmpty, parts.count <= 256, parts.map(\.text).joined() == text,
-                    parts.first?.frames.start == ticket.window.coreFrames.start,
-                    parts.last?.frames.end == ticket.window.coreFrames.end,
-                    zip(parts, parts.dropFirst()).allSatisfy({ $0.frames.end == $1.frames.start }),
-                    parts.allSatisfy({ $0.frames.count > 0 && !$0.text.isEmpty }) else { throw ArchiveError.invalidTranscript }
-              var localClusters: [Int: Set<UUID>] = [:]
-              var sessionCones: [String: VoiceprintCone?] = [:]
-              let hasVoicedEvidence = parts.contains { $0.evidence?.hasVoiceprint == true }
-              let cachedPeople = hasVoicedEvidence ? try cachedVoicePeople() : nil
-              for (index, part) in parts.enumerated() {
-                let range = part.frames
-                let sources = try ticket.window.sources.compactMap { source -> TranscriptAudioRange? in
-                    let start = max(source.sourceFrames.start, range.start), end = min(source.sourceFrames.end, range.end)
-                    guard end > start else { return nil }
-                    return TranscriptAudioRange(chunkID: source.chunkID, frames: try FrameRange(start: start, count: end - start))
+            var sessionCones: [String: VoiceprintCone?] = [:]
+            var cachedPeople: [VoicePerson]?
+            var loadedPeople = false
+            var anyHasContent = false
+            var anyClusterShift = false
+            var maxCoreEnd: Int64 = 0
+            var minCheckStart = Int64.max
+            var maxCheckEnd = Int64.min
+            var windowHasContent: [Bool] = []
+            windowHasContent.reserveCapacity(commits.count)
+
+            for item in commits {
+                let ticket = item.ticket
+                let text = item.text
+                minCheckStart = min(minCheckStart, ticket.window.analysisAnchor)
+                maxCheckEnd = max(maxCheckEnd, ticket.window.contextFrames.end)
+                maxCoreEnd = max(maxCoreEnd, ticket.window.coreFrames.end)
+                let hasContent = TranscriptText.hasContent(text)
+                windowHasContent.append(hasContent)
+                guard hasContent else { continue }
+                anyHasContent = true
+                let parts = item.speakerParts ?? [.init(text: text, frames: ticket.window.coreFrames, evidence: nil)]
+                guard !parts.isEmpty, parts.count <= 256, parts.map(\.text).joined() == text,
+                      parts.first?.frames.start == ticket.window.coreFrames.start,
+                      parts.last?.frames.end == ticket.window.coreFrames.end,
+                      zip(parts, parts.dropFirst()).allSatisfy({ $0.frames.end == $1.frames.start }),
+                      parts.allSatisfy({ $0.frames.count > 0 && !$0.text.isEmpty }) else { throw ArchiveError.invalidTranscript }
+                var localClusters: [Int: Set<UUID>] = [:]
+                if !loadedPeople, parts.contains(where: { $0.evidence?.hasVoiceprint == true }) {
+                    cachedPeople = try cachedVoicePeople()
+                    loadedPeople = true
                 }
-                guard let first = sources.first else { throw ArchiveError.invalidTranscript }
-                let id = try spanID(windowID: index == 0 ? ticket.window.id : ContentHash.sha256(Data("\(ticket.window.id):speaker:\(index)".utf8)))
-                let localSpeaker = part.evidence?.localSpeaker
-                // Local IDs encode the 4-speaker DiariZen segmentation window. Different windows
-                // may number the same voice differently; only one window supplies cannot-links.
-                let excluded = Set(localClusters.filter { entry in
-                    guard let localSpeaker, localSpeaker > 0, entry.key > 0 else { return false }
-                    return entry.key != localSpeaker && (entry.key - 1) / 4 == (localSpeaker - 1) / 4
-                }.values.flatMap { $0 })
-                let attribution = try attributeSpeaker(
-                    spanID: id,
-                    sessionID: ticket.window.sessionID,
-                    evidence: part.evidence,
-                    excluding: excluded,
-                    preloadedPeople: cachedPeople,
-                    preparedBanks: &sharedPreparedBanks,
-                    sessionCones: &sessionCones)
-                if let localSpeaker, let cluster = attribution.1?.clusterID { localClusters[localSpeaker, default: []].insert(cluster) }
-                let previousAttr = appendedSpans.last?.attribution
-                let sameAsPreviousPart: Bool = {
-                    guard index > 0, let prev = previousAttr, let curr = attribution.1 else { return false }
-                    if let p1 = prev.personID, let p2 = curr.personID { return p1 == p2 }
-                    return prev.personID == nil && curr.personID == nil && prev.clusterID == curr.clusterID
-                }()
-                let span = TranscriptSpan(id: id, chunkID: first.chunkID,
-                    frames: range, text: part.text, speaker: attribution.0, sourceRanges: sources, attribution: attribution.1,
-                    startsNewSpeakerTurn: index > 0 && !sameAsPreviousPart)
-                spans.append(span)
-                appendedSpans.append(span)
-              }
+                var windowAppended: [TranscriptSpan] = []
+                windowAppended.reserveCapacity(parts.count)
+                for (index, part) in parts.enumerated() {
+                    let range = part.frames
+                    let sources = try ticket.window.sources.compactMap { source -> TranscriptAudioRange? in
+                        let start = max(source.sourceFrames.start, range.start), end = min(source.sourceFrames.end, range.end)
+                        guard end > start else { return nil }
+                        return TranscriptAudioRange(chunkID: source.chunkID, frames: try FrameRange(start: start, count: end - start))
+                    }
+                    guard let first = sources.first else { throw ArchiveError.invalidTranscript }
+                    let id = try spanID(windowID: index == 0 ? ticket.window.id : ContentHash.sha256(Data("\(ticket.window.id):speaker:\(index)".utf8)))
+                    let localSpeaker = part.evidence?.localSpeaker
+                    // Local IDs encode the 4-speaker DiariZen segmentation window. Different windows
+                    // may number the same voice differently; only one window supplies cannot-links.
+                    let excluded = Set(localClusters.filter { entry in
+                        guard let localSpeaker, localSpeaker > 0, entry.key > 0 else { return false }
+                        return entry.key != localSpeaker && (entry.key - 1) / 4 == (localSpeaker - 1) / 4
+                    }.values.flatMap { $0 })
+                    let attribution = try attributeSpeaker(
+                        spanID: id,
+                        sessionID: sessionID,
+                        evidence: part.evidence,
+                        excluding: excluded,
+                        preloadedPeople: cachedPeople,
+                        preparedBanks: &sharedPreparedBanks,
+                        sessionCones: &sessionCones,
+                        didShiftCluster: &anyClusterShift)
+                    if let localSpeaker, let cluster = attribution.1?.clusterID { localClusters[localSpeaker, default: []].insert(cluster) }
+                    let previousAttr = windowAppended.last?.attribution
+                    let sameAsPreviousPart: Bool = {
+                        guard index > 0, let prev = previousAttr, let curr = attribution.1 else { return false }
+                        if let p1 = prev.personID, let p2 = curr.personID { return p1 == p2 }
+                        return prev.personID == nil && curr.personID == nil && prev.clusterID == curr.clusterID
+                    }()
+                    let span = TranscriptSpan(id: id, chunkID: first.chunkID,
+                        frames: range, text: part.text, speaker: attribution.0, sourceRanges: sources, attribution: attribution.1,
+                        startsNewSpeakerTurn: index > 0 && !sameAsPreviousPart)
+                    spans.append(span)
+                    appendedSpans.append(span)
+                    windowAppended.append(span)
+                }
             }
-            let restoredAnchors = hasContent
+            let restoredAnchors = anyHasContent
                 ? try applyHistoricalFeedbackAnchors(
-                    sessionID: ticket.window.sessionID,
-                    epochID: ticket.window.epochID,
-                    coreEnd: ticket.window.coreFrames.end,
+                    sessionID: sessionID,
+                    epochID: epochID,
+                    coreEnd: maxCoreEnd,
                     newSpans: appendedSpans)
                 : false
             if restoredAnchors { sharedPreparedBanks.removeAll() }
-            let regrouped = try reconcileSpeakerClusters(
-                sessionID: ticket.window.sessionID,
-                preparedBanks: sharedPreparedBanks.isEmpty ? nil : sharedPreparedBanks)
+            let regrouped = (restoredAnchors || anyClusterShift)
+                ? try reconcileSpeakerClusters(
+                    sessionID: sessionID,
+                    preparedBanks: sharedPreparedBanks.isEmpty ? nil : sharedPreparedBanks)
+                : false
             if regrouped || restoredAnchors {
-                spans = try labeledSpeakerSpans(spans, sessionID: ticket.window.sessionID)
+                spans = try labeledSpeakerSpans(spans, sessionID: sessionID)
             }
-            let updated = TranscriptDocument(sessionID: ticket.window.sessionID, version: (previous?.version ?? 0) + 1,
-                                             generation: ticket.expectedGeneration,
-                                             spans: try orderedSpans(spans, sessionID: ticket.window.sessionID), updatedAt: Date())
+            let updated = TranscriptDocument(sessionID: sessionID, version: (previous?.version ?? 0) + 1,
+                                             generation: expectedGeneration,
+                                             spans: try orderedSpans(spans, sessionID: sessionID), updatedAt: Date())
             let trustedPrefix: (fullSpanCount: Int, blockIDs: [Int64])? = {
                 guard let prev = previous,
                       let cached = preloadedBlockPrefix,
@@ -576,11 +643,19 @@ extension ArchiveStore {
                 knownPrevious: .some(previous),
                 trustedPreviousBlockPrefix: trustedPrefix
             )
-            try database.execute("UPDATE analysis_windows SET state='complete',attempt_id=NULL,raw_result=? WHERE id=?",
-                [.blob(hasContent ? rawResult : TranscriptText.discardedPunctuation), .text(ticket.window.id)])
-            try clearProcessingFailures(epochID: ticket.window.epochID, generation: ticket.expectedGeneration,
-                fingerprint: ticket.window.configurationFingerprint, stage: .transcription, frames: ticket.window.coreFrames)
-            try updateCompletedChunks(epochID: ticket.window.epochID, configurationFingerprint: ticket.window.configurationFingerprint)
+            for (idx, item) in commits.enumerated() {
+                let ticket = item.ticket
+                let hasContent = windowHasContent[idx]
+                try database.execute("UPDATE analysis_windows SET state='complete',attempt_id=NULL,raw_result=? WHERE id=?",
+                    [.blob(hasContent ? item.rawResult : TranscriptText.discardedPunctuation), .text(ticket.window.id)])
+                try clearProcessingFailures(epochID: epochID, generation: expectedGeneration,
+                    fingerprint: fingerprint, stage: .transcription, frames: ticket.window.coreFrames)
+            }
+            try updateCompletedChunks(
+                epochID: epochID,
+                configurationFingerprint: fingerprint,
+                overlappingRange: minCheckStart < maxCheckEnd ? (minCheckStart..<maxCheckEnd) : nil
+            )
             return (updated, meta)
         }
         cacheCommittedWindowTranscript(
@@ -588,7 +663,9 @@ extension ArchiveStore {
             encodedByteCount: storedMeta.encodedBytes,
             previousCompactedPrefix: storedMeta.compactedPrefix
         )
-        for lease in ticket.leaseIDs { audioLeases.removeValue(forKey: lease) }
+        for item in commits {
+            for lease in item.ticket.leaseIDs { audioLeases.removeValue(forKey: lease) }
+        }
         return document
     }
 
@@ -680,21 +757,52 @@ extension ArchiveStore {
         }
     }
 
-    func updateCompletedChunks(epochID: UUID, configurationFingerprint: String) throws {
-        let candidates = try database.rows("""
-            SELECT c.id,c.start_frame,c.end_frame FROM chunks c JOIN transcription_jobs j ON j.chunk_id=c.id
-            WHERE c.epoch_id=? AND j.state NOT IN ('complete','superseded')
-            """, [.text(epochID.uuidString)])
+    func updateCompletedChunks(epochID: UUID, configurationFingerprint: String,
+                               overlappingRange: Range<Int64>? = nil) throws {
+        let candidates: [SQLRow]
+        if let overlappingRange {
+            candidates = try database.rows("""
+                SELECT c.id,c.start_frame,c.end_frame FROM chunks c JOIN transcription_jobs j ON j.chunk_id=c.id
+                WHERE c.epoch_id=? AND j.state NOT IN ('complete','superseded')
+                  AND c.end_frame > ? AND c.start_frame < ?
+                """, [.text(epochID.uuidString), .integer(overlappingRange.lowerBound), .integer(overlappingRange.upperBound)])
+        } else {
+            candidates = try database.rows("""
+                SELECT c.id,c.start_frame,c.end_frame FROM chunks c JOIN transcription_jobs j ON j.chunk_id=c.id
+                WHERE c.epoch_id=? AND j.state NOT IN ('complete','superseded')
+                """, [.text(epochID.uuidString)])
+        }
         guard !candidates.isEmpty else { return }
-        let coverage = try analyzedRanges(epochID: epochID, fingerprint: configurationFingerprint)
-        let pending = try database.rows("SELECT context_start,context_end FROM analysis_windows WHERE epoch_id=? AND configuration_hash=? AND state!='complete'", [.text(epochID.uuidString), .text(configurationFingerprint)]).map {
+        var minCandidateStart = Int64.max
+        var maxCandidateEnd = Int64.min
+        for row in candidates {
+            minCandidateStart = min(minCandidateStart, try row.requireInt(1))
+            maxCandidateEnd = max(maxCandidateEnd, try row.requireInt(2))
+        }
+        let coverage = try database.rows("""
+            SELECT start_frame,end_frame FROM analysis_coverage
+            WHERE epoch_id=? AND configuration_hash=? AND kind='analyzed'
+              AND end_frame > ? AND start_frame < ?
+            ORDER BY start_frame
+            """, [.text(epochID.uuidString), .text(configurationFingerprint),
+                  .integer(minCandidateStart), .integer(maxCandidateEnd)]).map {
             let start = try $0.requireInt(0), end = try $0.requireInt(1)
             return try FrameRange(start: start, count: end - start)
         }
-        // Build the completed union once per commit. Sorting every historical coverage
-        // row for every chunk makes a long recording progressively more expensive.
-        // Pending context (not just its core) must still protect each intersecting chunk.
-        let completed = try CoverageRanges.subtract(coverage, pending)
+        let mergedCoverage = try CoverageRanges.union(coverage)
+        guard !mergedCoverage.isEmpty else { return }
+        let pending = try database.rows("""
+            SELECT context_start,context_end FROM analysis_windows
+            WHERE epoch_id=? AND configuration_hash=? AND state!='complete'
+              AND context_end > ? AND context_start < ?
+            """, [.text(epochID.uuidString), .text(configurationFingerprint),
+                  .integer(minCandidateStart), .integer(maxCandidateEnd)]).map {
+            let start = try $0.requireInt(0), end = try $0.requireInt(1)
+            return try FrameRange(start: start, count: end - start)
+        }
+        // Build the completed union once per commit. Scoping both coverage and pending
+        // windows to the candidate chunk bounds avoids scanning an entire multi-hour epoch.
+        let completed = try CoverageRanges.subtract(mergedCoverage, pending)
         for row in candidates {
             let start = try row.requireInt(1), end = try row.requireInt(2)
             if completed.contains(where: { $0.start <= start && $0.end >= end }) {

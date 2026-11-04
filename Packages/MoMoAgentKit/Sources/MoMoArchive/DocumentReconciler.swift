@@ -12,6 +12,20 @@ public struct DocumentReconciliation: Sendable {
 extension ArchiveStore {
     /// Reconcile each session independently so one conflicting edit does not hide other changes.
     public func reconcileDocumentFiles(onlyBlockedOrChanged: Bool = false) async throws -> [DocumentReconciliation] {
+        let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
+        do {
+            let results = try await reconcileDocumentFilesImpl(onlyBlockedOrChanged: onlyBlockedOrChanged)
+            performanceMonitor.record(.reconcileDocumentFiles, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: results.count)
+            return results
+        } catch {
+            if !(error is CancellationError) {
+                performanceMonitor.record(.reconcileDocumentFiles, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: 0, failed: true)
+            }
+            throw error
+        }
+    }
+
+    private func reconcileDocumentFilesImpl(onlyBlockedOrChanged: Bool = false) async throws -> [DocumentReconciliation] {
         let ids: [UUID]
         if onlyBlockedOrChanged {
             ids = try database.rows("""
