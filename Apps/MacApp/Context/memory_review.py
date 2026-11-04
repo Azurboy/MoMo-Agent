@@ -39,22 +39,70 @@ def set_state(store, key, value):
                      (key, canonical(value)))
 
 
-def successful_writes(home, session=None):
+def _writes_db_path(home):
+    return Path(home) / "superagent_memory_writes.sqlite"
+
+
+def record_superagent_memory_write(home, session, content):
+    path = _writes_db_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path, timeout=5)) as db:
+        with db:
+            db.execute("""CREATE TABLE IF NOT EXISTS memory_writes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL)""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_memory_writes_session ON memory_writes(session_id, id)")
+            db.execute("INSERT INTO memory_writes(session_id, content, created_at) VALUES(?,?,?)",
+                       (session, content if isinstance(content, str) else json.dumps(content, ensure_ascii=False), time.time()))
+
+
+def _count_success_rows(rows):
+    count = 0
+    for row in rows:
+        try:
+            value = json.loads(row[0] or "null")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict) and value.get("success") is True:
+            count += 1
+    return count
+
+
+def _last_write_content(home, session):
+    sa_path = _writes_db_path(home)
+    if sa_path.exists():
+        with closing(readonly(sa_path)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_writes'").fetchone():
+                row = db.execute("SELECT content FROM memory_writes WHERE session_id=? ORDER BY id DESC LIMIT 1", (session,)).fetchone()
+                if row is not None:
+                    return row[0]
     path = Path(home) / "state.db"
-    if not path.exists():
-        return 0
-    with closing(readonly(path)) as db:
-        query = "SELECT content FROM messages WHERE role='tool' AND tool_name='memory'"
-        rows = db.execute(query + (" AND session_id=?" if session else ""), (session,) if session else ())
-        count = 0
-        for row in rows:
-            try:
-                value = json.loads(row[0] or "null")
-            except (ValueError, TypeError):
-                continue
-            if isinstance(value, dict) and value.get("success") is True:
-                count += 1
-        return count
+    if path.exists():
+        with closing(readonly(path)) as db:
+            row = db.execute("SELECT content FROM messages WHERE session_id=? AND role='tool' AND tool_name='memory' ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
+            if row is not None:
+                return row[0]
+    return None
+
+
+def successful_writes(home, session=None):
+    total = 0
+    path = Path(home) / "state.db"
+    if path.exists():
+        with closing(readonly(path)) as db:
+            query = "SELECT content FROM messages WHERE role='tool' AND tool_name='memory'"
+            rows = db.execute(query + (" AND session_id=?" if session else ""), (session,) if session else ())
+            total += _count_success_rows(rows)
+    sa_path = _writes_db_path(home)
+    if sa_path.exists():
+        with closing(readonly(sa_path)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_writes'").fetchone():
+                query = "SELECT content FROM memory_writes"
+                rows = db.execute(query + (" WHERE session_id=?" if session else ""), (session,) if session else ())
+                total += _count_success_rows(rows)
+    return total
 
 
 def outcome(home, session, output):
@@ -70,17 +118,14 @@ def outcome(home, session, output):
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise Conflict("Memory review has no valid completion receipt") from error
     writes = successful_writes(home, session)
-    path = Path(home) / 'state.db'
-    if path.exists():
-        with closing(readonly(path)) as db:
-            last = db.execute("SELECT content FROM messages WHERE session_id=? AND role='tool' AND tool_name='memory' ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
-        if last:
-            try:
-                succeeded = json.loads(last[0]).get('success') is True
-            except (ValueError, TypeError, AttributeError):
-                succeeded = False
-            if not succeeded:
-                raise Conflict('Memory review ended with an unresolved native write failure')
+    last_content = _last_write_content(home, session)
+    if last_content is not None:
+        try:
+            succeeded = json.loads(last_content).get('success') is True
+        except (ValueError, TypeError, AttributeError):
+            succeeded = False
+        if not succeeded:
+            raise Conflict('Memory review ended with an unresolved native write failure')
     if kind == "updated" and not writes:
         raise Conflict("Memory review claimed an update without a successful native write")
     return {"outcome": "updated" if writes else "no_change", "reason": reason[:500],
@@ -96,6 +141,12 @@ def chat_idle(data, now):
         last = db.execute("SELECT MAX(created_at) FROM messages").fetchone()[0] or 0
         if now - last < CHAT_IDLE_SECONDS:
             return False
+    bridge = Path(data) / "runtime/superagent_bridge.sqlite"
+    if bridge.exists():
+        with closing(readonly(bridge)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_runs'").fetchone():
+                if db.execute("SELECT 1 FROM chat_runs WHERE status IN ('queued','started','waiting_for_input') LIMIT 1").fetchone():
+                    return False
     native = Path(data) / "hermes/state.db"
     if native.exists():
         with closing(readonly(native)) as db:

@@ -156,5 +156,48 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertEqual(1,self.store.db.execute("SELECT attempt FROM memory_reviews WHERE state='pending'").fetchone()[0])
         self.assertIsNone(review.state(self.store,'chat_cursor'))
 
+    def test_superagent_engine_dispatches_reviews_and_respects_bridge_chat_activity(self):
+        (self.data/'runtime/engine.json').write_text('{"engine":"superagent","proactive_mode":"auto"}\n')
+        self.message(1,'记住我每天早上八点开始新的一天。',at=100)
+        bridge=sqlite3.connect(self.data/'runtime/superagent_bridge.sqlite');self.addCleanup(bridge.close)
+        bridge.executescript("CREATE TABLE chat_runs(run_id TEXT PRIMARY KEY,status TEXT); INSERT INTO chat_runs VALUES('r1','started');")
+        self.assertFalse(review.chat_idle(self.data,200))
+        bridge.execute("UPDATE chat_runs SET status='completed'");bridge.commit()
+        self.assertTrue(review.chat_idle(self.data,200))
+
+        review.set_state(self.store,'v2_migrated',True)
+        service=ContextService.__new__(ContextService)
+        service.data=self.data;service.directory=self.data/'context';service.next_dispatch=0
+        from unittest.mock import Mock
+        service.stopped=Mock();service.stopped.wait.side_effect=[False,True]
+        service.advance_review=Mock();service.advance_job=Mock()
+        service.dispatch()
+        self.assertEqual('chat',service.advance_review.call_args.args[1]['kind'])
+
+    def test_superagent_memory_review_session_writes_hermes_memory_and_verifies_receipt(self):
+        from superagent_gateway import SuperAgentGateway
+        gateway=SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data=self.data
+        session='momo-review-sa-1'
+        system_prompt,tool_specs,execute_tool=gateway._build_memory_review_session(session)
+        self.assertIn('empty',system_prompt)
+        self.assertEqual({'memory','read_recording','session_search'},{t['name'] for t in tool_specs})
+
+        payload=json.dumps({'memory_review':{'outcome':'updated','reason':'保存了每日起点偏好'}})
+        with self.assertRaises(Conflict):
+            review.outcome(self.data/'hermes',session,payload)
+
+        bad_res=json.loads(execute_tool('memory',{'target':'user','action':'patch','old_text':'不存在','content':'新内容'}))
+        self.assertFalse(bad_res['success'])
+        with self.assertRaises(Conflict):
+            review.outcome(self.data/'hermes',session,json.dumps({'memory_review':{'outcome':'no_change','reason':'失败后未重试'}}))
+
+        ok_res=json.loads(execute_tool('memory',{'target':'user','action':'add','content':'偏好每天 08:00 作为日程与转录分日起点。'}))
+        self.assertTrue(ok_res['success'])
+        verified=review.outcome(self.data/'hermes',session,payload)
+        self.assertEqual('updated',verified['outcome'])
+        self.assertEqual(1,verified['native_writes'])
+        self.assertIn('08:00',(self.data/'hermes/memories/USER.md').read_text(encoding='utf-8'))
+
 
 if __name__=='__main__':unittest.main()
