@@ -733,6 +733,46 @@ final class PhoneReceiveStatusTests: XCTestCase {
         await fulfillment(of: [identityReplied, watchNotified], timeout: 5.0)
         XCTAssertTrue(try watchInbox.pending().contains(.receiverIdentity(fixture.identity)))
     }
+
+    func testMultiPageInboxDrainKeepsCallbacksOnMainActorAndCoalescesNotifications() async throws {
+        let fixture = try await Fixture()
+        let coordinator = fixture.coordinator()
+        var writer = try PCM16SegmentWriter(
+            directory: fixture.root.appendingPathComponent("capture-batch"),
+            sessionID: UUID(),
+            epochID: UUID(),
+            sourceDeviceID: fixture.source,
+            sourceBuild: "status-test",
+            sourceKind: .watch,
+            targetFrames: 800,
+            wallClockAnchor: Date(),
+            timezoneOffset: 28800
+        )
+        var expectedChunkIDs: Set<UUID> = []
+        for index in 0..<70 {
+            let sealed = try XCTUnwrap(writer.append([Int16](repeating: Int16(index + 1), count: 800)).first)
+            expectedChunkIDs.insert(sealed.envelope.manifest.chunkID)
+            _ = try fixture.archive.inbox.preserve(fileURL: sealed.audioURL, envelope: sealed.envelope)
+        }
+        var receivedChunkIDs: [UUID] = []
+        var changedCount = 0
+        coordinator.onAudioReceived = { id in
+            MainActor.assertIsolated()
+            receivedChunkIDs.append(id)
+        }
+        coordinator.onChanged = {
+            MainActor.assertIsolated()
+            changedCount += 1
+            _ = try? await fixture.archive.pendingReceiptCount()
+        }
+        await coordinator.reconcile()
+        XCTAssertEqual(receivedChunkIDs.count, 70)
+        XCTAssertEqual(Set(receivedChunkIDs), expectedChunkIDs)
+        let remainingInbox = try await fixture.archive.listPendingInboxItems(limit: 10)
+        XCTAssertTrue(remainingInbox.isEmpty)
+        XCTAssertGreaterThanOrEqual(changedCount, 2)
+        XCTAssertLessThanOrEqual(changedCount, 6)
+    }
 }
 
 private actor PhoneReceiptRecoverySleeper {

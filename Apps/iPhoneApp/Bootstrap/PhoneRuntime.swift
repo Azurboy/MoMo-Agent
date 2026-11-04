@@ -470,7 +470,8 @@ final class PhoneRuntime {
         await transcription?.setAnalysisPrefetchEnabled(foregroundAllowed)
         await transcription?.setHistoricalWorkAllowed(foregroundAllowed,
             constraint: PhoneBackgroundTasks.currentProcessingConstraint(foreground: true))
-        if !ready {
+        let startedCold = !ready
+        if startedCold {
             receivedAudioTranscription?.expire(reason: .interrupted)
             await start()
         }
@@ -488,7 +489,7 @@ final class PhoneRuntime {
             catch { refreshFailure = String(localized: "资料界面尚未更新：\(error.localizedDescription)"); return }
             guard isForeground else { return }
             libraryPresentationDeferred = false
-        } else {
+        } else if !startedCold {
             await refresh(reconcileFiles: true)
             guard isForeground else { return }
         }

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import MoMoContracts
 
-struct FileStatStamp: Equatable {
+struct FileStatStamp: Sendable, Equatable {
     let mode: UInt16
     let inode: UInt64
     let size: Int64
@@ -41,6 +41,18 @@ struct VerifiedRecordingFilesEntry: Equatable {
     let manifestFileStamp: FileStatStamp?
     let jsonFileStamp: FileStatStamp?
     let markdownFileStamp: FileStatStamp?
+}
+
+struct VerifiedDirectoryIdentityEntry: Equatable {
+    let directoryPath: String
+    let manifestStamp: FileStatStamp
+    let minimumChunkCount: Int64
+}
+
+struct VerifiedManifestProjectionStamp: Equatable {
+    let directoryPath: String
+    let manifestStamp: FileStatStamp
+    let chunkCount: Int64
 }
 
 struct RecordingFileInspection {
@@ -116,6 +128,7 @@ extension ArchiveStore {
         try database.execute("UPDATE sessions SET projection_version=?,projection_hash=?,projection_blocked=0,manifest_projected=1 WHERE id=?", [
             .integer(document?.version ?? 0), projectionHash, .text(issue.sessionID.uuidString)
         ])
+        recordVerifiedManifestProjection(sessionID: issue.sessionID, manifestURL: directory.appendingPathComponent("manifest.json"), chunkCount: Int64(chunks.count))
         cacheVerifiedRecordingFiles(sessionID: issue.sessionID)
         return action == .restoreDatabase ? .restored(version: document?.version ?? 0) : .revised(version: document?.version ?? 0)
     }
@@ -175,10 +188,80 @@ extension ArchiveStore {
         )
     }
 
+    func recordVerifiedManifestProjection(sessionID: UUID, manifestURL: URL, chunkCount: Int64) {
+        guard !database.isInTransaction,
+              let stamp = FileStatStamp.read(at: manifestURL),
+              (stamp.mode & UInt16(S_IFMT)) == UInt16(S_IFREG) else {
+            verifiedManifestProjectionStamps.removeValue(forKey: sessionID)
+            return
+        }
+        let directoryPath = manifestURL.deletingLastPathComponent().standardizedFileURL.path
+        verifiedRecordingFilesDataVersion = (try? database.rows("PRAGMA data_version").first?.requireInt(0)) ?? verifiedRecordingFilesDataVersion
+        verifiedManifestProjectionStamps[sessionID] = VerifiedManifestProjectionStamp(
+            directoryPath: directoryPath,
+            manifestStamp: stamp,
+            chunkCount: chunkCount
+        )
+        verifiedDirectoryIdentityCache[sessionID] = VerifiedDirectoryIdentityEntry(
+            directoryPath: directoryPath,
+            manifestStamp: stamp,
+            minimumChunkCount: chunkCount
+        )
+    }
+
+    func refreshVerifiedRecordingFilesAfterChunkCommit(sessionID: UUID) {
+        guard !database.isInTransaction,
+              let existing = verifiedRecordingFilesCache[sessionID] else {
+            verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+            return
+        }
+        guard let row = try? database.rows(
+            "SELECT document_directory,transcript_version,generation,projection_version,manifest_projected,(SELECT COUNT(*) FROM chunks WHERE session_id=sessions.id) FROM sessions WHERE id=? AND deleted=0",
+            [.text(sessionID.uuidString)]
+        ).first,
+        let relative = row.string(0),
+        relative == existing.relativeDirectory,
+        (try? row.requireInt(1)) == existing.transcriptVersion,
+        (try? row.requireInt(2)) == existing.generation,
+        (try? row.requireInt(3)) == existing.projectionVersion,
+        (row.integer(4) == 1) == existing.manifestProjected else {
+            verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+            return
+        }
+        let chunkCount = row.integer(5) ?? 0
+        let directory = rootURL.appendingPathComponent(relative, isDirectory: true)
+        let audioDir = directory.appendingPathComponent("audio", isDirectory: true)
+        guard (try? validateRecordingPath(audioDir)) != nil,
+              let dirStamp = FileStatStamp.read(at: directory), dirStamp == existing.directoryStamp,
+              let audioStamp = FileStatStamp.read(at: audioDir), (audioStamp.mode & UInt16(S_IFMT)) == UInt16(S_IFDIR),
+              FileStatStamp.read(at: directory.appendingPathComponent("manifest.json")) == existing.manifestFileStamp,
+              FileStatStamp.read(at: directory.appendingPathComponent("transcript.json")) == existing.jsonFileStamp,
+              FileStatStamp.read(at: directory.appendingPathComponent("transcript.md")) == existing.markdownFileStamp else {
+            verifiedRecordingFilesCache.removeValue(forKey: sessionID)
+            return
+        }
+        verifiedRecordingFilesDataVersion = (try? database.rows("PRAGMA data_version").first?.requireInt(0)) ?? verifiedRecordingFilesDataVersion
+        verifiedRecordingFilesCache[sessionID] = VerifiedRecordingFilesEntry(
+            relativeDirectory: relative,
+            transcriptVersion: existing.transcriptVersion,
+            generation: existing.generation,
+            projectionVersion: existing.projectionVersion,
+            manifestProjected: existing.manifestProjected,
+            chunkCount: chunkCount,
+            directoryStamp: dirStamp,
+            audioDirectoryStamp: audioStamp,
+            manifestFileStamp: existing.manifestFileStamp,
+            jsonFileStamp: existing.jsonFileStamp,
+            markdownFileStamp: existing.markdownFileStamp
+        )
+    }
+
     func inspectRecordingFiles(sessionID: UUID, allowRelocation: Bool = true) throws -> RecordingFileInspection {
         let externalVersion = try database.rows("PRAGMA data_version").first?.requireInt(0) ?? 0
         if externalVersion != verifiedRecordingFilesDataVersion {
             verifiedRecordingFilesCache.removeAll()
+            verifiedDirectoryIdentityCache.removeAll()
+            verifiedManifestProjectionStamps.removeAll()
             verifiedRecordingFilesDataVersion = externalVersion
         }
         guard let row = try database.rows(
@@ -250,38 +333,65 @@ extension ArchiveStore {
             }
             if hashes[name] == nil { hashes[name] = data[name].map(ContentHash.sha256) ?? "missing" }
         }
-        let document = try currentTranscriptOrNil(sessionID: sessionID)
-        let currentJSON = try document.map { try WireJSON.encode($0) }
-        let currentMarkdown = document.map { Data(transcriptMarkdown($0).utf8) }
-        let currentLegacyMarkdown = document.map { Data(legacyTranscriptMarkdown($0).utf8) }
-        var actions: [RecordingFileRecoveryAction] = [.restoreDatabase]
-        var edits: [RecordingFileRecoveryAction: [TranscriptSpan]] = [:]
-        if let document {
-            for action in [RecordingFileRecoveryAction.useJSON, .useMarkdown] {
-                let bytes = data[action == .useJSON ? "transcript.json" : "transcript.md"]
-                if let bytes {
-                    do {
-                        // Unchanged app projections already carry the authoritative span identities.
-                        let unchanged = action == .useJSON
-                            ? (bytes == currentJSON)
-                            : (bytes == currentMarkdown || bytes == currentLegacyMarkdown)
-                        edits[action] = unchanged ? document.spans : try editedSpans(bytes, action: action, original: document)
-                        actions.append(action)
-                    } catch is DecodingError { /* Invalid edits remain visible and require a different choice. */ }
-                    catch ArchiveError.invalidTranscript { }
-                    catch ArchiveError.projectionConflict { }
-                    catch ArchiveError.staleSource { }
+        struct LoadedRecoveryContext {
+            let document: TranscriptDocument?
+            let currentJSON: Data?
+            let currentMarkdown: Data?
+            let currentLegacyMarkdown: Data?
+            let actions: [RecordingFileRecoveryAction]
+            let edits: [RecordingFileRecoveryAction: [TranscriptSpan]]
+        }
+        var cachedRecoveryContext: LoadedRecoveryContext?
+        func recoveryContext() throws -> LoadedRecoveryContext {
+            if let cachedRecoveryContext { return cachedRecoveryContext }
+            let document = try currentTranscriptOrNil(sessionID: sessionID)
+            let currentJSON = try document.map { try WireJSON.encode($0) }
+            let currentMarkdown = document.map { Data(transcriptMarkdown($0).utf8) }
+            let currentLegacyMarkdown = document.map { Data(legacyTranscriptMarkdown($0).utf8) }
+            var actions: [RecordingFileRecoveryAction] = [.restoreDatabase]
+            var edits: [RecordingFileRecoveryAction: [TranscriptSpan]] = [:]
+            if let document {
+                for action in [RecordingFileRecoveryAction.useJSON, .useMarkdown] {
+                    let bytes = data[action == .useJSON ? "transcript.json" : "transcript.md"]
+                    if let bytes {
+                        do {
+                            // Unchanged app projections already carry the authoritative span identities.
+                            let unchanged = action == .useJSON
+                                ? (bytes == currentJSON)
+                                : (bytes == currentMarkdown || bytes == currentLegacyMarkdown)
+                            edits[action] = unchanged ? document.spans : try editedSpans(bytes, action: action, original: document)
+                            actions.append(action)
+                        } catch is DecodingError { /* Invalid edits remain visible and require a different choice. */ }
+                        catch ArchiveError.invalidTranscript { }
+                        catch ArchiveError.projectionConflict { }
+                        catch ArchiveError.staleSource { }
+                    }
                 }
             }
+            actions.append(.deleteRecording)
+            let built = LoadedRecoveryContext(
+                document: document,
+                currentJSON: currentJSON,
+                currentMarkdown: currentMarkdown,
+                currentLegacyMarkdown: currentLegacyMarkdown,
+                actions: actions,
+                edits: edits
+            )
+            cachedRecoveryContext = built
+            return built
         }
-        actions.append(.deleteRecording)
         var required: [String] = projected > 0 ? ["transcript.json", "transcript.md"] : []
         if row.integer(4) == 1 { required.append("manifest.json") }
-        if !invalidFiles.isEmpty { return try problem(.invalidEdit, hashes: hashes, actions: actions) }
+        if !invalidFiles.isEmpty {
+            return try problem(.invalidEdit, hashes: hashes, actions: recoveryContext().actions)
+        }
         let missing = required.filter { data[$0] == nil }
-        if !missing.isEmpty { return try problem(.missingFiles, missing: missing, hashes: hashes, actions: actions) }
-        if data["manifest.json"] != nil, try directoryIdentity(directory) != sessionID {
-            return try problem(.invalidEdit, hashes: hashes, actions: actions)
+        if !missing.isEmpty {
+            return try problem(.missingFiles, missing: missing, hashes: hashes, actions: recoveryContext().actions)
+        }
+        if data["manifest.json"] != nil,
+           !(try verifiedDirectoryIdentityMatches(directory, expectedSessionID: sessionID, chunkCount: chunkCount)) {
+            return try problem(.invalidEdit, hashes: hashes, actions: recoveryContext().actions)
         }
         let audioDirectory = directory.appendingPathComponent("audio", isDirectory: true)
         do { try validateRecordingPath(audioDirectory) }
@@ -289,14 +399,9 @@ extension ArchiveStore {
         if !files.fileExists(atPath: audioDirectory.path) {
             return try problem(.missingFiles, missing: ["audio"], hashes: hashes, actions: [.restoreDatabase, .deleteRecording])
         }
-        // Initial projection has no prior files. Appends compare against the last projected version.
-        if projected == 0, document != nil {
-            if let json = data["transcript.json"], json != currentJSON {
-                return try problem(.invalidEdit, hashes: hashes, actions: actions)
-            }
-            if let markdown = data["transcript.md"], markdown != currentMarkdown && markdown != currentLegacyMarkdown {
-                return try problem(.invalidEdit, hashes: hashes, actions: actions)
-            }
+        if projected == 0 && data["transcript.json"] == nil && data["transcript.md"] == nil {
+            cacheVerifiedRecordingFiles(sessionID: sessionID)
+            return RecordingFileInspection(issue: nil, automaticEdit: nil)
         }
         if projected > 0,
            let projectionHash,
@@ -305,6 +410,22 @@ extension ArchiveStore {
            ContentHash.sha256(existingJSON + existingMarkdown) == projectionHash {
             cacheVerifiedRecordingFiles(sessionID: sessionID)
             return RecordingFileInspection(issue: nil, automaticEdit: nil)
+        }
+        let context = try recoveryContext()
+        let document = context.document
+        let currentJSON = context.currentJSON
+        let currentMarkdown = context.currentMarkdown
+        let currentLegacyMarkdown = context.currentLegacyMarkdown
+        let actions = context.actions
+        let edits = context.edits
+        // Initial projection has no prior files. Appends compare against the last projected version.
+        if projected == 0, document != nil {
+            if let json = data["transcript.json"], json != currentJSON {
+                return try problem(.invalidEdit, hashes: hashes, actions: actions)
+            }
+            if let markdown = data["transcript.md"], markdown != currentMarkdown && markdown != currentLegacyMarkdown {
+                return try problem(.invalidEdit, hashes: hashes, actions: actions)
+            }
         }
         guard projected > 0, let document else {
             cacheVerifiedRecordingFiles(sessionID: sessionID)
@@ -432,6 +553,33 @@ extension ArchiveStore {
         return data
     }
 
+    private func verifiedDirectoryIdentityMatches(_ directory: URL, expectedSessionID: UUID, chunkCount: Int64) throws -> Bool {
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let normalizedDirectoryPath = directory.standardizedFileURL.path
+        if !database.isInTransaction,
+           let cached = verifiedDirectoryIdentityCache[expectedSessionID],
+           cached.directoryPath == normalizedDirectoryPath,
+           chunkCount >= cached.minimumChunkCount,
+           let stamp = FileStatStamp.read(at: manifestURL),
+           (stamp.mode & UInt16(S_IFMT)) == UInt16(S_IFREG),
+           stamp == cached.manifestStamp {
+            return true
+        }
+        let matches = try directoryIdentity(directory) == expectedSessionID
+        if matches, !database.isInTransaction,
+           let stamp = FileStatStamp.read(at: manifestURL),
+           (stamp.mode & UInt16(S_IFMT)) == UInt16(S_IFREG) {
+            verifiedDirectoryIdentityCache[expectedSessionID] = VerifiedDirectoryIdentityEntry(
+                directoryPath: normalizedDirectoryPath,
+                manifestStamp: stamp,
+                minimumChunkCount: chunkCount
+            )
+        } else if !matches {
+            verifiedDirectoryIdentityCache.removeValue(forKey: expectedSessionID)
+        }
+        return matches
+    }
+
     /// A stable ID must be in a document, not merely in a user-changeable directory name.
     func directoryIdentity(_ directory: URL) throws -> UUID? {
         if let data = try readRecordingFile(directory.appendingPathComponent("manifest.json")) {
@@ -442,6 +590,7 @@ extension ArchiveStore {
                 guard !manifest.chunks.isEmpty, Set(manifest.chunks.map(\.chunkID)).count == manifest.chunks.count,
                       try manifest.chunks.allSatisfy({ item in
                           guard let original = byID[item.chunkID] else { return false }
+                          if item == original { return true }
                           return try WireJSON.encode(item) == WireJSON.encode(original)
                       }) else { return nil }
                 return manifest.sessionID
