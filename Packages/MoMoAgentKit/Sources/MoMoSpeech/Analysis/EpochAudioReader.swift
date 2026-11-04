@@ -59,7 +59,8 @@ final class EpochAudioReader: @unchecked Sendable {
     private(set) var input: SpeechInputSet
     private var attempt: SpeechAttempt
     private var recorder: SpeechDiagnosticRecorder?
-    private let converter: AVAudioConverter
+    private let isNative16kMono: Bool
+    private let converter: AVAudioConverter?
     private let output: AVAudioPCMBuffer
     private var inputBuffer: AVAudioPCMBuffer?
     private var file: AVAudioFile?
@@ -79,17 +80,26 @@ final class EpochAudioReader: @unchecked Sendable {
         self.allowContinuation = allowContinuation
         self.sourcePosition = input.start
         let m = input.inputs[0].envelope.manifest
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: m.sampleRate,
-                                         channels: AVAudioChannelCount(m.channels), interleaved: false),
-              let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1,
+        let native16kMono = m.sampleRate == 16_000 && m.channels == 1
+        self.isNative16kMono = native16kMono
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1,
                                          interleaved: false),
-              let converter = AVAudioConverter(from: format, to: target),
-              let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 4_096) else {
+              let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: native16kMono ? 16_384 : 4_096) else {
             throw SpeechError.invalidAudio("converter")
         }
-        self.converter = converter; self.output = output
-        converter.primeMethod = .none
-        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+        if native16kMono {
+            self.converter = nil
+        } else {
+            guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: m.sampleRate,
+                                             channels: AVAudioChannelCount(m.channels), interleaved: false),
+                  let converter = AVAudioConverter(from: format, to: target) else {
+                throw SpeechError.invalidAudio("converter")
+            }
+            converter.primeMethod = .none
+            converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+            self.converter = converter
+        }
+        self.output = output
         limit = input.modelFrameCount
     }
 
@@ -157,6 +167,10 @@ final class EpochAudioReader: @unchecked Sendable {
         }
         try attempt.checkCancellation()
         guard emitted < limit else { return nil }
+        if isNative16kMono {
+            return try nextNative16kMono()
+        }
+        guard let converter else { throw SpeechError.invalidAudio("converter") }
         output.frameLength = 0
         callbackError = nil
         var error: NSError?
@@ -194,7 +208,32 @@ final class EpochAudioReader: @unchecked Sendable {
         return result
     }
 
-    private func readSource(maxFrames: AVAudioPacketCount) throws -> AVAudioPCMBuffer? {
+    private func nextNative16kMono() throws -> [Float]? {
+        guard let activeFile = try advanceFileIfNeeded() else {
+            if allowContinuation { return nil }
+            converterPoisoned = true
+            if emitted == limit { return nil }
+            throw SpeechError.invalidAudio("decoded_frame_count")
+        }
+        output.frameLength = 0
+        let frameCap = min(Int64(output.frameCapacity), min(remainingFileFrames, limit - emitted))
+        do { try activeFile.read(into: output, frameCount: AVAudioFrameCount(frameCap)) }
+        catch { let value = error as NSError; throw SpeechError.audioRead(domain: value.domain, code: value.code) }
+        let count = Int(output.frameLength)
+        guard count > 0, let samples = output.floatChannelData?[0] else {
+            throw SpeechError.invalidAudio("truncated_audio")
+        }
+        remainingFileFrames -= Int64(count)
+        sourcePosition += Int64(count)
+        recorder?.value.sourceFramesRead += Int64(count)
+        let result = Array(UnsafeBufferPointer(start: samples, count: count))
+        guard result.allSatisfy(\.isFinite) else { throw SpeechError.invalidAudio("non_finite_pcm") }
+        emitted += Int64(count)
+        recorder?.value.convertedModelFrames += Int64(count)
+        return result
+    }
+
+    private func advanceFileIfNeeded() throws -> AVAudioFile? {
         try attempt.checkCancellation()
         while remainingFileFrames == 0 {
             file = nil
@@ -233,8 +272,13 @@ final class EpochAudioReader: @unchecked Sendable {
             remainingFileFrames = min(m.frames.end, input.end) - m.frames.start - skip
             file = opened
         }
-        guard let file, let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
-                                                     frameCapacity: min(maxFrames, 4_096)) else {
+        return file
+    }
+
+    private func readSource(maxFrames: AVAudioPacketCount) throws -> AVAudioPCMBuffer? {
+        guard let file = try advanceFileIfNeeded() else { return nil }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                            frameCapacity: min(maxFrames, 4_096)) else {
             throw SpeechError.invalidAudio("input_buffer")
         }
         do { try file.read(into: buffer, frameCount: AVAudioFrameCount(min(Int64(buffer.frameCapacity), remainingFileFrames))) }

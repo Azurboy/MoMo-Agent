@@ -110,13 +110,29 @@ final class PhoneBackgroundTasks {
         return lowPower ? .lowPower : nil
     }
 
+    static func processingConstraint(foreground: Bool, lowPower: Bool, thermalState: ProcessInfo.ThermalState) -> TranscriptionResourceConstraint? {
+        if thermalState == .critical { return .thermalPressure }
+        if foreground { return nil }
+        return lowPower ? .lowPower : nil
+    }
+
     static var currentProcessingConstraint: TranscriptionResourceConstraint? {
         processingConstraint(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
             thermalState: ProcessInfo.processInfo.thermalState)
     }
 
+    static func currentProcessingConstraint(foreground: Bool) -> TranscriptionResourceConstraint? {
+        processingConstraint(foreground: foreground,
+            lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            thermalState: ProcessInfo.processInfo.thermalState)
+    }
+
     static var resourcesAllowProcessing: Bool {
         currentProcessingConstraint == nil
+    }
+
+    static func resourcesAllowProcessing(foreground: Bool) -> Bool {
+        currentProcessingConstraint(foreground: foreground) == nil
     }
 
     private func resourcesChanged() {

@@ -8,11 +8,14 @@ public enum AutomaticProcessingWork: Sendable {
 
 public struct LivePriorityWorkSummary: Sendable, Equatable {
     public let hasHotLiveWork: Bool
+    public let hasUltraHotLiveWork: Bool
     public let hasTodayUnreservedWork: Bool
     public let hotPendingSeconds: Double
 
-    public init(hasHotLiveWork: Bool, hasTodayUnreservedWork: Bool, hotPendingSeconds: Double) {
+    public init(hasHotLiveWork: Bool, hasTodayUnreservedWork: Bool, hotPendingSeconds: Double,
+                hasUltraHotLiveWork: Bool = false) {
         self.hasHotLiveWork = hasHotLiveWork
+        self.hasUltraHotLiveWork = hasUltraHotLiveWork
         self.hasTodayUnreservedWork = hasTodayUnreservedWork
         self.hotPendingSeconds = hotPendingSeconds
     }
@@ -44,7 +47,7 @@ extension ArchiveStore {
         return nil
     }
 
-    /// Summarizes unreserved priority-0 work, separating the recent 15-minute live hot window from earlier same-day backlog.
+    /// Summarizes unreserved priority-0 work, separating the recent 5-minute live hot window from earlier same-day backlog.
     public func livePriorityWorkSummary(configurationFingerprint: String, now: Date = Date(),
                                         calendar: Calendar = .current) throws -> LivePriorityWorkSummary {
         guard ContentHash.isValid(configurationFingerprint), now.timeIntervalSince1970.isFinite else {
@@ -52,6 +55,7 @@ extension ArchiveStore {
         }
         let policy = ProcessingDatePolicy(now: now, calendar: calendar)
         var hasHotLive = false
+        var hasUltraHot = false
         var hasToday = false
         var hotSeconds = 0.0
         for row in try database.rows("""
@@ -88,6 +92,9 @@ extension ArchiveStore {
                     if policy.isHotLive(window.coreFrames, manifest: manifest) {
                         hasHotLive = true
                         hotSeconds += Double(window.coreFrames.count) / rate
+                        if policy.isUltraHotLive(window.coreFrames, manifest: manifest) {
+                            hasUltraHot = true
+                        }
                     }
                 }
             }
@@ -125,12 +132,36 @@ extension ArchiveStore {
                         let runnableEnd = min(frames.end, last.envelope.manifest.frames.end)
                         if runnableEnd > frames.start {
                             hotSeconds += Double(runnableEnd - frames.start) / rate
+                            if let runnableRange = try? FrameRange(start: frames.start, count: runnableEnd - frames.start),
+                               policy.isUltraHotLive(runnableRange, manifest: manifest) {
+                                hasUltraHot = true
+                            }
                         }
                     }
                 }
             }
         }
-        return LivePriorityWorkSummary(hasHotLiveWork: hasHotLive, hasTodayUnreservedWork: hasToday, hotPendingSeconds: hotSeconds)
+        return LivePriorityWorkSummary(hasHotLiveWork: hasHotLive, hasTodayUnreservedWork: hasToday,
+                                       hotPendingSeconds: hotSeconds, hasUltraHotLiveWork: hasUltraHot)
+    }
+
+    public func isHotLiveWindow(_ window: ArchiveAnalysisWindow, now: Date = Date(),
+                                calendar: Calendar = .current) throws -> Bool {
+        guard let row = try database.rows(
+            "SELECT c.manifest FROM epochs e JOIN chunks c ON c.rowid=COALESCE(e.min_chunk_rowid, (SELECT rowid FROM chunks WHERE epoch_id=e.id ORDER BY start_frame LIMIT 1)) WHERE e.id=?",
+            [.text(window.epochID.uuidString)]
+        ).first else { return false }
+        let manifest = try WireJSON.decode(ChunkManifest.self, from: row.requireData(0))
+        return ProcessingDatePolicy(now: now, calendar: calendar).isHotLive(window.coreFrames, manifest: manifest)
+    }
+
+    public nonisolated func isHotLiveAnalysis(_ ticket: EpochAnalysisTicket, now: Date = Date(),
+                                              calendar: Calendar = .current) -> Bool {
+        guard let first = ticket.inputs.first, let last = ticket.inputs.last else { return false }
+        let start = ticket.checkpoint?.sourceFrame ?? first.envelope.manifest.frames.start
+        let end = min(last.envelope.manifest.frames.end, ticket.boundary.endFrame ?? .max)
+        guard end > start, let range = try? FrameRange(start: start, count: end - start) else { return false }
+        return ProcessingDatePolicy(now: now, calendar: calendar).isHotLive(range, manifest: first.envelope.manifest)
     }
 
     /// Returns true when today's / recent live audio (`priority == 0`) has runnable work outside any active batch,
@@ -296,8 +327,9 @@ private struct AutomaticCandidate {
 
 /// Classification follows the recorded local day; recent UTC time protects the midnight handoff.
 struct ProcessingDatePolicy {
-    static let hotWindowSeconds: TimeInterval = 900
-    static let hotCutQuantumSeconds: TimeInterval = 300
+    static let hotWindowSeconds: TimeInterval = 300
+    static let hotCutQuantumSeconds: TimeInterval = 120
+    static let ultraHotWindowSeconds: TimeInterval = 180
 
     let now: Date
     let today: TimelineDay
@@ -313,6 +345,11 @@ struct ProcessingDatePolicy {
     func isHotLive(_ frames: FrameRange, manifest: ChunkManifest) -> Bool {
         let end = manifest.wallClockAnchor.addingTimeInterval(Double(frames.end) / manifest.timebaseHz)
         return end > quantizedHotCutoff
+    }
+
+    func isUltraHotLive(_ frames: FrameRange, manifest: ChunkManifest) -> Bool {
+        let end = manifest.wallClockAnchor.addingTimeInterval(Double(frames.end) / manifest.timebaseHz)
+        return end > now.addingTimeInterval(-Self.ultraHotWindowSeconds)
     }
 
     func overlapsDay(_ day: TimelineDay, frames: FrameRange, manifest: ChunkManifest) -> Bool {

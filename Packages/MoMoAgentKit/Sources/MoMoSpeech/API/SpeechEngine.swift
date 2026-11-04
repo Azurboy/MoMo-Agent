@@ -193,11 +193,7 @@ public final class SpeechEngine: @unchecked Sendable {
     }
 
     private var effectiveCPUThreads: Int {
-        #if os(iOS)
-        return max(1, min(2, configuration.threads))
-        #else
-        return min(4, max(configuration.threads, ProcessInfo.processInfo.processorCount - 2))
-        #endif
+        min(4, max(configuration.threads, ProcessInfo.processInfo.processorCount - 2))
     }
 
     public static var speakerEmbeddingRevision: String { SpeakerRuntime.revision }
@@ -277,6 +273,7 @@ public final class SpeechEngine: @unchecked Sendable {
 
     public func prepareStream(inputs: [SpeechAudioInput], resume: SpeechCheckpoint? = nil,
                               boundary: AudioProcessingBoundary, replayOrigin: Int64? = nil, readAheadAllowed: Bool = true,
+                              lowLatency: Bool = false,
                               attempt: SpeechAttempt = SpeechAttempt()) -> SpeechAnalysisStream {
         let owner = UUID()
         let channel = SpeechAnalysisChannel(attempt: attempt, readAheadAllowed: readAheadAllowed) { [preparedAudio] in
@@ -294,10 +291,11 @@ public final class SpeechEngine: @unchecked Sendable {
                     try channel.waitForDemand(recorder: recorder)
                     if continuousArchive {
                         return try analyze(input: input, boundary: boundary, replayOrigin: replayOrigin,
-                            attempt: attempt, recorder: recorder, archiveStream: (channel, owner))
+                            attempt: attempt, recorder: recorder, archiveStream: (channel, owner),
+                            lowLatency: lowLatency)
                     }
                     return try analyze(input: input, boundary: boundary, replayOrigin: replayOrigin, attempt: attempt,
-                                       recorder: recorder, stream: (channel, owner))
+                                       recorder: recorder, stream: (channel, owner), lowLatency: lowLatency)
                 }
                 channel.finish(.success(()))
             } catch {
@@ -654,8 +652,8 @@ public final class SpeechEngine: @unchecked Sendable {
                             }
                             totalRecognizedFrames += clips.reduce(0) { $0 + Int64($1.samples.count) }
                         }
-                        let droppedCleanTurn = decodedPieces.contains {
-                            !$0.hasWords && $0.turn.evidence.cleanSeconds >= 1.2 && $0.turn.frames.count >= 19_200
+                        let severeCleanTurnDrop = decodedPieces.contains {
+                            !$0.hasWords && $0.turn.evidence.cleanSeconds >= 2.2 && $0.turn.frames.count >= 35_200
                         }
                         if let firstNonEmpty = decodedPieces.firstIndex(where: \.hasWords) {
                             var merged: [SpeakerTurnTranscript] = []
@@ -694,6 +692,10 @@ public final class SpeechEngine: @unchecked Sendable {
                                 split.recognitionFingerprint = firstRaw.recognitionFingerprint
                                 split.speakers = detectedSpeakers
                                 split.speakerTurns = merged
+                                let mergedWordCount = mergedText.filter { $0.isLetter || $0.isNumber }.count
+                                let totalTurnSeconds = Double(turns.reduce(0) { $0 + $1.frames.count }) / 16_000
+                                let droppedCleanTurn = severeCleanTurnDrop
+                                    && mergedWordCount < max(4, Int(totalTurnSeconds * 1.2))
                                 if !droppedCleanTurn || !backgroundCPUPacer.sceneForeground {
                                     return split
                                 }
@@ -980,9 +982,15 @@ public final class SpeechEngine: @unchecked Sendable {
                 executor.async(qos: qos) { [onDiagnostics] in
                     recorder.started()
                     if !isDictation {
+                        pacer.beginOperation()
                         attempt.installStepPoll { current in pacer.paceIfNeeded(attempt: current) }
                     }
-                    defer { if !isDictation { attempt.installStepPoll(nil) } }
+                    defer {
+                        if !isDictation {
+                            attempt.installStepPoll(nil)
+                            pacer.endOperation()
+                        }
+                    }
                     do {
                         if !isDictation, attempt.pollCancellationOrPace() { throw SpeechError.cancelled }
                         try attempt.checkCancellation()
@@ -1052,7 +1060,8 @@ public final class SpeechEngine: @unchecked Sendable {
     private func analyze(input: SpeechInputSet, boundary: AudioProcessingBoundary, replayOrigin: Int64?, attempt: SpeechAttempt,
                          recorder: SpeechDiagnosticRecorder,
                          stream: (channel: SpeechAnalysisChannel, owner: UUID)? = nil,
-                         archiveStream: (channel: SpeechAnalysisChannel, owner: UUID)? = nil) throws -> SpeechAnalysisBatch {
+                         archiveStream: (channel: SpeechAnalysisChannel, owner: UUID)? = nil,
+                         lowLatency: Bool = false) throws -> SpeechAnalysisBatch {
         dispatchPrecondition(condition: .onQueue(analysisQueue))
         try validateBundle(attempt: attempt, recorder: recorder)
         let threshold = voiceActivityThreshold
@@ -1108,7 +1117,8 @@ public final class SpeechEngine: @unchecked Sendable {
             }
             context.retain(from: context.offset(input.start))
             let result = try analyze(input: input, boundary: boundary, context: context,
-                attempt: attempt, recorder: recorder, stream: stream, archiveStream: archiveStream)
+                attempt: attempt, recorder: recorder, stream: stream, archiveStream: archiveStream,
+                lowLatency: lowLatency)
             remember(context)
             return result
         } catch {
@@ -1129,7 +1139,8 @@ public final class SpeechEngine: @unchecked Sendable {
     private func analyze(input: SpeechInputSet, boundary: AudioProcessingBoundary, context: VADContinuation,
                          attempt: SpeechAttempt, recorder: SpeechDiagnosticRecorder,
                          stream: (channel: SpeechAnalysisChannel, owner: UUID)?,
-                         archiveStream: (channel: SpeechAnalysisChannel, owner: UUID)?) throws -> SpeechAnalysisBatch {
+                         archiveStream: (channel: SpeechAnalysisChannel, owner: UUID)?,
+                         lowLatency: Bool = false) throws -> SpeechAnalysisBatch {
         let preserveContinuation: Bool
         if case .processingRange = boundary { preserveContinuation = input.sampleRate == 16_000 }
         else { preserveContinuation = false }
@@ -1142,7 +1153,7 @@ public final class SpeechEngine: @unchecked Sendable {
         let base = context.offset(input.start)
         let lookahead = configuration.paddingFrames * 2
             + Int64((configuration.minimumSpeechSeconds * 16_000).rounded(.up)) + 1_024
-        let pageWindowTarget = input.modelFrameCount >= 2 * configuration.maximumCoreFrames ? archiveBatchSize : 1
+        let pageWindowTarget = (!lowLatency && input.modelFrameCount >= 2 * configuration.maximumCoreFrames) ? archiveBatchSize : 1
         var audio: AnalysisAudioBuffer?
         if stream != nil {
             audio = AnalysisAudioBuffer(capacity: Int(
@@ -1204,7 +1215,7 @@ public final class SpeechEngine: @unchecked Sendable {
         func finishArchiveBatch(_ result: SpeechAnalysisBatch) throws -> SpeechAnalysisBatch {
             if let archiveStream {
                 try publishArchiveAnalysis(result, input: input, channel: archiveStream.channel,
-                    recorder: recorder, cachePage: { windows in
+                    recorder: recorder, lowLatency: lowLatency, cachePage: { windows in
                         try cacheArchiveWindows(windows, owner: archiveStream.owner)
                     })
             } else if stream == nil && continuousArchive {
@@ -1405,13 +1416,15 @@ public final class SpeechEngine: @unchecked Sendable {
 
     private func publishArchiveAnalysis(_ result: SpeechAnalysisBatch, input: SpeechInputSet,
                                          channel: SpeechAnalysisChannel, recorder: SpeechDiagnosticRecorder,
+                                         lowLatency: Bool = false,
                                          cachePage: ([SpeechWindow]) throws -> Void = { _ in }) throws {
         if result.windows.isEmpty {
             try channel.send(SpeechAnalysisPage(batch: result, isFinal: true))
             return
         }
-        for start in stride(from: 0, to: result.windows.count, by: archiveBatchSize) {
-            let end = min(result.windows.count, start + archiveBatchSize)
+        let pageStep = max(1, lowLatency ? 1 : archiveBatchSize)
+        for start in stride(from: 0, to: result.windows.count, by: pageStep) {
+            let end = min(result.windows.count, start + pageStep)
             let final = end == result.windows.count
             let windows = Array(result.windows[start..<end])
             try cachePage(windows)
