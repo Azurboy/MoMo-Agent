@@ -861,6 +861,233 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await client.close()
 
+    async def test_owner_only_proactive_speaker_gating(self) -> None:
+        from superagent_runtime import (
+            DEFAULT_PROACTIVE_RULES,
+            MOMO_PROMPT_CONFIG,
+            classify_transcript_span,
+        )
+
+        # Every proactive rule stays within dsh-superagent's 2000-char instruction schema limit and enforces owner-only origination.
+        for rule in DEFAULT_PROACTIVE_RULES:
+            self.assertLessEqual(len(rule["instruction"]), 2000)
+            self.assertIn("[我（用户本人）]", rule["instruction"])
+            self.assertIn("[他人:...]", rule["instruction"])
+        self.assertIn("本人触发铁律", MOMO_PROMPT_CONFIG["overrides"]["runtime/admission"]["text"])
+        self.assertIn("speaker_role", MOMO_PROMPT_CONFIG["overrides"]["runtime/work"]["text"])
+
+        self.assertEqual(classify_transcript_span({"text": "[我] 我去整理一下文档"}), ("我", True, "我去整理一下文档"))
+        self.assertEqual(
+            classify_transcript_span({"text": "[Yunhao] 我来跟进", "is_owner": True}),
+            ("Yunhao", True, "我来跟进"),
+        )
+        self.assertEqual(
+            classify_transcript_span({"text": "[盛立] 我去把竞品调研做一下"}),
+            ("盛立", False, "我去把竞品调研做一下"),
+        )
+        self.assertEqual(
+            classify_transcript_span({"text": "[说话人 3] 我这边做了一个小型实验"}),
+            ("说话人 3", False, "我这边做了一个小型实验"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "Agent"
+            conn = momo_agent.initialize(data, 19835)
+            api_key = (data / "api-key").read_text(encoding="utf-8").strip()
+            gateway = SuperAgentGateway(
+                data,
+                conn,
+                python_executable=Path(sys.executable),
+                base_env={},
+                manage_dsh=False,
+            )
+            client = TestClient(TestServer(gateway.create_app()))
+            await client.start_server()
+            try:
+                auth = {"Authorization": f"Bearer {api_key}"}
+                bridge_headers = {"X-MoMo-Bridge": gateway.bridge_secret}
+
+                # 1. Other speakers saying "我去 xxx" (plus pure filler backchannel "[我] 嗯。") MUST NOT originate a trigger.
+                cstore = ContextStore(data / "context")
+                try:
+                    other_only_payload = make_source_payload(
+                        "多人讨论（仅他人发言）",
+                        [
+                            "[盛立] 到北京吃饭，跟我去买汉堡去。",
+                            "[说话人 3] 我这边做了一个小型的实验，我去把线上报告拉出来看一下。",
+                            "[我] 嗯。",
+                        ],
+                    )
+                    other_only_payload["ended_at"] = 1761897630.0
+                    synced_other = cstore.sync_source(other_only_payload)
+
+                    # Additive is_owner metadata at the same revision enriches payload without raising a Conflict.
+                    enriched_same_rev = dict(other_only_payload)
+                    enriched_same_rev["spans"] = [
+                        {**other_only_payload["spans"][0], "is_owner": False},
+                        {**other_only_payload["spans"][1], "is_owner": False},
+                        {**other_only_payload["spans"][2], "is_owner": True},
+                    ]
+                    same_receipt = cstore.sync_source(enriched_same_rev)
+                    self.assertEqual(same_receipt["source_revision"], synced_other["source_revision"])
+                finally:
+                    cstore.close()
+
+                ingested_other = await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json()
+                self.assertEqual(ingested_other["count"], 0)
+
+                # 2. When the user ([我]) subsequently speaks in the same conversation, emit owner trigger with prior context preserved!
+                cstore = ContextStore(data / "context")
+                try:
+                    owner_followup_payload = dict(other_only_payload)
+                    owner_followup_payload["version"] = 2
+                    owner_followup_payload["spans"] = [
+                        *other_only_payload["spans"],
+                        {
+                            "id": str(uuid.uuid4()),
+                            "text": "[我] 那我今晚去把我们这边的 API 鉴权方案和灰度清单整理一版出来。",
+                            "recorded_at": 1761897645.0,
+                            "is_owner": True,
+                        },
+                    ]
+                    owner_followup_payload["ended_at"] = 1761897645.0
+                    owner_followup_payload["text_sha256"] = digest(
+                        "\n".join(s["text"] for s in owner_followup_payload["spans"])
+                    )
+                    cstore.sync_source(owner_followup_payload)
+                finally:
+                    cstore.close()
+
+                ingested_owner = await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json()
+                self.assertEqual(ingested_owner["count"], 1)
+                poll_1 = await (
+                    await client.get("/momo/internal/superagent/triggers?after=0", headers=bridge_headers)
+                ).json()
+                self.assertEqual(len(poll_1["events"]), 1)
+                ev1 = poll_1["events"][0]
+                self.assertEqual(ev1["actor_id"], "owner")
+                self.assertIn("[我（用户本人）] 那我今晚去把我们这边的 API 鉴权方案和灰度清单整理一版出来。", ev1["text"])
+                self.assertIn("[近期前文参考]", ev1["text"])
+                self.assertIn("[他人:说话人 3]", ev1["text"])
+
+                ctx_1 = await (
+                    await client.get(
+                        f"/momo/internal/superagent/context?thread_id={ev1['thread_id']}&message_id={ev1['id']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                self.assertEqual(ctx_1["messages"][0]["from"], "owner")
+                self.assertIn("[他人:盛立]", ctx_1["messages"][0]["text"])
+                self.assertIn("[我（用户本人）]", ctx_1["messages"][0]["text"])
+
+                # 3. Non-owner speech on an active live ticket's thread is delivered with actor_id="other" (never "owner").
+                gateway._cached_tickets = [
+                    {
+                        "id": "tkt_live_auth",
+                        "title": "API 鉴权方案整理",
+                        "state": "open",
+                        "stage": "working",
+                        "threads": [f"momo:{ev1['thread_id']}"],
+                    }
+                ]
+                cstore = ContextStore(data / "context")
+                try:
+                    colleague_reply_payload = dict(owner_followup_payload)
+                    colleague_reply_payload["version"] = 3
+                    colleague_reply_payload["spans"] = [
+                        *owner_followup_payload["spans"],
+                        {
+                            "id": str(uuid.uuid4()),
+                            "text": "[盛立] 我去把测试环境的密钥轮换脚本顺便跑一下。",
+                            "recorded_at": 1761897665.0,
+                            "is_owner": False,
+                        },
+                    ]
+                    colleague_reply_payload["ended_at"] = 1761897665.0
+                    colleague_reply_payload["text_sha256"] = digest(
+                        "\n".join(s["text"] for s in colleague_reply_payload["spans"])
+                    )
+                    cstore.sync_source(colleague_reply_payload)
+                finally:
+                    cstore.close()
+
+                ingested_live_other = await (
+                    await client.post("/momo/v1/proactive/ingest", headers=auth, json={})
+                ).json()
+                self.assertEqual(ingested_live_other["count"], 1)
+                poll_2 = await (
+                    await client.get(
+                        f"/momo/internal/superagent/triggers?after={poll_1['next_cursor']}",
+                        headers=bridge_headers,
+                    )
+                ).json()
+                self.assertEqual(poll_2["events"][0]["actor_id"], "other")
+                self.assertIn("[说话人归属提醒：本段无用户本人", poll_2["events"][0]["text"])
+                cleaned_excerpt = gateway._clean_trigger_excerpt(poll_2["events"][0]["text"])
+                self.assertNotIn("[说话人归属提醒：", cleaned_excerpt or "")
+
+                # 4. Live voiceprint cluster upgrade ([说话人 1] -> [我] at same timestamps) emits once upgraded to owner.
+                cstore = ContextStore(data / "context")
+                try:
+                    upgrade_v1 = make_source_payload(
+                        "声纹升级测试",
+                        ["[说话人 1] 我去把下周客户演示的产品路线图整理一版。"],
+                    )
+                    upgrade_v1["ended_at"] = 1761898000.0
+                    cstore.sync_source(upgrade_v1)
+                finally:
+                    cstore.close()
+
+                self.assertEqual(
+                    (await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json())["count"],
+                    0,
+                )
+
+                cstore = ContextStore(data / "context")
+                try:
+                    upgrade_v2 = dict(upgrade_v1)
+                    upgrade_v2["version"] = 2
+                    upgrade_v2["spans"] = [
+                        {
+                            **upgrade_v1["spans"][0],
+                            "text": "[我] 我去把下周客户演示的产品路线图整理一版。",
+                            "is_owner": True,
+                        }
+                    ]
+                    upgrade_v2["text_sha256"] = digest(upgrade_v2["spans"][0]["text"])
+                    cstore.sync_source(upgrade_v2)
+                finally:
+                    cstore.close()
+
+                self.assertEqual(
+                    (await (await client.post("/momo/v1/proactive/ingest", headers=auth, json={})).json())["count"],
+                    1,
+                )
+
+                # 5. momo_cli recording & search expose explicit speaker_role ('owner' vs 'other').
+                cli_script = REPOSITORY / "Apps/MacApp/Runtime/momo_cli.py"
+                rec_out = json.loads(
+                    subprocess.check_output(
+                        [sys.executable, str(cli_script), "--data-dir", str(data), "recording", synced_other["source_id"]],
+                        text=True,
+                    )
+                )
+                roles = [ (s.get("speaker"), s.get("speaker_role")) for s in rec_out["spans"] ]
+                self.assertEqual(
+                    roles,
+                    [("盛立", "other"), ("说话人 3", "other"), ("我", "owner"), ("我", "owner"), ("盛立", "other")],
+                )
+                search_out = json.loads(
+                    subprocess.check_output(
+                        [sys.executable, str(cli_script), "--data-dir", str(data), "search", "实验"],
+                        text=True,
+                    )
+                )
+                self.assertEqual(search_out["matches"][0]["speaker"], "说话人 3")
+                self.assertEqual(search_out["matches"][0]["speaker_role"], "other")
+            finally:
+                await client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,7 +39,10 @@ from superagent_computer import SuperAgentComputer
 from push_notifications import PushOutbox, load_provider
 from runtime_engine import PROACTIVE_MODES, read_engine_config, write_engine_config
 from superagent_runtime import (
+    classify_transcript_span,
     dsh_api_request,
+    format_transcript_span_line,
+    is_filler_only_utterance,
     node_environment,
     prepare_dsh_instance,
     prepare_superagent,
@@ -257,16 +260,19 @@ class BridgeStore:
     def coalesce_unpolled_transcripts(self, *, max_chars: int = 2400) -> int:
         """Merge backlogged micro-chunk transcript triggers for the same (source_id, thread_id) while preserving monotonic seq."""
         rows = self.db.execute(
-            """SELECT seq, thread_id, source_id, title, text
+            """SELECT seq, thread_id, source_id, actor_id, title, text
                FROM triggers
                WHERE polled_at IS NULL AND kind='transcripts' AND source_id IS NOT NULL
                ORDER BY seq ASC"""
         ).fetchall()
         if len(rows) <= 1:
             return 0
-        by_group: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        by_group: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
         for row in rows:
-            by_group.setdefault((str(row["source_id"]), str(row["thread_id"] or "")), []).append(row)
+            by_group.setdefault(
+                (str(row["source_id"]), str(row["thread_id"] or ""), str(row["actor_id"] or "")),
+                [],
+            ).append(row)
 
         def _split_header_and_body(raw_text: str) -> tuple[str, str]:
             lines = raw_text.strip().splitlines()
@@ -279,6 +285,7 @@ class BridgeStore:
                     or stripped.startswith("[⚠️")
                     or stripped.startswith("[日期参考：")
                     or stripped.startswith("[近期相关工单：")
+                    or stripped.startswith("[说话人归属提醒：")
                 ):
                     hdr.append(stripped)
                     idx += 1
@@ -288,7 +295,7 @@ class BridgeStore:
 
         to_delete: list[int] = []
         to_update: list[tuple[str, int]] = []
-        for (sid, _), group in by_group.items():
+        for (sid, _, _), group in by_group.items():
             if len(group) <= 1:
                 continue
             bucket_rows: list[sqlite3.Row] = []
@@ -1077,6 +1084,10 @@ class SuperAgentGateway:
                     (float(s.get("recorded_at") or 0.0) for s in spans if isinstance(s, dict)),
                     default=prev_last_ts,
                 )
+                has_emitted_for_source = (
+                    self.bridge.db.execute("SELECT 1 FROM triggers WHERE source_id=? LIMIT 1", (sid,)).fetchone()
+                    is not None
+                )
                 if watermark is None:
                     indexed_new = [(idx, s) for idx, s in enumerate(spans)]
                 else:
@@ -1086,21 +1097,32 @@ class SuperAgentGateway:
                         if idx > prev_max and (prev_last_ts <= 0.0 or float(s.get("recorded_at") or 0.0) > prev_last_ts)
                     ]
                     if not indexed_new:
-                        # Non-append metadata/diarization/summary revision: advance watermark silently without re-triggering!
-                        with self.bridge.db:
-                            self.bridge.db.execute(
-                                "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
-                                (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
-                            )
-                        continue
+                        if not has_emitted_for_source and any(
+                            classify_transcript_span(s)[1] is True
+                            and not is_filler_only_utterance(classify_transcript_span(s)[2])
+                            for s in spans
+                            if isinstance(s, dict)
+                        ):
+                            # Live cluster-to-owner voiceprint upgrade or manual "[说话人 N] -> [我]" correction
+                            # on a source that previously emitted nothing because no owner speech was recognized yet.
+                            indexed_new = [(idx, s) for idx, s in enumerate(spans)]
+                        else:
+                            # Non-append metadata/diarization/summary revision: advance watermark silently without re-triggering!
+                            with self.bridge.db:
+                                self.bridge.db.execute(
+                                    "INSERT OR REPLACE INTO source_watermarks(source_id, revision, max_seq, updated_at, last_recorded_at) VALUES(?,?,?,?,?)",
+                                    (sid, rev, max_seq, now, max(prev_last_ts, max_span_ts)),
+                                )
+                            continue
                 new_spans = [s for _, s in indexed_new]
 
                 transcript_lines = []
                 for span in new_spans:
                     ts = float(span.get("recorded_at") or now)
                     dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-                    speaker = f"{span['speaker']}: " if span.get("speaker") else ""
-                    transcript_lines.append(f"[{dt_str}] {speaker}{span.get('text', '')}")
+                    formatted_line = format_transcript_span_line(dt_str, span)
+                    if formatted_line:
+                        transcript_lines.append(formatted_line)
                 full_new_body = "\n".join(transcript_lines).strip()
                 if not full_new_body:
                     with self.bridge.db:
@@ -1162,6 +1184,15 @@ class SuperAgentGateway:
                     if isinstance(t, dict) and (t.get("ended") or t.get("state") == "ended")
                     for th_s in self._thread_keys(t.get("threads"))
                 }
+                live_threads = {
+                    th_s
+                    for t in self._cached_tickets
+                    if isinstance(t, dict) and not (t.get("ended") or t.get("state") == "ended")
+                    for th_s in self._thread_keys(t.get("threads"))
+                }
+                source_is_attributed = any(
+                    classify_transcript_span(s)[1] is not None for s in spans if isinstance(s, dict)
+                )
                 recent_tickets = self._recent_proactive_ticket_summaries(source_id=sid, now=now, max_items=6)
                 recent_ticket_note = ""
                 if recent_tickets:
@@ -1180,16 +1211,59 @@ class SuperAgentGateway:
 
                 for seg_idx, seg_first_idx, seg_spans in segment_groups:
                     seg_lines = []
+                    seg_has_substantive_owner = False
+                    seg_has_other = False
                     for span in seg_spans:
                         ts = float(span.get("recorded_at") or now)
                         dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-                        speaker = f"{span['speaker']}: " if span.get("speaker") else ""
-                        txt_val = str(span.get("text") or "").strip()
-                        if txt_val:
-                            seg_lines.append(f"[{dt_str}] {speaker}{txt_val}")
+                        _, spk_is_owner, spk_body = classify_transcript_span(span)
+                        if not spk_body:
+                            continue
+                        if spk_is_owner is True:
+                            if not is_filler_only_utterance(spk_body):
+                                seg_has_substantive_owner = True
+                        elif spk_is_owner is False:
+                            seg_has_other = True
+                        formatted_line = format_transcript_span_line(dt_str, span)
+                        if formatted_line:
+                            seg_lines.append(formatted_line)
                     body = "\n".join(seg_lines).strip()
                     if not body:
                         continue
+
+                    base_thread = f"transcript:{sid}:s{seg_idx}"
+                    candidate_thread = base_thread
+                    suffix_idx = 1
+                    while f"momo:{candidate_thread}" in ended_threads:
+                        suffix_idx += 1
+                        candidate_thread = f"{base_thread}:r{suffix_idx}"
+
+                    if source_is_attributed or seg_has_other:
+                        if not seg_has_substantive_owner:
+                            # Never start proactive tasks from other speakers' utterances (e.g. colleague saying "我去 xxx").
+                            # Only deliver as non-owner follow-up context when a live open ticket already subscribes to this thread.
+                            if f"momo:{candidate_thread}" not in live_threads:
+                                continue
+                            actor_id = "other"
+                            actor_name = "Other Speaker (Voice Transcript)"
+                            speaker_note = (
+                                "[说话人归属提醒：本段无用户本人 [我（用户本人）] 的实质发言，仅包含其他说话人发言或简短附和，"
+                                "仅供当前活跃工单补充对话上下文参考，严禁据此新建工单或承接他人的任务。]\n"
+                            )
+                        else:
+                            actor_id = "owner"
+                            actor_name = "User (Voice Transcript)"
+                            speaker_note = (
+                                "[说话人归属提醒：本段为多人对话。仅标记为 [我（用户本人）] 的原话代表用户本人；"
+                                "标记为 [他人:...] 的原话（包括其中的第一人称“我去/我来/我这边...”）均属于其他说话人自己的行为或工作，"
+                                "绝不能把别人说的“我去 xxx”当成给用户建单的依据！]\n"
+                                if seg_has_other
+                                else ""
+                            )
+                    else:
+                        actor_id = "owner"
+                        actor_name = "User (Voice Transcript)"
+                        speaker_note = ""
 
                     context_prefix = ""
                     if seg_first_idx > 0:
@@ -1200,10 +1274,9 @@ class SuperAgentGateway:
                             pspan = spans[pidx]
                             pts = float(pspan.get("recorded_at") or now)
                             pdt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pts))
-                            pspeaker = f"{pspan['speaker']}: " if pspan.get("speaker") else ""
-                            ptxt = str(pspan.get("text") or "").strip()
-                            if ptxt:
-                                prior_lines.append(f"[{pdt_str}] {pspeaker}{ptxt}")
+                            pline = format_transcript_span_line(pdt_str, pspan)
+                            if pline:
+                                prior_lines.append(pline)
                         if prior_lines:
                             prior_joined = "\n".join(prior_lines)[-520:]
                             context_prefix = f"[近期前文参考]\n{prior_joined}\n[本次新增转写]\n"
@@ -1233,13 +1306,6 @@ class SuperAgentGateway:
                     else:
                         sync_status = "实时同步" if lag_seconds < 600 else f"当日补同步（滞后 {int(lag_seconds // 60)} 分钟）"
 
-                    base_thread = f"transcript:{sid}:s{seg_idx}"
-                    candidate_thread = base_thread
-                    suffix_idx = 1
-                    while f"momo:{candidate_thread}" in ended_threads:
-                        suffix_idx += 1
-                        candidate_thread = f"{base_thread}:r{suffix_idx}"
-
                     event_id = (
                         f"transcript:{sid}:{rev[:24]}"
                         if len(segment_groups) == 1
@@ -1248,7 +1314,7 @@ class SuperAgentGateway:
                     trigger_id = f"momo:{event_id}"
                     text = (
                         f"[MoMo 同步录音转写 | source_id={sid} | 标题={title} | 录音时间={rec_time_label} | 当前时间={now_str} | 同步状态={sync_status}]\n"
-                        f"{date_anchor_note}{recent_ticket_note}{context_prefix}{body}"
+                        f"{date_anchor_note}{recent_ticket_note}{speaker_note}{context_prefix}{body}"
                     )
                     self.bridge.enqueue_trigger(
                         trigger_id=trigger_id,
@@ -1257,8 +1323,8 @@ class SuperAgentGateway:
                         message_id=event_id,
                         source_id=sid,
                         title=title,
-                        actor_id="owner",
-                        actor_name="User (Voice Transcript)",
+                        actor_id=actor_id,
+                        actor_name=actor_name,
                         addressed=False,
                         human=True,
                         observed=True,
@@ -1745,6 +1811,7 @@ class SuperAgentGateway:
                 or s.startswith("[⚠️")
                 or s.startswith("[日期参考：")
                 or s.startswith("[近期相关工单：")
+                or s.startswith("[说话人归属提醒：")
             ):
                 continue
             if s == "[近期前文参考]":
@@ -1764,6 +1831,7 @@ class SuperAgentGateway:
                     and not s.startswith("[⚠️")
                     and not s.startswith("[日期参考：")
                     and not s.startswith("[近期相关工单：")
+                    and not s.startswith("[说话人归属提醒：")
                     and s not in ("[近期前文参考]", "[本次新增转写]")
                 ):
                     kept.append(s)
@@ -2947,40 +3015,58 @@ class SuperAgentGateway:
                 return [], None
 
             # Group spans into ~1000-char chronological passages across the entire recording (never truncating at 120 spans).
+            source_is_attributed = any(
+                classify_transcript_span(s)[1] is not None for s in spans if isinstance(s, dict)
+            )
             passages: list[dict] = []
             buf_lines: list[str] = []
             buf_chars = 0
-            buf_speaker = "owner"
+            buf_has_owner = False
+            buf_other_label = ""
             buf_at = float(src["updated"])
+
+            def _passage_sender(has_owner: bool, other_label: str) -> str:
+                if has_owner:
+                    return "owner"
+                if other_label:
+                    return f"other:{other_label}"
+                return "unattributed" if source_is_attributed else "owner"
+
             for span in spans:
-                raw_text = str(span.get("text") or "").strip()
-                if not raw_text:
+                spk_label, spk_is_owner, spk_body = classify_transcript_span(span)
+                if not spk_body:
                     continue
                 ts = float(span.get("recorded_at") or src["updated"])
                 dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-                spk = str(span.get("speaker") or "").strip()
-                line = f"[{dt_str}] {spk}: {raw_text}" if spk else f"[{dt_str}] {raw_text}"
+                line = format_transcript_span_line(dt_str, span)
+                if not line:
+                    continue
                 if buf_lines and buf_chars + len(line) + 1 > 1000:
                     passages.append(
                         {
                             "id": f"rec-{source_id}-p{len(passages)}",
-                            "from": buf_speaker,
+                            "from": _passage_sender(buf_has_owner, buf_other_label),
                             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(buf_at)),
                             "text": "\n".join(buf_lines),
                         }
                     )
                     buf_lines = []
                     buf_chars = 0
+                    buf_has_owner = False
+                    buf_other_label = ""
                 if not buf_lines:
-                    buf_speaker = spk or "owner"
                     buf_at = ts
+                if spk_is_owner is True:
+                    buf_has_owner = True
+                elif spk_is_owner is False and not buf_other_label:
+                    buf_other_label = spk_label or "other"
                 buf_lines.append(line)
                 buf_chars += len(line) + 1
             if buf_lines:
                 passages.append(
                     {
                         "id": f"rec-{source_id}-p{len(passages)}",
-                        "from": buf_speaker,
+                        "from": _passage_sender(buf_has_owner, buf_other_label),
                         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(buf_at)),
                         "text": "\n".join(buf_lines),
                     }

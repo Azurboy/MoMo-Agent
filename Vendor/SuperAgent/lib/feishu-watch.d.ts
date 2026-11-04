@@ -104,14 +104,14 @@ declare const FeishuConfigSchema: z.ZodObject<{
     chatId: z.ZodString;
     name: z.ZodOptional<z.ZodString>;
     listen: z.ZodEnum<{
-      mentions: "mentions";
       all: "all";
+      mentions: "mentions";
     }>;
   }, z.core.$strict>>>;
   directMessages: z.ZodDefault<z.ZodBoolean>;
   otherChats: z.ZodDefault<z.ZodEnum<{
-    mentions: "mentions";
     none: "none";
+    mentions: "mentions";
   }>>;
 }, z.core.$strict>;
 type FeishuConfig = z.infer<typeof FeishuConfigSchema>;

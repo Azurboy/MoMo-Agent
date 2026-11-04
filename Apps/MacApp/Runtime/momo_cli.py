@@ -24,8 +24,20 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import urllib.request
 
 REPOSITORY = Path(__file__).resolve().parents[3]
+if str(REPOSITORY / "Apps/MacApp/Runtime") not in sys.path:
+    sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Runtime"))
 sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Context"))
 sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
+
+from superagent_runtime import classify_transcript_span
+
+
+def _speaker_role(is_owner: bool | None) -> str:
+    if is_owner is True:
+        return "owner"
+    if is_owner is False:
+        return "other"
+    return "unattributed"
 
 
 def _local_dt(ts: float | int | None) -> str | None:
@@ -73,9 +85,17 @@ def _cmd_recording(data: Path, args: argparse.Namespace) -> dict:
         spans = result.get("spans") or []
         for span in spans:
             span["recorded_at_local"] = _local_dt(span.get("recorded_at"))
+            spk_label, spk_is_owner, _ = classify_transcript_span(span)
+            if spk_label and "speaker" not in span:
+                span["speaker"] = spk_label
+            span["speaker_role"] = _speaker_role(spk_is_owner)
         if spans:
             result["recorded_start_local"] = spans[0].get("recorded_at_local")
             result["recorded_end_local"] = spans[-1].get("recorded_at_local")
+        result["speaker_ownership_note"] = (
+            "Only spans with speaker_role='owner' ([我]) are spoken by the user; "
+            "spans with speaker_role='other' ([说话人 N] or other names) are spoken by other people."
+        )
         result["current_local_time"] = _local_dt(time.time())
         return result
     finally:
@@ -99,18 +119,21 @@ def _cmd_search(data: Path, args: argparse.Namespace) -> dict:
                 text = str(span.get("text") or "")
                 if query in text.lower():
                     rec_at = span.get("recorded_at")
-                    matches.append(
-                        {
-                            "source_id": row["id"],
-                            "title": title,
-                            "revision": row["revision"],
-                            "seq": idx,
-                            "span_id": span.get("id"),
-                            "recorded_at": rec_at,
-                            "recorded_at_local": _local_dt(rec_at),
-                            "text": text,
-                        }
-                    )
+                    spk_label, spk_is_owner, _ = classify_transcript_span(span)
+                    match_item = {
+                        "source_id": row["id"],
+                        "title": title,
+                        "revision": row["revision"],
+                        "seq": idx,
+                        "span_id": span.get("id"),
+                        "recorded_at": rec_at,
+                        "recorded_at_local": _local_dt(rec_at),
+                        "speaker_role": _speaker_role(spk_is_owner),
+                        "text": text,
+                    }
+                    if spk_label:
+                        match_item["speaker"] = spk_label
+                    matches.append(match_item)
                     if len(matches) >= limit:
                         return {"query": args.query, "current_local_time": now_local, "matches": matches}
         return {"query": args.query, "current_local_time": now_local, "matches": matches}

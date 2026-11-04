@@ -120,20 +120,33 @@ class ContextStore:
             seen.add(span["id"])
             if type(span["recorded_at"]) not in (int, float) or not math.isfinite(span["recorded_at"]):
                 raise ValueError("Missing source time")
+            if "is_owner" in span and span["is_owner"] is not None and type(span["is_owner"]) is not bool:
+                raise ValueError("Invalid span is_owner flag")
         text = "\n".join(span["text"] for span in spans)
         if deleted and spans or len(text.encode()) > 4_000_000:
             raise ValueError("Deleted sources must be empty; source size limit is 4 MB, never truncated")
         if payload["text_sha256"] != digest(text):
             raise ValueError("Transcript checksum mismatch")
         revision = f"{generation}:{version}:{digest(text)}:{int(deleted)}"
+        def _core_payload(doc: dict) -> dict:
+            out = dict(doc)
+            if isinstance(out.get("spans"), list):
+                out["spans"] = [
+                    {k: v for k, v in s.items() if k != "is_owner"} if isinstance(s, dict) else s
+                    for s in out["spans"]
+                ]
+            return out
         with self.write():
             previous = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
             if previous:
                 if previous["owner"] != payload["device_id"]:
                     raise Conflict("Source belongs to another device")
                 if previous["revision"] == revision:
-                    if json.loads(previous["payload"]) != payload:
-                        raise Conflict("Source metadata differs at the same revision")
+                    prev_payload = json.loads(previous["payload"])
+                    if prev_payload != payload:
+                        if _core_payload(prev_payload) != _core_payload(payload):
+                            raise Conflict("Source metadata differs at the same revision")
+                        self.db.execute("UPDATE sources SET payload=? WHERE id=?", (canonical(payload), source_id))
                     return {"source_id": source_id, "source_revision": revision, "revision": self.revision}
                 if previous["deleted"] or (generation, version) <= (previous["generation"], previous["version"]):
                     raise Conflict("Source revision is stale or deleted")
@@ -269,8 +282,17 @@ class ContextStore:
         for span in payload["spans"]:
             next_position = position + len(span["text"])
             if next_position > offset and position < end:
-                spans.append({"id": span["id"], "recorded_at": span["recorded_at"], "text": span["text"],
-                              "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}'})
+                item = {
+                    "id": span["id"],
+                    "recorded_at": span["recorded_at"],
+                    "text": span["text"],
+                    "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}',
+                }
+                if isinstance(span.get("is_owner"), bool):
+                    item["is_owner"] = span["is_owner"]
+                if span.get("speaker"):
+                    item["speaker"] = span["speaker"]
+                spans.append(item)
             position = next_position + 1
         return {"source_id": source_id, "source_revision": row["revision"], "text_sha256": row["hash"],
                 "offset": offset, "end": end, "total_characters": len(text), "text": text[offset:end],
