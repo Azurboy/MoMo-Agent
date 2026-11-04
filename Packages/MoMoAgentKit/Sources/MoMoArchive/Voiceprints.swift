@@ -999,6 +999,7 @@ extension ArchiveStore {
     func attributeSpeaker(spanID: UUID, sessionID: UUID, evidence: SpeakerEvidence?, excluding: Set<UUID> = []) throws -> (String?, SpeakerAttribution?) {
         var preparedBanks: [String: [Int: VoiceprintMatcher.PreparedBank]] = [:]
         var sessionCones: [String: VoiceprintCone?] = [:]
+        var didShiftCluster = false
         return try attributeSpeaker(
             spanID: spanID,
             sessionID: sessionID,
@@ -1006,7 +1007,8 @@ extension ArchiveStore {
             excluding: excluding,
             preloadedPeople: nil,
             preparedBanks: &preparedBanks,
-            sessionCones: &sessionCones)
+            sessionCones: &sessionCones,
+            didShiftCluster: &didShiftCluster)
     }
 
     func attributeSpeaker(
@@ -1016,7 +1018,8 @@ extension ArchiveStore {
         excluding: Set<UUID> = [],
         preloadedPeople: [VoicePerson]?,
         preparedBanks: inout [String: [Int: VoiceprintMatcher.PreparedBank]],
-        sessionCones: inout [String: VoiceprintCone?]
+        sessionCones: inout [String: VoiceprintCone?],
+        didShiftCluster: inout Bool
     ) throws -> (String?, SpeakerAttribution?) {
         guard let evidence, evidence.hasVoiceprint, evidence.cleanSeconds.isFinite,
               evidence.cleanSeconds >= 0, evidence.cleanSeconds <= VoiceprintPolicy.maxCleanSeconds,
@@ -1058,6 +1061,11 @@ extension ArchiveStore {
             centroid = best.1
         }
         let updatedSampleCount = count + (canLearn ? 1 : 0)
+        if best == nil || !excluding.isEmpty || count < 2
+            || updatedSampleCount == 8 || updatedSampleCount == 16 || updatedSampleCount == 32
+            || (best != nil && canLearn && SpeakerEvidence.similarity(best!.1, centroid) < 0.9985) {
+            didShiftCluster = true
+        }
         try database.execute("INSERT INTO speaker_clusters(id,session_id,model_revision,centroid,sample_count) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET centroid=excluded.centroid,sample_count=excluded.sample_count",
             [.text(cluster.uuidString), .text(sessionID.uuidString), .text(evidence.modelRevision), .blob(try WireJSON.encode(centroid)), .integer(updatedSampleCount)])
         if updatedSampleCount >= 2 {

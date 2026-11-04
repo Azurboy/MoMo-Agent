@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "activeBaselineVersion": "0.3.7",
+  "fixtureSpecification": {
+    "sessionCount": 12,
+    "chunksPerSession": 20,
+    "totalChunks": 240,
+    "spansPerSession": 15,
+    "totalTranscriptSpans": 180
+  },
+  "versionBaselines": {
+    "0.3.6": {
+      "notes": "Pre-0.3.7 unmonitored baseline reconstructed from 30-session archive diagnostics (synchronous cold-start full-projection + per-row JSON extraction).",
+      "budgetsMs": {
+        "coldStartToTimelineInteractive": { "p95Ms": 85000.0, "maxMs": 95000.0 },
+        "timelineDaySnapshot": { "p95Ms": 450.0, "maxMs": 900.0 },
+        "earliestTimelineDay": { "p95Ms": 50.0, "maxMs": 100.0 },
+        "recordingsPage": { "p95Ms": 120.0, "maxMs": 250.0 },
+        "transcriptPreviewsBatch": { "p95Ms": 120.0, "maxMs": 250.0 },
+        "transcriptSnapshot": { "p95Ms": 120.0, "maxMs": 250.0 },
+        "reconcileDocumentFiles": { "p95Ms": 15000.0, "maxMs": 30000.0 },
+        "projectPendingDocuments": { "p95Ms": 45000.0, "maxMs": 70000.0 },
+        "commitWindowTranscripts": { "p95Ms": 220.0, "maxMs": 450.0 },
+        "writeSyncDiagnostic": { "p95Ms": 260.0, "maxMs": 500.0 }
+      }
+    },
+    "0.3.7": {
+      "notes": "SQLite-first timeline presentation, metadata-gated punctuation migration, batched transcript previews, verified manifest projection caching, 4-window transcript commits, native-column sync diagnostics.",
+      "budgetsMs": {
+        "coldStartToTimelineInteractive": { "p95Ms": 500.0, "maxMs": 1000.0 },
+        "timelineDaySnapshot": { "p95Ms": 150.0, "maxMs": 300.0 },
+        "earliestTimelineDay": { "p95Ms": 30.0, "maxMs": 60.0 },
+        "recordingsPage": { "p95Ms": 80.0, "maxMs": 160.0 },
+        "transcriptPreviewsBatch": { "p95Ms": 40.0, "maxMs": 80.0 },
+        "transcriptSnapshot": { "p95Ms": 80.0, "maxMs": 160.0 },
+        "recordingFileIssues": { "p95Ms": 250.0, "maxMs": 500.0 },
+        "reconcileDocumentFiles": { "p95Ms": 400.0, "maxMs": 800.0 },
+        "projectPendingDocuments": { "p95Ms": 400.0, "maxMs": 800.0 },
+        "commitWindowTranscripts": { "p95Ms": 120.0, "maxMs": 250.0 },
+        "commitReceivedChunk": { "p95Ms": 50.0, "maxMs": 120.0 },
+        "receiveReconcileRequest": { "p95Ms": 80.0, "maxMs": 180.0 },
+        "writeSyncDiagnostic": { "p95Ms": 60.0, "maxMs": 150.0 },
+        "speechWarmUp": { "p95Ms": 12000.0, "maxMs": 18000.0 }
+      }
+    }
+  }
+}

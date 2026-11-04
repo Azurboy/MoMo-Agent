@@ -154,6 +154,65 @@ final class EpochAudioReader: @unchecked Sendable {
         }
     }
 
+    /// Skips completely unread 16 kHz mono chunks (and seeks uncompressed PCM) before `targetModelFrame`
+    /// so sequential cursor cache misses never decode or hash silent prefix chunks from the epoch origin.
+    func skipToModelFrameIfNative16kMono(_ targetModelFrame: Int64) throws {
+        guard isNative16kMono, targetModelFrame > emitted else { return }
+        let clampedTarget = min(targetModelFrame, limit)
+        guard clampedTarget > emitted else { return }
+        let targetSource = input.start + clampedTarget
+
+        if remainingFileFrames > 0, index > 0 {
+            let need = clampedTarget - emitted
+            if remainingFileFrames <= need {
+                let skipped = remainingFileFrames
+                remainingFileFrames = 0
+                file = nil
+                sourcePosition += skipped
+                emitted += skipped
+            } else if input.inputs[index - 1].envelope.manifest.codec != .aac, let activeFile = file {
+                activeFile.framePosition += need
+                remainingFileFrames -= need
+                sourcePosition += need
+                emitted += need
+                return
+            } else {
+                return
+            }
+        }
+
+        while remainingFileFrames == 0, index < input.inputs.count {
+            try attempt.checkCancellation()
+            let item = input.inputs[index]
+            let m = item.envelope.manifest
+            if m.frames.end <= input.start {
+                index += 1
+                continue
+            }
+            guard m.frames.start < input.end else { break }
+            if m.frames.end <= targetSource {
+                let chunkStart = max(m.frames.start, input.start)
+                let chunkEnd = min(m.frames.end, input.end)
+                let useful = max(0, chunkEnd - chunkStart)
+                index += 1
+                sourcePosition += useful
+                emitted += useful
+                continue
+            }
+            if m.codec != .aac, emitted < clampedTarget {
+                guard let activeFile = try advanceFileIfNeeded() else { break }
+                let delta = min(remainingFileFrames, clampedTarget - emitted)
+                if delta > 0 {
+                    activeFile.framePosition += delta
+                    remainingFileFrames -= delta
+                    sourcePosition += delta
+                    emitted += delta
+                }
+            }
+            break
+        }
+    }
+
     private func validateIdentity(_ item: SpeechAudioInput) throws {
         try validateSpeechAudioIdentity(item, attempt: attempt, recorder: recorder)
     }

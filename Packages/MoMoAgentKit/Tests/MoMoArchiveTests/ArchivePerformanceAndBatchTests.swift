@@ -584,4 +584,100 @@ struct ArchivePerformanceAndBatchTests {
         let issues = try await store.recordingFileIssues(sessionID: fixture.sessionID)
         #expect(!issues.isEmpty)
     }
+
+    @Test func batchedWindowTranscriptsCommitSingleVersionAndCompleteChunks() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+
+        let envelopes = try (0..<4).map { i in
+            try fixture.envelope(startFrame: Int64(i) * 64_000, frameCount: 64_000, sequence: Int64(i))
+        }
+        for env in envelopes {
+            _ = try await store.commitReceivedChunk(fixture.deliver(env, to: store))
+        }
+        let ticket = try #require(await store.claimEpochAnalysis(
+            configurationFingerprint: fingerprint,
+            sessionID: fixture.sessionID,
+            expectedGeneration: 0
+        ))
+        let windows = envelopes.enumerated().map { index, env in
+            let frames = env.manifest.frames
+            return ArchiveAnalysisWindow(
+                id: ContentHash.sha256(Data("\(fixture.sessionID)-batch-\(index)".utf8)),
+                sessionID: fixture.sessionID,
+                epochID: fixture.epochID,
+                analysisAnchor: 0,
+                coreFrames: frames,
+                contextFrames: frames,
+                modelCoreFrames: frames,
+                modelContextFrames: frames,
+                sources: [.init(
+                    chunkID: env.manifest.chunkID,
+                    manifestSHA256: env.manifestSHA256,
+                    audioSHA256: env.manifest.audioSHA256,
+                    sourceFrames: frames
+                )],
+                replayInputManifestHashes: Array(envelopes[0...index]).map(\.manifestSHA256),
+                configurationFingerprint: fingerprint
+            )
+        }
+        let fullCoverage = try FrameRange(start: 0, count: 256_000)
+        try await store.commitAnalysisBatch(
+            ticket: ticket,
+            windows: windows,
+            analyzedCoverage: [fullCoverage],
+            noSpeechCoverage: [],
+            checkpoint: ArchiveCheckpoint(
+                sessionID: fixture.sessionID,
+                epochID: fixture.epochID,
+                sourceFrame: fullCoverage.end,
+                configurationFingerprint: fingerprint
+            ),
+            waitingForMoreAudio: true
+        )
+
+        let first = try #require(await store.claimTranscriptionWindow(
+            configurationFingerprint: fingerprint,
+            sessionID: fixture.sessionID,
+            expectedGeneration: 0
+        ))
+        let lease = try await store.acquireTranscriptionInputLease(ticket: first)
+        defer { Task { try? await store.releaseTranscriptionInputLease(lease) } }
+        let companions = try await store.claimCompanionWindows(after: first, inputLease: lease, maximumCount: 4)
+        let batchTickets = [first] + companions
+        #expect(batchTickets.count == 4)
+
+        let vecA = unit192(1, 0, 0)
+        let vecB = unit192(0, 1, 0)
+        let commits = batchTickets.enumerated().map { index, winTicket in
+            let vec = index % 2 == 0 ? vecA : vecB
+            let parts = [SpeakerTranscriptPart(
+                text: "批次句子 \(index)",
+                frames: winTicket.window.coreFrames,
+                evidence: .init(start: 0, end: 4, localSpeaker: index % 2 + 1, embedding: vec, cleanSeconds: 3.5, modelRevision: eresRevision)
+            )]
+            return ArchiveStore.WindowTranscriptCommit(
+                ticket: winTicket,
+                text: "批次句子 \(index)",
+                rawResult: Data(),
+                speakerParts: parts
+            )
+        }
+        let committed = try await store.commitWindowTranscripts(commits)
+        #expect(committed.version == 1)
+        #expect(committed.spans.count == 4)
+        #expect(committed.spans[0].speaker == committed.spans[2].speaker)
+        #expect(committed.spans[1].speaker == committed.spans[3].speaker)
+        #expect(committed.spans[0].speaker != committed.spans[1].speaker)
+        #expect(try await store.claimTranscriptionWindow(configurationFingerprint: fingerprint) == nil)
+
+        let status = try await store.phoneStatus(sourceBuild: "test")
+        guard case .phone(let phone) = status.payload else {
+            Issue.record("Expected phone status payload")
+            return
+        }
+        #expect(phone.recordingCount == 1)
+        #expect(phone.pendingAnalysisCount == 0)
+    }
 }

@@ -109,9 +109,10 @@ extension ArchiveStore {
     /// Stable across relaunch and unchanged summaries. The remote library identity remains a separate control message.
     public func phoneStatus(sourceBuild: String, sampledAt: Date = Date(), sourceDeviceID: UUID? = nil,
                             refreshObservation: Bool = false) throws -> StatusSnapshot {
-        let state = try contextStatus()
+        let recordingCount = Int(try database.rows("SELECT COUNT(*) FROM sessions WHERE deleted=0").first?.integer(0) ?? 0)
+        let pendingAnalysisCount = Int(try database.rows("SELECT COUNT(*) FROM transcription_jobs WHERE state IN ('pending','running')").first?.integer(0) ?? 0)
         let payload = StatusPayload.phone(try PhoneArchiveStatus(libraryInstanceID: libraryInstanceID,
-            recordingCount: state.recordingCount, pendingAnalysisCount: state.pendingAnalysisCount,
+            recordingCount: recordingCount, pendingAnalysisCount: pendingAnalysisCount,
             pendingReceiptCount: pendingReceiptCount(sourceDeviceID: sourceDeviceID), audioBlockVersion: AudioBlock.version))
         var revision: Int64 = 1
         if let row = try database.rows("SELECT value FROM metadata WHERE key='phone_status_snapshot'").first {

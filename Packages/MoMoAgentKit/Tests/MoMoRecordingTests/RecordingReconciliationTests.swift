@@ -340,6 +340,94 @@ import MoMoContracts
         #expect(try await store.cleanupAcknowledgedChunks() == [inflight.envelope.manifest.chunkID])
     }
 
+    @Test func prunedHistoricalRequestsAndPrunedChunksNeverPoisonDuplicateReconciliationResponses() async throws {
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let store = try await boundStore(fixture)
+        let source = fixture.envelope.manifest.sourceDeviceID
+        // Seal 40 chunks (3 full pages of 16, 16, 8) and close their capture epoch so terminal pruning is eligible.
+        let chunks = try await addChunks(40, fixture: fixture, store: store)
+        var receipts: [UUID: Receipt] = [:]
+        for chunk in chunks {
+            receipts[chunk.envelope.manifest.chunkID] = try Receipt(
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID,
+                chunkID: chunk.envelope.manifest.chunkID,
+                audioSHA256: chunk.envelope.manifest.audioSHA256,
+                manifestSHA256: chunk.envelope.manifestSHA256
+            )
+        }
+
+        let ended = try CaptureEpochEnded(
+            sessionID: fixture.envelope.manifest.sessionID,
+            epochID: fixture.envelope.manifest.epochID,
+            sourceDeviceID: source,
+            endFrame: Int64(40 * 160),
+            reason: .stopped
+        )
+        try await store.recordEpochEnded(ended)
+        try await store.markControlPreserved(.epochEnded(ended), receiverDeviceID: fixture.receiverID, libraryInstanceID: fixture.libraryID)
+
+        // Simulate interactive inline replies advancing Watch through all 3 pages while WatchConnectivity
+        // also queues duplicate transferUserInfo ReconcileResponses that arrive after pruneHistoricalLedger.
+        var duplicateResponses: [ReconcileResponse] = []
+        let auditNow = fixture.envelope.manifest.sealedAt.addingTimeInterval(30 * 86_400)
+        while let request = try await store.nextReconciliationRequest(sourceDeviceID: source, now: auditNow) {
+            let reply = try response(request) { item in
+                .received(try #require(receipts[item.chunkID]))
+            }
+            duplicateResponses.append(reply)
+            let outcome = try await store.applyReconciliationResponse(reply, now: auditNow)
+            #expect(!outcome.ignored)
+        }
+        #expect(duplicateResponses.count == 3)
+        _ = try await store.cleanupAcknowledgedChunks()
+        // Mark all ReceiptApplied deliveries confirmed so old removed chunks can be pruned too.
+        for applied in try await store.pendingReceiptApplications() {
+            try await store.markControlPreserved(
+                .receiptApplied(applied),
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID
+            )
+        }
+        _ = try await store.pruneHistoricalLedger(
+            now: auditNow,
+            retentionInterval: 14 * 86_400,
+            minimumRetainedChunks: 4,
+            retainedProcessedRequests: 1
+        )
+
+        // Late duplicate ReconcileResponses for pruned requests AND pruned chunks must return ignored=true, never throw!
+        for staleReply in duplicateResponses {
+            let staleOutcome = try await store.applyReconciliationResponse(staleReply, now: auditNow)
+            #expect(staleOutcome.ignored)
+        }
+
+        // Seal fresh chunks afterward and verify reconciliation continues without head-of-line blockage.
+        let freshChunks = try await addChunks(2, startingAt: 40, fixture: fixture, store: store)
+        let freshRequest = try #require(await store.nextReconciliationRequest(
+            sourceDeviceID: source,
+            beginNewRound: true,
+            preferPending: true,
+            now: auditNow.addingTimeInterval(60)
+        ))
+        #expect(freshRequest.items.map(\.chunkID) == freshChunks.map { $0.envelope.manifest.chunkID })
+        let freshReply = try response(freshRequest) { item in
+            let chunk = try #require(freshChunks.first { $0.envelope.manifest.chunkID == item.chunkID })
+            return .received(try Receipt(
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID,
+                chunkID: item.chunkID,
+                audioSHA256: chunk.envelope.manifest.audioSHA256,
+                manifestSHA256: chunk.envelope.manifestSHA256
+            ))
+        }
+        let freshOutcome = try await store.applyReconciliationResponse(freshReply, now: auditNow.addingTimeInterval(60))
+        #expect(!freshOutcome.ignored)
+        #expect(freshOutcome.receiptApplications.count == 2)
+        #expect(try await store.cleanupAcknowledgedChunks().count == 2)
+    }
+
     private func boundStore(_ fixture: RecordingFixture) async throws -> RecordingStore {
         let store = try fixture.store()
         try await store.bindReceiver(deviceID: fixture.receiverID, libraryInstanceID: fixture.libraryID)

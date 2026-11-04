@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MoMoContracts
 
@@ -20,10 +21,25 @@ extension ArchiveStore {
     }
 
     public func timelineDaySnapshot(_ day: TimelineDay, configurationFingerprint: String? = nil) throws -> TimelineDaySnapshot {
+        let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
+        do {
+            let snapshot = try timelineDaySnapshotImpl(day, configurationFingerprint: configurationFingerprint)
+            performanceMonitor.record(.timelineDaySnapshot, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: snapshot.windows.count)
+            return snapshot
+        } catch {
+            if !(error is CancellationError) {
+                performanceMonitor.record(.timelineDaySnapshot, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: 0, failed: true)
+            }
+            throw error
+        }
+    }
+
+    private func timelineDaySnapshotImpl(_ day: TimelineDay, configurationFingerprint: String? = nil) throws -> TimelineDaySnapshot {
         try Task.checkCancellation()
         #if DEBUG
         timelineDayBuildCount += 1
         #endif
+        let rootPrefix = rootURL.standardizedFileURL.path + "/"
         let localStart = day.date(calendar: TimelineDay.calendar).timeIntervalSince1970
         let localEnd = day.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
         let rows = try database.rows("""
@@ -61,10 +77,17 @@ extension ArchiveStore {
             }
             guard let epoch = coverage.epochs.first(where: { $0.epochID == anchor.epochID }),
                   epoch.observedThroughFrame > 0 else { continue }
-            let chunkRows = try database.rows("SELECT c.manifest,c.retention,c.relative_path,j.state,j.error_code FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id WHERE c.epoch_id=? ORDER BY c.start_frame", [.text(anchor.epochID.uuidString)])
-            let chunks = try chunkRows.map {
+            struct TimelineChunkMeta {
+                let chunkID: UUID
+                let frames: FrameRange
+            }
+            let chunkRows = try database.rows("SELECT c.id,c.start_frame,c.end_frame,c.retention,c.relative_path,j.state,j.error_code FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id WHERE c.epoch_id=? ORDER BY c.start_frame", [.text(anchor.epochID.uuidString)])
+            let chunks = try chunkRows.map { row -> TimelineChunkMeta in
                 try Task.checkCancellation()
-                return try WireJSON.decode(ChunkManifest.self, from: $0.requireData(0))
+                let startFrame = try row.requireInt(1)
+                let endFrame = try row.requireInt(2)
+                return TimelineChunkMeta(chunkID: try row.requireUUID(0),
+                    frames: try FrameRange(start: startFrame, count: endFrame - startFrame))
             }
             let speechWindows = try database.rows("SELECT core_start,core_end FROM analysis_windows WHERE epoch_id=? AND configuration_hash=?",
                 [.text(anchor.epochID.uuidString), configurationFingerprint.map(SQLValue.text) ?? .null])
@@ -94,8 +117,10 @@ extension ArchiveStore {
             let documentSpans = (documents[sessionID]?.spans ?? []).filter { byID[$0.chunkID] != nil }
             let audioAvailable = try chunkRows.map { row in
                 try Task.checkCancellation()
-                let path = try row.requireString(2)
-                return row.string(1) == "present" && files.fileExists(atPath: rootURL.appendingPathComponent(path, isDirectory: false).path)
+                guard row.string(3) == "present" else { return false }
+                let path = try row.requireString(4)
+                let fullPath = rootPrefix + path
+                return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
             }
             let availableRanges = chunks.indices.filter { audioAvailable[$0] }.map { chunks[$0].frames }
             var epochIssues: [TimelineIssue] = []
@@ -110,29 +135,35 @@ extension ArchiveStore {
             try addIssues(.waitingForSync, ranges: epoch.notReceived)
             // Keep ASR window boundaries: retrying one failure must not select another pending window.
             if configurationFingerprint != nil {
-                for range in speechWindows {
-                    try addIssues(.waitingForTranscription,
-                        ranges: CoverageRanges.intersection([range], CoverageRanges.intersection(epoch.pending, availableRanges)))
+                let pendingAvailable = try CoverageRanges.intersection(epoch.pending, availableRanges)
+                if !pendingAvailable.isEmpty {
+                    for range in speechWindows {
+                        try addIssues(.waitingForTranscription,
+                            ranges: CoverageRanges.intersection([range], pendingAvailable))
+                    }
+                    try addIssues(.waitingForAnalysis,
+                        ranges: CoverageRanges.intersection(epoch.pendingAnalysis, pendingAvailable))
                 }
-                try addIssues(.waitingForAnalysis,
-                    ranges: CoverageRanges.intersection(epoch.pendingAnalysis, CoverageRanges.intersection(epoch.pending, availableRanges)))
-                for failure in epoch.failures {
-                    try addIssues(.transcriptionFailed,
-                        ranges: CoverageRanges.intersection([failure.frames], CoverageRanges.intersection(epoch.failed, availableRanges)),
-                        reason: TimelineIssue.FailureReason(code: failure.errorCode))
+                if !epoch.failures.isEmpty {
+                    let failedAvailable = try CoverageRanges.intersection(epoch.failed, availableRanges)
+                    for failure in epoch.failures {
+                        try addIssues(.transcriptionFailed,
+                            ranges: CoverageRanges.intersection([failure.frames], failedAvailable),
+                            reason: TimelineIssue.FailureReason(code: failure.errorCode))
+                    }
                 }
             } else {
-                for index in chunks.indices where audioAvailable[index] && chunkRows[index].string(3) != "complete" {
-                    let failed = chunkRows[index].string(3) == "failed"
+                for index in chunks.indices where audioAvailable[index] && chunkRows[index].string(5) != "complete" {
+                    let failed = chunkRows[index].string(5) == "failed"
                     try addIssues(failed ? .transcriptionFailed : .waitingForAnalysis, ranges: [chunks[index].frames],
-                        reason: failed ? TimelineIssue.FailureReason(code: chunkRows[index].string(4)) : nil)
+                        reason: failed ? TimelineIssue.FailureReason(code: chunkRows[index].string(6)) : nil)
                 }
             }
             let missingUnexpected = chunks.indices.filter {
-                chunkRows[$0].string(1) == "missing_unexpected" || (chunkRows[$0].string(1) == "present" && !audioAvailable[$0])
+                chunkRows[$0].string(3) == "missing_unexpected" || (chunkRows[$0].string(3) == "present" && !audioAvailable[$0])
             }.map { chunks[$0].frames }
             let unfinishedUnavailable = chunks.indices.filter {
-                !audioAvailable[$0] && chunkRows[$0].string(3) != "complete"
+                !audioAvailable[$0] && chunkRows[$0].string(5) != "complete"
             }.map { chunks[$0].frames }
             try addIssues(.audioUnavailable, ranges: missingUnexpected + unfinishedUnavailable)
             if documents[sessionID] == nil && summary.transcriptVersion > 0 {
@@ -141,9 +172,9 @@ extension ArchiveStore {
             let speech = try CoverageRanges.union(speechWindows + documentSpans.map(\.frames))
             var activity = try CoverageRanges.subtract([dayFrames], epoch.noSpeech)
             if configurationFingerprint == nil {
-                let unfinished = chunks.indices.filter { chunkRows[$0].string(3) != "complete" || chunkRows[$0].string(1) == "missing_unexpected" }
+                let unfinished = chunks.indices.filter { chunkRows[$0].string(5) != "complete" || chunkRows[$0].string(3) == "missing_unexpected" }
                     .map { chunks[$0].frames }
-                let discarded = chunks.indices.filter { chunkRows[$0].string(4) == "discarded_punctuation" }.map { chunks[$0].frames }
+                let discarded = chunks.indices.filter { chunkRows[$0].string(6) == "discarded_punctuation" }.map { chunks[$0].frames }
                 activity = speech + unfinished + discarded + epoch.notReceived
             }
             if documents[sessionID] == nil && summary.transcriptVersion > 0 { activity = [dayFrames] }
@@ -207,19 +238,19 @@ extension ArchiveStore {
                 builder.discarded = builder.discarded || discardedWindows.contains { $0.overlaps(frames) }
                 for (index, chunk) in chunks.enumerated() where chunk.frames.overlaps(frames) {
                     let row = chunkRows[index]
-                    builder.discarded = builder.discarded || row.string(4) == "discarded_punctuation"
+                    builder.discarded = builder.discarded || row.string(6) == "discarded_punctuation"
                     let available = audioAvailable[index]
                     builder.unavailable = builder.unavailable || !available
                     if missingUnexpected.contains(where: { $0.overlaps(frames) }) { builder.failed = true }
                     if configurationFingerprint == nil {
-                        builder.failed = builder.failed || row.string(3) == "failed"
-                        builder.pending = builder.pending || (available && row.string(3) != "complete" && row.string(3) != "failed")
+                        builder.failed = builder.failed || row.string(5) == "failed"
+                        builder.pending = builder.pending || (available && row.string(5) != "complete" && row.string(5) != "failed")
                     }
                 }
                 if let document = documents[sessionID] {
                     var paragraphIDs = Set<UUID>()
                     for span in documentSpans {
-                        guard let index = byID[span.chunkID], chunks[index].epochID == anchor.epochID else { continue }
+                        guard byID[span.chunkID] != nil else { continue }
                         let at = base + Double(span.frames.start) / rate
                         guard at >= start, at < end else { continue }
                         let available = span.sourceRanges.allSatisfy { source in
@@ -337,13 +368,31 @@ extension ArchiveStore {
     }
 
     public func earliestTimelineDay() throws -> TimelineDay? {
-        try Task.checkCancellation()
-        guard let row = try database.rows("""
-            SELECT MIN(e.wall_clock_anchor + COALESCE(e.timezone_offset, 0))
-            FROM epochs e JOIN sessions s ON s.id=e.session_id
-            WHERE s.deleted=0 AND e.wall_clock_anchor IS NOT NULL
-            """).first, let seconds = row.double(0) else { return nil }
-        return TimelineDay(Date(timeIntervalSince1970: seconds.rounded()), calendar: TimelineDay.calendar)
+        try performanceMonitor.measure(.earliestTimelineDay) {
+            try Task.checkCancellation()
+            let externalVersion = try database.rows("PRAGMA data_version").first?.requireInt(0) ?? 0
+            let localRevision = database.timelineRevision
+            if !database.isInTransaction,
+               let cached = cachedEarliestTimelineDay,
+               cached.dataVersion == externalVersion,
+               cached.timelineRevision == localRevision {
+                return cached.value
+            }
+            let computed: TimelineDay?
+            if let row = try database.rows("""
+                SELECT MIN(e.wall_clock_anchor + COALESCE(e.timezone_offset, 0))
+                FROM epochs e JOIN sessions s ON s.id=e.session_id
+                WHERE s.deleted=0 AND e.wall_clock_anchor IS NOT NULL
+                """).first, let seconds = row.double(0) {
+                computed = TimelineDay(Date(timeIntervalSince1970: seconds.rounded()), calendar: TimelineDay.calendar)
+            } else {
+                computed = nil
+            }
+            if !database.isInTransaction {
+                cachedEarliestTimelineDay = (externalVersion, localRevision, computed)
+            }
+            return computed
+        }
     }
 }
 

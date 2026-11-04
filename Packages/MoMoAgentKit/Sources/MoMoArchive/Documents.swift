@@ -3,6 +3,12 @@ import MoMoContracts
 
 extension ArchiveStore {
     public func projectPendingDocuments(sessionID: UUID? = nil, includeUnchanged: Bool = true) async throws {
+        try await performanceMonitor.measureAsync(.projectPendingDocuments) {
+            try await projectPendingDocumentsImpl(sessionID: sessionID, includeUnchanged: includeUnchanged)
+        }
+    }
+
+    private func projectPendingDocumentsImpl(sessionID: UUID? = nil, includeUnchanged: Bool = true) async throws {
         var firstFailure: (any Error)?
         let ids: [UUID]
         if let sessionID {
@@ -126,11 +132,13 @@ extension ArchiveStore {
         }
         if files.fileExists(atPath: url.path), try Data(contentsOf: url) == data {
             try database.execute("UPDATE sessions SET manifest_projected=1 WHERE id=? AND manifest_projected!=1", [.text(sessionID.uuidString)])
+            try saveManifestProjectionHash(sessionID: sessionID, chunkCount: Int64(chunks.count), sha256: ContentHash.sha256(data))
             recordVerifiedManifestProjection(sessionID: sessionID, manifestURL: url, chunkCount: Int64(chunks.count))
             return
         }
         try ArchiveFilePolicy.write(data, to: url)
         try database.execute("UPDATE sessions SET manifest_projected=1 WHERE id=?", [.text(sessionID.uuidString)])
+        try saveManifestProjectionHash(sessionID: sessionID, chunkCount: Int64(chunks.count), sha256: ContentHash.sha256(data))
         recordVerifiedManifestProjection(sessionID: sessionID, manifestURL: url, chunkCount: Int64(chunks.count))
     }
 

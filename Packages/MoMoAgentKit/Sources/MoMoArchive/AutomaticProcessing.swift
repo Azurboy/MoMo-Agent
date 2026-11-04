@@ -186,6 +186,16 @@ extension ArchiveStore {
         try livePriorityWorkSummary(configurationFingerprint: configurationFingerprint, now: now, calendar: calendar).hasAnyPriorityWork
     }
 
+    private nonisolated func analysisFreshnessTier(_ ticket: EpochAnalysisTicket, policy: ProcessingDatePolicy,
+                                                   focusedDay: TimelineDay?, focusedSessionID: UUID?) -> Int? {
+        guard let first = ticket.inputs.first, let last = ticket.inputs.last else { return nil }
+        let start = ticket.checkpoint?.sourceFrame ?? first.envelope.manifest.frames.start
+        let end = min(last.envelope.manifest.frames.end, ticket.boundary.endFrame ?? .max)
+        guard end > start, let range = try? FrameRange(start: start, count: end - start) else { return nil }
+        return policy.freshnessTier(range, manifest: first.envelope.manifest,
+            sessionID: ticket.sessionID, focusedDay: focusedDay, focusedSessionID: focusedSessionID)
+    }
+
     private func claimAutomatic(configurationFingerprint: String, inputLease: TranscriptionInputLease?,
                                 allowHistorical: Bool, hotOnly: Bool, focusedDay: TimelineDay?,
                                 focusedSessionID: UUID?, maxTier: Int?,
@@ -193,14 +203,9 @@ extension ArchiveStore {
                                 activeWindow: ArchiveAnalysisWindow?, activeAnalysis: EpochAnalysisTicket?) throws -> AutomaticProcessingWork? {
         guard ContentHash.isValid(configurationFingerprint), now.timeIntervalSince1970.isFinite else { throw ArchiveError.invalidQuery }
         let policy = ProcessingDatePolicy(now: now, calendar: calendar)
-        let analysisTier: Int?
-        if let activeAnalysis, let first = activeAnalysis.inputs.first, let last = activeAnalysis.inputs.last {
-            let start = activeAnalysis.checkpoint?.sourceFrame ?? first.envelope.manifest.frames.start
-            let end = min(last.envelope.manifest.frames.end, activeAnalysis.boundary.endFrame ?? .max)
-            let range = try FrameRange(start: start, count: end - start)
-            analysisTier = policy.freshnessTier(range, manifest: first.envelope.manifest,
-                sessionID: activeAnalysis.sessionID, focusedDay: focusedDay, focusedSessionID: focusedSessionID)
-        } else { analysisTier = nil }
+        let analysisTier = activeAnalysis.flatMap {
+            analysisFreshnessTier($0, policy: policy, focusedDay: focusedDay, focusedSessionID: focusedSessionID)
+        }
         var candidates: [AutomaticCandidate] = []
         var batches: [Int: Set<String>] = [:]
         var activeTier = 3
@@ -294,6 +299,14 @@ extension ArchiveStore {
                     finalizeAvailablePrefixBefore: now.addingTimeInterval(-1_800), isolateLocalFailures: true,
                     selectedEpochID: candidate.epochID, processingRange: candidate.frames,
                     maxStepSeconds: analysisStepSeconds, now: now) else { continue }
+                // Preempting an in-flight analysis must strictly improve the bounded step's own tier,
+                // preventing cyclic ping-pong cancellation if a split tail outranks its opening step.
+                if let analysisTier,
+                   let ticketTier = analysisFreshnessTier(ticket, policy: policy, focusedDay: focusedDay, focusedSessionID: focusedSessionID),
+                   ticketTier >= analysisTier {
+                    try cancelEpochAnalysis(ticket: ticket)
+                    continue
+                }
                 work = .analysis(ticket)
             }
             do {
@@ -405,21 +418,65 @@ struct ProcessingDatePolicy {
             || end > now.addingTimeInterval(-1_800) ? 0 : 1
     }
 
+    private func endCutFrame(afterDate cutoff: Date, range: FrameRange, manifest: ChunkManifest) -> Int64? {
+        let raw = cutoff.timeIntervalSince(manifest.wallClockAnchor) * manifest.timebaseHz
+        guard raw.isFinite, raw > Double(range.start) - 2, raw < Double(range.end) + 2,
+              raw >= -2, raw < Double(Int64.max) - 2 else { return nil }
+        var frame = min(range.end, max(range.start, Int64(raw.rounded(.down))))
+        while frame < range.end,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame + 1) / manifest.timebaseHz) <= cutoff {
+            frame += 1
+        }
+        while frame > range.start,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame) / manifest.timebaseHz) > cutoff {
+            frame -= 1
+        }
+        return (frame > range.start && frame < range.end) ? frame : nil
+    }
+
+    private func endCutFrame(afterLocal cutoff: TimeInterval, range: FrameRange, manifest: ChunkManifest) -> Int64? {
+        let localOffset = Double(manifest.timezoneOffset)
+        let raw = (cutoff - (manifest.wallClockAnchor.timeIntervalSince1970 + localOffset)) * manifest.timebaseHz
+        guard raw.isFinite, raw > Double(range.start) - 2, raw < Double(range.end) + 2,
+              raw >= -2, raw < Double(Int64.max) - 2 else { return nil }
+        var frame = min(range.end, max(range.start, Int64(raw.rounded(.down))))
+        while frame < range.end,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame + 1) / manifest.timebaseHz).timeIntervalSince1970 + localOffset <= cutoff {
+            frame += 1
+        }
+        while frame > range.start,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame) / manifest.timebaseHz).timeIntervalSince1970 + localOffset > cutoff {
+            frame -= 1
+        }
+        return (frame > range.start && frame < range.end) ? frame : nil
+    }
+
+    private func startCutFrame(atOrAfterLocal cutoff: TimeInterval, range: FrameRange, manifest: ChunkManifest) -> Int64? {
+        let localOffset = Double(manifest.timezoneOffset)
+        let raw = (cutoff - (manifest.wallClockAnchor.timeIntervalSince1970 + localOffset)) * manifest.timebaseHz
+        guard raw.isFinite, raw > Double(range.start) - 2, raw < Double(range.end) + 2,
+              raw >= -2, raw < Double(Int64.max) - 2 else { return nil }
+        var frame = min(range.end, max(range.start, Int64(raw.rounded(.up))))
+        while frame > range.start,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame - 1) / manifest.timebaseHz).timeIntervalSince1970 + localOffset >= cutoff {
+            frame -= 1
+        }
+        while frame < range.end,
+              manifest.wallClockAnchor.addingTimeInterval(Double(frame) / manifest.timebaseHz).timeIntervalSince1970 + localOffset < cutoff {
+            frame += 1
+        }
+        return (frame > range.start && frame < range.end) ? frame : nil
+    }
+
     func split(_ range: FrameRange, manifest: ChunkManifest) throws -> [(FrameRange, Int)] {
-        let base = manifest.wallClockAnchor.timeIntervalSince1970
-        let localBase = base + Double(manifest.timezoneOffset)
         let dayStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
         let dayEnd = today.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
         // Already-received audio must not chase a moving `now` cut when the Watch
         // clock is ahead or its recorded timezone differs from the phone's day.
-        let boundaries = [(dayStart - localBase), (dayEnd - localBase), (now.timeIntervalSince1970 - 1_800 - base)]
         var cuts = [range.start, range.end]
-        for seconds in boundaries {
-            let frame = (seconds * manifest.timebaseHz).rounded(.up)
-            if frame.isFinite, frame > Double(range.start), frame < Double(range.end), frame < Double(Int64.max) {
-                cuts.append(Int64(frame))
-            }
-        }
+        if let f = endCutFrame(afterLocal: dayStart, range: range, manifest: manifest) { cuts.append(f) }
+        if let f = startCutFrame(atOrAfterLocal: dayEnd, range: range, manifest: manifest) { cuts.append(f) }
+        if let f = endCutFrame(afterDate: now.addingTimeInterval(-1_800), range: range, manifest: manifest) { cuts.append(f) }
         cuts = Array(Set(cuts)).sorted()
         var result: [(FrameRange, Int)] = []
         for (start, end) in zip(cuts, cuts.dropFirst()) {
@@ -434,26 +491,21 @@ struct ProcessingDatePolicy {
     func splitForScheduling(_ range: FrameRange, manifest: ChunkManifest, sessionID: UUID? = nil,
                             focusedDay: TimelineDay? = nil,
                             focusedSessionID: UUID? = nil) throws -> [(frames: FrameRange, priority: Int, tier: Int)] {
-        let base = manifest.wallClockAnchor.timeIntervalSince1970
-        let localBase = base + Double(manifest.timezoneOffset)
         let dayStart = today.date(calendar: TimelineDay.calendar).timeIntervalSince1970
         let dayEnd = today.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
-        var boundaries = [(dayStart - localBase), (dayEnd - localBase), (now.timeIntervalSince1970 - 1_800 - base)]
-        if manifest.sampleRate == 16_000 {
-            boundaries.append(quantizedHotCutoff.timeIntervalSince1970 - base)
+        var cuts = [range.start, range.end]
+        if let f = endCutFrame(afterLocal: dayStart, range: range, manifest: manifest) { cuts.append(f) }
+        if let f = startCutFrame(atOrAfterLocal: dayEnd, range: range, manifest: manifest) { cuts.append(f) }
+        if let f = endCutFrame(afterDate: now.addingTimeInterval(-1_800), range: range, manifest: manifest) { cuts.append(f) }
+        if manifest.sampleRate == 16_000,
+           let f = endCutFrame(afterDate: quantizedHotCutoff, range: range, manifest: manifest) {
+            cuts.append(f)
         }
         if let focusedDay, focusedDay != today {
             let focusedStart = focusedDay.date(calendar: TimelineDay.calendar).timeIntervalSince1970
             let focusedEnd = focusedDay.adding(days: 1).date(calendar: TimelineDay.calendar).timeIntervalSince1970
-            boundaries.append(focusedStart - localBase)
-            boundaries.append(focusedEnd - localBase)
-        }
-        var cuts = [range.start, range.end]
-        for seconds in boundaries {
-            let frame = (seconds * manifest.timebaseHz).rounded(.up)
-            if frame.isFinite, frame > Double(range.start), frame < Double(range.end), frame < Double(Int64.max) {
-                cuts.append(Int64(frame))
-            }
+            if let f = endCutFrame(afterLocal: focusedStart, range: range, manifest: manifest) { cuts.append(f) }
+            if let f = startCutFrame(atOrAfterLocal: focusedEnd, range: range, manifest: manifest) { cuts.append(f) }
         }
         cuts = Array(Set(cuts)).sorted()
         var result: [(frames: FrameRange, priority: Int, tier: Int)] = []

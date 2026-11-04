@@ -84,7 +84,7 @@ public final class SpeechEngine: @unchecked Sendable {
         self.onEvent = onEvent
         self.onDiagnostics = onDiagnostics
         self.continuousArchive = continuousArchive
-        preparedAudio = PreparedAudioCache(capacity: continuousArchive ? 16 : 2)
+        preparedAudio = PreparedAudioCache(capacity: continuousArchive ? 32 : 2)
         configurationFingerprint = try bundle.fingerprint(configuration: configuration,
             rule: continuousArchive ? "silero6-cut-merge-v6" : SpeechConfiguration.analysisRuleVersion)
         // Prefer the latest completed history. Older provenance remains in the archive.
@@ -114,6 +114,10 @@ public final class SpeechEngine: @unchecked Sendable {
         case .senseVoice: 2
         case .funASRNano, .xASR: 1
         }
+    }
+    /// Bounds window-level coordinator claims and SQLite commits independently of native encoder batch size.
+    public var coordinatorWindowBatchSize: Int {
+        continuousArchive ? 4 : archiveBatchSize
     }
 
     public func archiveText(_ result: SpeechRecognition, window: SpeechWindow,
@@ -332,6 +336,11 @@ public final class SpeechEngine: @unchecked Sendable {
     public func warmUp(attempt: SpeechAttempt = SpeechAttempt()) async throws {
         try await perform(operation: .warmUp, attempt: attempt) { [self] recorder in
             try native(attempt: attempt, recorder: recorder).warmUp(attempt: attempt, recorder: recorder)
+            try attempt.checkCancellation()
+            if let speakerDirectory {
+                _ = try? ensureSpeakerRuntime(directory: speakerDirectory, attempt: attempt, recorder: recorder)
+                try attempt.checkCancellation()
+            }
         }
     }
 
@@ -474,9 +483,8 @@ public final class SpeechEngine: @unchecked Sendable {
     /// Already received archive windows only. Dictation never enters this batching path.
     public func transcribe(windows: [SpeechWindow], sequence: SpeechTranscriptionSequence,
                            attempt: SpeechAttempt = SpeechAttempt()) async throws -> [SpeechRecognition] {
-        // A model switch can be queued after the coordinator claims two windows.
-        // Nano handles that already-claimed pair sequentially on its batch=1 graph.
-        guard !windows.isEmpty, windows.count <= 2 else { throw SpeechError.incompatibleWindow }
+        // Coordinator claims up to 4 windows; each native model still steps by its own archiveBatchSize.
+        guard !windows.isEmpty, windows.count <= 4 else { throw SpeechError.incompatibleWindow }
         if windows.count == 1 {
             return [try await transcribe(window: windows[0], sequence: sequence, attempt: attempt)]
         }
@@ -742,9 +750,18 @@ public final class SpeechEngine: @unchecked Sendable {
             offsets[input.windowID] = Float(start) / 16_000
             return .init(samples: Array(recognitionSamples[start...end]), windowID: input.windowID)
         }
-        let decoded = audible.isEmpty ? [] : try native(attempt: attempt, recorder: recorder)
-            .recognizeBatch(audible, fingerprint: configurationFingerprint, attempt: attempt,
-                onEvent: onEvent, recorder: recorder)
+        var decoded: [SpeechRecognition] = []
+        if !audible.isEmpty {
+            let nativeStep = max(1, archiveBatchSize)
+            let recognizer = try native(attempt: attempt, recorder: recorder)
+            decoded.reserveCapacity(audible.count)
+            for start in stride(from: 0, to: audible.count, by: nativeStep) {
+                try attempt.checkCancellation()
+                let slice = Array(audible[start..<min(audible.count, start + nativeStep)])
+                decoded += try recognizer.recognizeBatch(slice, fingerprint: configurationFingerprint,
+                    attempt: attempt, onEvent: onEvent, recorder: recorder)
+            }
+        }
         recorder.value.recognitionInputModelFrames = audible.reduce(0) { $0 + Int64($1.samples.count) }
         guard decoded.count == audible.count, Set(decoded.map(\.windowID)) == Set(audible.map(\.windowID)) else {
             throw SpeechError.nativeResult
@@ -1419,7 +1436,7 @@ public final class SpeechEngine: @unchecked Sendable {
             try channel.send(SpeechAnalysisPage(batch: result, isFinal: true))
             return
         }
-        let pageStep = max(1, lowLatency ? 1 : archiveBatchSize)
+        let pageStep = max(1, lowLatency ? 1 : coordinatorWindowBatchSize)
         for start in stride(from: 0, to: result.windows.count, by: pageStep) {
             let end = min(result.windows.count, start + pageStep)
             let final = end == result.windows.count

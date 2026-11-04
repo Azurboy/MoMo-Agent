@@ -1323,7 +1323,8 @@ final class WatchRuntime {
                                 try transport.allowControlReplay(.receiptApplied(applied))
                                 controlCursors.removeValue(forKey: .receipt)
                             }
-                            catch RecordingError.receiptNeedsReconciliation { reconciliationRequested = true }
+                            catch RecordingError.receiptNeedsReconciliation, RecordingError.receiptMismatch { reconciliationRequested = true }
+                            catch RecordingError.missingChunk, RecordingError.deletedSession, RecordingError.receiverMismatch { break }
                         case .deleteSession(let deletion):
                             // Delayed legacy/foreign commands cannot inherit authority from a new binding.
                             guard deletion.libraryInstanceID != nil else {
@@ -1334,21 +1335,29 @@ final class WatchRuntime {
                             do { try await applyDeletion(deletion) }
                             catch RecordingError.receiverMismatch { try controls.remove(control); continue }
                         case .reconcileResponse(let response):
-                            let outcome = try await store.applyReconciliationResponse(response)
-                            if outcome.requiresFreshRequest { reconciliationRequested = true }
-                            for deletion in outcome.deletions { try await applyDeletion(deletion) }
-                            for applied in outcome.receiptApplications {
-                                try transport.confirmFileDelivery(applied.receipt)
-                            }
-                            if !outcome.unconfirmedReceiptApplications.isEmpty {
-                                for applied in outcome.unconfirmedReceiptApplications {
-                                    try transport.allowControlReplay(.receiptApplied(applied))
+                            guard try await store.boundReceiver() != nil, pendingReceiver == nil else { continue }
+                            do {
+                                let outcome = try await store.applyReconciliationResponse(response)
+                                if outcome.requiresFreshRequest { reconciliationRequested = true }
+                                for deletion in outcome.deletions { try await applyDeletion(deletion) }
+                                for applied in outcome.receiptApplications {
+                                    try transport.confirmFileDelivery(applied.receipt)
                                 }
-                                controlCursors.removeValue(forKey: .receipt)
+                                if !outcome.unconfirmedReceiptApplications.isEmpty {
+                                    for applied in outcome.unconfirmedReceiptApplications {
+                                        try transport.allowControlReplay(.receiptApplied(applied))
+                                    }
+                                    controlCursors.removeValue(forKey: .receipt)
+                                }
+                                if !outcome.retryChunkIDs.isEmpty { fileCursor = 0; fileCursorLoaded = true }
+                                if !outcome.conflictingChunkIDs.isEmpty { nextSyncFailure = String(localized: "部分片段与手机资料冲突，手表原音已保留。") }
+                                else if !outcome.unavailableChunkIDs.isEmpty { nextSyncFailure = String(localized: "对账发现部分原音已不可用，请在手机检查。") }
+                            } catch RecordingReconciliationError.unknownRequest,
+                                    RecordingReconciliationError.responseMismatch,
+                                    RecordingError.missingChunk,
+                                    RecordingError.deletedSession {
+                                reconciliationRequested = true
                             }
-                            if !outcome.retryChunkIDs.isEmpty { fileCursor = 0; fileCursorLoaded = true }
-                            if !outcome.conflictingChunkIDs.isEmpty { nextSyncFailure = String(localized: "部分片段与手机资料冲突，手表原音已保留。") }
-                            else if !outcome.unavailableChunkIDs.isEmpty { nextSyncFailure = String(localized: "对账发现部分原音已不可用，请在手机检查。") }
                         case .receiptApplied, .deleteApplied, .epochEnded, .epochInterrupted, .captureMark, .reconcileRequest:
                             throw WatchRuntimeError.unexpectedControlMessage
                         }
