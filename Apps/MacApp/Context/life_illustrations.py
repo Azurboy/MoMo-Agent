@@ -18,12 +18,67 @@ from context_store import canonical, digest, read_day_start_hour
 
 INTERVALS = (2, 3, 4, 6)
 SETTLE_SECONDS = 600
+EPISODE_GAP_SECONDS = 600
+MIN_SUBSTANTIVE_CHARS = 80
+MIN_MEANINGFUL_CLAUSES = 4
 MAX_ASSET_BYTES = 8 * 1024 * 1024
+
+EDGE_FILLER_RE = re.compile(
+    r'^(?:嗯+|啊+|哦+|噢+|呃+|额+|唉+|哎呀|哎哟|哎+|哈+|嘿+|唔+|喔+|哇+|呀+|啦+|吧+|呢+|吗+|嘛+|呐+|呗+|嘞+|咯+|哼+|哟+|喂+|'
+    r'那个|就是说|就是|然后呢|然后|所以说|所以|其实|反正|好吧|好的|好呀|好嘞|行吧|行啊|对对+|对的|是的|对啊|是啊|'
+    r'没错|没问题|知道了|明白|了解|谢谢|你好|拜拜|再见|ok+|okay+|yeah+|yep+|uh+|um+|ah+|oh+|hmm+|hm+)+|'
+    r'(?:嗯+|啊+|哦+|噢+|呃+|额+|唉+|哈+|呀+|啦+|吧+|呢+|吗+|嘛+|呐+|呗+|嘞+|咯+|哼+|哟+|ok+|okay+|yeah+|uh+|um+|hmm+)+$',
+    re.IGNORECASE,
+)
+
+PURE_FILLER_RE = re.compile(
+    r'^(?:嗯|啊|哦|噢|呃|额|唉|哎|哈|嘿|唔|喔|哇|呀|啦|吧|呢|吗|嘛|呐|呗|嘞|咯|哼|哟|喂|'
+    r'好|行|对|是|中|可以|好的|好吧|好呀|好嘞|行吧|行啊|对的|是的|对啊|是啊|没错|没问题|'
+    r'那个|就是|然后|所以|其实|反正|知道|知道了|明白|了解|谢谢|不客气|你好|拜拜|再见|'
+    r'ok|okay|yeah|yep|nope|uh|um|ah|oh|hmm|hm|well|right|sure)+$',
+    re.IGNORECASE,
+)
 
 
 def semantic_text(text):
     # Punctuation/spacing corrections do not justify another image or invalidate one.
     return ''.join(c for c in unicodedata.normalize('NFKC', text) if c.isalnum()).casefold()
+
+
+def substantive_clause(raw_clause):
+    clause = ''.join(ch for ch in unicodedata.normalize('NFKC', raw_clause) if ch.isalnum())
+    if not clause or PURE_FILLER_RE.fullmatch(clause):
+        return ''
+    previous = None
+    while clause and clause != previous:
+        previous = clause
+        clause = EDGE_FILLER_RE.sub('', clause)
+    if not clause or PURE_FILLER_RE.fullmatch(clause):
+        return ''
+    if len(set(clause.casefold())) == 1 and len(clause) <= 6:
+        return ''
+    return clause
+
+
+def conversation_density(text):
+    normalized = unicodedata.normalize('NFKC', text)
+    alnum_total = sum(1 for ch in normalized if ch.isalnum())
+    clauses = [substantive_clause(part) for part in re.split(r'[，,。！？!?；;：:\s…—～~、]+', normalized)]
+    meaningful = [clause for clause in clauses if len(clause) >= 2]
+    substantive_chars = sum(len(clause) for clause in meaningful)
+    return alnum_total, substantive_chars, len(meaningful)
+
+
+def is_dense_conversation(text, duration_seconds=60.0):
+    alnum_total, substantive_chars, meaningful_clauses = conversation_density(text)
+    if substantive_chars < MIN_SUBSTANTIVE_CHARS or meaningful_clauses < MIN_MEANINGFUL_CLAUSES:
+        return False
+    if alnum_total > 0 and substantive_chars / alnum_total < 0.35 and substantive_chars < 160:
+        return False
+    minutes = max(1.0, float(duration_seconds) / 60.0)
+    if substantive_chars / minutes < 20.0 and substantive_chars < 180:
+        return False
+    return True
 
 
 def local_timezone(timestamp):
@@ -67,10 +122,10 @@ def visit_evidence(context, start, end):
         for visit in snapshot.get('records', []):
             arrival, departure = visit.get('start'), visit.get('end')
             if (visit.get('source_name') != 'CoreLocation visits' or not valid_location(visit, 200)
-                    or not finite_number(arrival) or not finite_number(departure) or departure <= arrival):
+                    or not finite_number(arrival) or not finite_number(departure) or departure - arrival < 300):
                 continue
             overlap = min(end, departure) - max(start, arrival)
-            if overlap < 300:
+            if overlap <= 0 or overlap < min(300.0, max(1.0, end - start)):
                 continue
             key = (arrival, departure, visit.get('latitude'), visit.get('longitude'))
             if key in seen:
@@ -348,42 +403,82 @@ class LifeIllustrations:
                 self.db.execute("UPDATE slots SET source_versions=? WHERE id=? AND state NOT IN ('deleted','invalid')", (canonical(versions), row['id']))
         self.db.execute("INSERT OR REPLACE INTO metadata VALUES('reconciled_sources',?)", (signature,))
 
+    def _episodes(self, context, day_start_hour):
+        spans, pending_ranges = [], []
+        for row in context.db.execute('SELECT id,payload FROM sources WHERE deleted=0 ORDER BY id'):
+            payload = json.loads(row['payload'])
+            for part in payload.get('pending_transcription_ranges', []):
+                pending_ranges.append((float(part['start']), float(part['end'])))
+            for span in payload.get('spans', []):
+                spans.append((float(span['recorded_at']), row['id'], span['id'], span['text']))
+        spans.sort(key=lambda item: (item[0], item[1], item[2]))
+        episodes = []
+        for recorded_at, _, _, text in spans:
+            if conversation_density(text)[1] < 2:
+                continue
+            name, zone = local_timezone(recorded_at)
+            local = dt.datetime.fromtimestamp(recorded_at, zone)
+            logical_day = (local.date() - dt.timedelta(days=int(local.hour < day_start_hour))).isoformat()
+            est_end = recorded_at + max(2.0, min(60.0, len(text) * 0.22))
+            if (episodes and episodes[-1]['logical_day'] == logical_day
+                    and recorded_at - episodes[-1]['speech_end'] <= EPISODE_GAP_SECONDS):
+                episodes[-1]['speech_end'] = max(episodes[-1]['speech_end'], est_end)
+                episodes[-1]['last_recorded_at'] = max(episodes[-1]['last_recorded_at'], recorded_at)
+            else:
+                episodes.append(dict(
+                    start=recorded_at,
+                    speech_end=est_end,
+                    last_recorded_at=recorded_at,
+                    logical_day=logical_day,
+                    timezone=name,
+                ))
+        for index, episode in enumerate(episodes):
+            upper = max(episode['speech_end'], episode['last_recorded_at'] + 1.0, episode['start'] + 60.0)
+            if index + 1 < len(episodes):
+                upper = min(upper, episodes[index + 1]['start'])
+            episode['window_start'] = episode['start']
+            episode['window_end'] = max(episode['last_recorded_at'] + 1e-3, upper)
+        return episodes, pending_ranges
+
     def scan(self, context, now=None):
         now = time.time() if now is None else now
         self.reconcile(context)
         settings = self.db.execute('SELECT * FROM settings WHERE id=1').fetchone()
         if not settings['enabled'] or settings['active_from'] is None:
             return
-        candidates = {}
-        for row in context.db.execute('SELECT payload FROM sources WHERE deleted=0'):
-            for span in json.loads(row['payload']).get('spans', []):
-                if span['recorded_at'] < settings['active_from']:
-                    continue
-                window = window_at(span['recorded_at'], settings['interval_hours'], read_day_start_hour(self.data))
-                if window['window_end'] + SETTLE_SECONDS <= now:
-                    candidates[window['window_start']] = window
-        for start, window in sorted(candidates.items()):
-            end = window['window_end']
+        day_start_hour = read_day_start_hour(self.data)
+        episodes, pending_ranges = self._episodes(context, day_start_hour)
+        for episode in episodes:
+            start, end = episode['window_start'], episode['window_end']
+            if start < settings['active_from']:
+                continue
+            # interval_hours paces batch generation checkpoints; each dense conversation in the batch gets its own slot.
+            batch = window_at(episode['last_recorded_at'], settings['interval_hours'], day_start_hour)
+            if batch['window_end'] + SETTLE_SECONDS > now or episode['speech_end'] + SETTLE_SECONDS > now:
+                continue
+            if any(p_start < episode['speech_end'] + EPISODE_GAP_SECONDS and p_end > start - EPISODE_GAP_SECONDS
+                   for p_start, p_end in pending_ranges):
+                continue
             if self.db.execute('SELECT 1 FROM slots WHERE window_start<? AND window_end>?', (end, start)).fetchone():
-                continue  # Interval changes and re-enabling cannot bill an overlapping window again.
+                continue  # Interval changes and re-enabling cannot bill an overlapping conversation again.
             evidence, versions, semantic, pending = evidence_for(context, start, end)
             if pending:
                 continue
             text = '\n'.join(span['text'] for part in evidence['passages'] for span in part['spans'])
-            if len(semantic_text(text)) < 40:
+            if not is_dense_conversation(text, episode['speech_end'] - start):
                 continue
             identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f'momo-life-v1:{start}:{end}'))
             primary = evidence['visits'][0] if evidence['visits'] else {}
             _, zone = local_timezone(start)
-            day_start = dt.datetime.combine(dt.date.fromisoformat(window['logical_day']),
-                dt.time(read_day_start_hour(self.data)), tzinfo=zone).timestamp()
-            route = trajectory_evidence(context, day_start, end)
+            day_start = dt.datetime.combine(dt.date.fromisoformat(episode['logical_day']),
+                dt.time(day_start_hour), tzinfo=zone).timestamp()
+            route = trajectory_evidence(context, day_start, max(end, batch['window_end']))
             evidence['trajectory'] = route
             self.db.execute('''INSERT OR IGNORE INTO slots
                 (id,window_start,window_end,logical_day,timezone,state,source_versions,evidence,semantic_hash,
                  place,latitude,longitude,place_start,place_end,route_points,created_at,updated_at)
                 VALUES(?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)''',
-                (identity, start, end, window['logical_day'], window['timezone'], canonical(versions), canonical(evidence),
+                (identity, start, end, episode['logical_day'], episode['timezone'], canonical(versions), canonical(evidence),
                  semantic, primary.get('title'), primary.get('latitude'), primary.get('longitude'),
                  primary.get('start'), primary.get('end'), canonical(route), now, now))
 
@@ -468,38 +563,40 @@ class LifeIllustrations:
     def advance(self, generator, context, now=None):
         now = time.time() if now is None else now
         if not generator.availability()['supported'] or not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0]:
-            return
-        row = self.db.execute("SELECT * FROM slots WHERE state='pending' AND retry_at<=? ORDER BY window_start LIMIT 1", (now,)).fetchone()
+            return False
+        row, evidence = None, None
+        for candidate in self.db.execute("SELECT * FROM slots WHERE state='pending' AND retry_at<=? ORDER BY window_start", (now,)).fetchall():
+            cand_evidence, _, _, pending = evidence_for(context, candidate['window_start'], candidate['window_end'])
+            if not pending:
+                cand_evidence['visits'] = json.loads(candidate['evidence']).get('visits', [])
+                row, evidence = candidate, cand_evidence
+                break
         if not row:
-            return
-        evidence, _, _, pending = evidence_for(context, row['window_start'], row['window_end'])
-        evidence['visits'] = json.loads(row['evidence']).get('visits', [])
-        if pending:
-            return
+            return False
         if not self.db.execute("UPDATE slots SET state='preparing' WHERE id=? AND state='pending'", (row['id'],)).rowcount:
-            return
+            return False
         try:
             from life_illustration_generator import parse_scene_output
             summary, brief = (row['summary'], row['brief']) if row['brief'] else parse_scene_output(generator.prepare(evidence))
             if brief.strip() == 'SKIP':
                 self.db.execute("UPDATE slots SET state='skipped',brief=NULL,error=NULL WHERE id=? AND state='preparing'", (row['id'],))
-                return
+                return True
             self.reconcile(context)
             if not self.db.execute("SELECT 1 FROM slots WHERE id=? AND state='preparing'", (row['id'],)).fetchone():
-                return
+                return True
             pending = evidence_for(context, row['window_start'], row['window_end'])[3]
             if pending or not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0] or not generator.availability()['supported']:
                 self.db.execute("UPDATE slots SET state='pending',brief=?,summary=? WHERE id=? AND state='preparing'", (brief, summary, row['id']))
-                return
+                return False
             request_id = row['request_id'] or str(uuid.uuid4())
             with self.write():
                 if not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0]:
                     self.db.execute("UPDATE slots SET state='pending' WHERE id=? AND state='preparing'", (row['id'],))
-                    return
+                    return False
                 claimed = self.db.execute("UPDATE slots SET state='submitting',brief=?,summary=?,request_id=?,attempt=attempt+1,updated_at=? WHERE id=? AND state='preparing'",
                                           (brief, summary, request_id, now, row['id'])).rowcount
             if not claimed:
-                return
+                return False
             def remember(response_id):
                 self.db.execute("UPDATE slots SET response_id=? WHERE id=? AND state='submitting'", (response_id, row['id']))
             raw = generator.generate(brief, request_id, remember)
@@ -509,13 +606,15 @@ class LifeIllustrations:
             self.reconcile(context)
             self.save_image(row['id'], raw)
             spool.unlink(missing_ok=True)
+            return True
         except Exception as error:
             current = self.db.execute('SELECT state,attempt FROM slots WHERE id=?', (row['id'],)).fetchone()
             if current['state'] not in ('preparing', 'submitting'):
-                return
+                return False
             safe_retry = current['state'] == 'preparing' or getattr(error, 'safe_to_retry', False)
             attempts = max(current['attempt'], row['attempt'] + 1)
             state = 'pending' if safe_retry and attempts < 3 else ('failed' if safe_retry else 'needs_review')
             code = 'service_unavailable' if safe_retry else 'generation_outcome_unknown'
             self.db.execute('UPDATE slots SET state=?,attempt=?,retry_at=?,error=?,updated_at=? WHERE id=? AND state=?',
                             (state, attempts, now + 60 * 2**attempts, code, now, row['id'], current['state']))
+            return False

@@ -78,17 +78,10 @@ struct LibraryView: View {
         .watchStatusRefresh(requestWatchStatus)
         .navigationTitle("转录")
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                if !searching, let illustrations, !selectedDayIllustrations.isEmpty {
-                    LifeIllustrationStripView(items: selectedDayIllustrations, store: illustrations,
-                        open: { selectedIllustration = $0 }, showSource: showIllustrationSource,
-                        failure: { navigationFailure = $0 })
-                }
-                if playback.activeTarget != nil {
-                    AudioMiniPlayer(playback: playback, openRecording: { id in openRecording(id) },
-                        openWindow: { recordingID = nil; selectedWindow = TimelineDestination(windowID: $0) })
-                        .padding(.horizontal, 12).padding(.vertical, 8).background(MoMoPalette.canvas)
-                }
+            if playback.activeTarget != nil {
+                AudioMiniPlayer(playback: playback, openRecording: { id in openRecording(id) },
+                    openWindow: { recordingID = nil; selectedWindow = TimelineDestination(windowID: $0) })
+                    .padding(.horizontal, 12).padding(.vertical, 8).background(MoMoPalette.canvas)
             }
         }
         .navigationDestination(item: $selectedWindow) { destination in
@@ -129,9 +122,19 @@ struct LibraryView: View {
         }
         .fullScreenCover(item: $selectedIllustration) { item in
             if let illustrations {
-                LifeIllustrationJourneyMapView(store: illustrations, initialID: item.id) { source in
-                    selectedIllustration = nil
-                    showIllustrationSource(source)
+                let dayItems = illustrations.items.filter {
+                    $0.logicalDay == item.logicalDay && illustrations.imageURL(for: $0) != nil
+                }
+                if dayItems.contains(where: { $0.coordinate != nil }) {
+                    LifeIllustrationJourneyMapView(store: illustrations, initialID: item.id) { source in
+                        selectedIllustration = nil
+                        showIllustrationSource(source)
+                    }
+                } else {
+                    LifeIllustrationViewer(store: illustrations, initialID: item.id) { source in
+                        selectedIllustration = nil
+                        showIllustrationSource(source)
+                    }
                 }
             }
         }
@@ -155,8 +158,8 @@ struct LibraryView: View {
         }
     }
 
-    private var selectedDayIllustrations: [LifeIllustration] {
-        let day = timeline.selectedDay
+    private func illustrations(for day: TimelineDay) -> [LifeIllustration] {
+        guard !searching else { return [] }
         let key = String(format: "%04d-%02d-%02d", day.year, day.month, day.day)
         return (illustrations?.items ?? []).filter {
             $0.logicalDay == key && illustrations?.imageURL(for: $0) != nil
@@ -351,7 +354,11 @@ struct LibraryView: View {
                     ForEach(timeline.days) { day in
                         TimelineDayPage(day: day, timeline: timeline, reading: readingStates.state(for: day),
                             transcription: transcription, speechFailure: speechFailure, dateRange: dateRange,
-                            refresh: refresh, open: { selectedWindow = $0 })
+                            illustrations: illustrations, dayIllustrations: illustrations(for: day),
+                            refresh: refresh, open: { selectedWindow = $0 },
+                            openIllustration: { selectedIllustration = $0 },
+                            showIllustrationSource: showIllustrationSource,
+                            illustrationFailure: { navigationFailure = $0 })
                             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                             .id(day)
                             .accessibilityHidden(day != timeline.selectedDay)
@@ -652,6 +659,7 @@ private struct TimelinePagerSnapshot: Equatable {
 @MainActor @Observable private final class TimelineDayReadingState {
     var position = ScrollPosition(idType: TimelineWindowID.self)
     var positioned = false
+    var userScrolled = false
 }
 
 private struct TimelineDayPage: View {
@@ -661,64 +669,76 @@ private struct TimelineDayPage: View {
     let transcription: TranscriptionSnapshot?
     let speechFailure: String?
     let dateRange: TimelineDateRange
+    let illustrations: LifeIllustrationStore?
+    let dayIllustrations: [LifeIllustration]
     let refresh: () async -> Void
     let open: (TimelineDestination) -> Void
+    let openIllustration: (LifeIllustration) -> Void
+    let showIllustrationSource: (LifeIllustration) -> Void
+    let illustrationFailure: (String) -> Void
 
     var body: some View {
         let windows = timeline.listWindows[day] ?? []
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
-                ForEach(windows) { window in
-                    VStack(alignment: .leading, spacing: 0) {
-                        Button { open(TimelineDestination(windowID: window.id)) } label: {
-                            TimelineRow(window: window, summary: timeline.summary(for: window),
-                                status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
-                                connected: window.id != windows.last?.id,
-                                continuesFromPrevious: window.id != windows.first?.id,
-                                includeUTCOffset: repeatedClockRanges.contains(window.id))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("timeline.window.\(window.id.key)")
-                        if !window.marks.isEmpty {
-                            ScrollView(.horizontal) {
-                                HStack(spacing: 12) {
-                                    ForEach(window.marks) { mark in
-                                        Button {
-                                            open(TimelineDestination(windowID: window.id, markID: mark.id))
-                                        } label: {
-                                            Label(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true), systemImage: "flag.fill")
-                                                .phoneText(.caption).monospacedDigit().frame(minHeight: 44)
+            VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
+                    ForEach(windows) { window in
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button { open(TimelineDestination(windowID: window.id)) } label: {
+                                TimelineRow(window: window, summary: timeline.summary(for: window),
+                                    status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
+                                    connected: window.id != windows.last?.id,
+                                    continuesFromPrevious: window.id != windows.first?.id,
+                                    includeUTCOffset: repeatedClockRanges.contains(window.id))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("timeline.window.\(window.id.key)")
+                            if !window.marks.isEmpty {
+                                ScrollView(.horizontal) {
+                                    HStack(spacing: 12) {
+                                        ForEach(window.marks) { mark in
+                                            Button {
+                                                open(TimelineDestination(windowID: window.id, markID: mark.id))
+                                            } label: {
+                                                Label(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true), systemImage: "flag.fill")
+                                                    .phoneText(.caption).monospacedDigit().frame(minHeight: 44)
+                                            }
+                                            .buttonStyle(.plain).foregroundStyle(MoMoPalette.ink)
+                                            .accessibilityLabel("查看 \(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true)) 的标记")
+                                            .accessibilityIdentifier("timeline.mark.\(mark.id)")
                                         }
-                                        .buttonStyle(.plain).foregroundStyle(MoMoPalette.ink)
-                                        .accessibilityLabel("查看 \(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true)) 的标记")
-                                        .accessibilityIdentifier("timeline.mark.\(mark.id)")
                                     }
-                                }
-                            }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
-                                .overlay(alignment: .leading) {
-                                    if window.id != windows.last?.id {
-                                        Rectangle().fill(MoMoPalette.line).frame(width: 1)
-                                            .frame(width: 12).accessibilityHidden(true)
+                                }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
+                                    .overlay(alignment: .leading) {
+                                        if window.id != windows.last?.id {
+                                            Rectangle().fill(MoMoPalette.line).frame(width: 1)
+                                                .frame(width: 12).accessibilityHidden(true)
+                                        }
                                     }
-                                }
+                            }
                         }
+                        .id(window.id)
                     }
-                    .id(window.id)
+                    if let failure = timeline.failures[day] {
+                        Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                        Button("重试") { Task { await timeline.load(day) } }.frame(minHeight: 44)
+                    } else if windows.isEmpty, timeline.snapshots[day] != nil,
+                              !timeline.loading.contains(day), !dateRange.isUnknown {
+                        ContentUnavailableView(timeline.earliestDay == nil ? String(localized: "还没有可读的转录") : String(localized: "这一天没有可读的转录"),
+                            systemImage: "waveform", description: Text(timeline.earliestDay == nil
+                                ? String(localized: "在 Apple Watch 上开始录音，内容会自动出现在这里。")
+                                : String(localized: "有说话的时段会显示在这里，长时间安静不会占据时间线。")))
+                            .accessibilityIdentifier("timeline.day.empty")
+                    }
                 }
-                if let failure = timeline.failures[day] {
-                    Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
-                    Button("重试") { Task { await timeline.load(day) } }.frame(minHeight: 44)
-                } else if windows.isEmpty, timeline.snapshots[day] != nil,
-                          !timeline.loading.contains(day), !dateRange.isUnknown {
-                    ContentUnavailableView(timeline.earliestDay == nil ? String(localized: "还没有可读的转录") : String(localized: "这一天没有可读的转录"),
-                        systemImage: "waveform", description: Text(timeline.earliestDay == nil
-                            ? String(localized: "在 Apple Watch 上开始录音，内容会自动出现在这里。")
-                            : String(localized: "有说话的时段会显示在这里，长时间安静不会占据时间线。")))
-                        .accessibilityIdentifier("timeline.day.empty")
+                .scrollTargetLayout()
+                if let illustrations, !dayIllustrations.isEmpty {
+                    LifeIllustrationStripView(items: dayIllustrations, store: illustrations, horizontalMargin: 0,
+                        open: openIllustration, showSource: showIllustrationSource, failure: illustrationFailure)
+                        .padding(.top, 14)
                 }
             }
-            .scrollTargetLayout()
             .padding(.bottom, 24)
         }
         .overlay {
@@ -743,6 +763,7 @@ private struct TimelineDayPage: View {
             guard day == timeline.selectedDay, phase == .tracking || phase == .interacting else { return }
             // A delayed first load must not take control back after the reader starts scrolling.
             reading.positioned = true
+            reading.userScrolled = true
         }
         .onChange(of: timeline.currentID(reading.position.viewID(type: TimelineWindowID.self))) { _, replacement in
             guard let previous = reading.position.viewID(type: TimelineWindowID.self),
@@ -753,6 +774,12 @@ private struct TimelineDayPage: View {
             guard day == timeline.selectedDay, !windows.isEmpty,
                   !reading.positioned else { return }
             reading.positioned = true
+            var position = ScrollPosition(idType: TimelineWindowID.self)
+            position.scrollTo(edge: .bottom)
+            reading.position = position
+        }
+        .onChange(of: day == timeline.selectedDay ? !dayIllustrations.isEmpty : false) { _, hasIllustrations in
+            guard day == timeline.selectedDay, hasIllustrations, !reading.userScrolled else { return }
             var position = ScrollPosition(idType: TimelineWindowID.self)
             position.scrollTo(edge: .bottom)
             reading.position = position

@@ -235,14 +235,16 @@ struct DesktopSources: View {
                     if model.contextLoading { ProgressView("正在读取记录").padding(24) }
                 }
                 .scrollTargetLayout()
-                .padding(.horizontal, 12).padding(.bottom, 24)
+                .padding(.horizontal, 12)
+                if query.isEmpty, !dayIllustrations.isEmpty {
+                    LifeIllustrationStripView(items: dayIllustrations, store: model.lifeIllustrations, horizontalMargin: 16,
+                        open: { selectedIllustrationID = $0.id }, showSource: { showSource(for: $0) },
+                        failure: { illustrationError = $0 })
+                        .padding(.top, 12)
+                }
+                Spacer().frame(height: 24)
             }
             .scrollPosition(id: $timelineAnchor, anchor: .top)
-            if query.isEmpty, !dayIllustrations.isEmpty {
-                LifeIllustrationStripView(items: dayIllustrations, store: model.lifeIllustrations,
-                    open: { selectedIllustrationID = $0.id }, showSource: { showSource(for: $0) },
-                    failure: { illustrationError = $0 })
-            }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

@@ -2,9 +2,56 @@ import SwiftUI
 import MoMoAgentClient
 #if os(iOS)
 import UIKit
+typealias PlatformIllustrationImage = UIImage
 #else
 import AppKit
+typealias PlatformIllustrationImage = NSImage
 #endif
+
+final class LifeIllustrationImageCache: @unchecked Sendable {
+    static let shared = LifeIllustrationImageCache()
+    private let cache: NSCache<NSURL, PlatformIllustrationImage> = {
+        let store = NSCache<NSURL, PlatformIllustrationImage>()
+        store.countLimit = 96
+        store.totalCostLimit = 96 * 1024 * 1024
+        return store
+    }()
+
+    func cached(_ url: URL) -> PlatformIllustrationImage? {
+        cache.object(forKey: url as NSURL)
+    }
+
+    func swiftUIImage(_ url: URL) -> Image? {
+        guard let img = cached(url) else { return nil }
+        #if os(iOS)
+        return Image(uiImage: img)
+        #else
+        return Image(nsImage: img)
+        #endif
+    }
+
+    func load(_ url: URL) async -> PlatformIllustrationImage? {
+        if let hit = cached(url) { return hit }
+        let decoded: PlatformIllustrationImage? = await Task.detached(priority: .userInitiated) {
+            #if os(iOS)
+            guard let raw = UIImage(contentsOfFile: url.path) else { return nil }
+            return await raw.byPreparingForDisplay() ?? raw
+            #else
+            guard let data = try? Data(contentsOf: url), let raw = NSImage(data: data) else { return nil }
+            return raw
+            #endif
+        }.value
+        if let decoded {
+            #if os(iOS)
+            let cost = Int(decoded.size.width * decoded.size.height * decoded.scale * decoded.scale * 4)
+            #else
+            let cost = Int(decoded.size.width * decoded.size.height * 4)
+            #endif
+            cache.setObject(decoded, forKey: url as NSURL, cost: max(1, cost))
+        }
+        return decoded
+    }
+}
 
 extension LifeIllustration {
     var caption: String {
@@ -22,22 +69,36 @@ extension LifeIllustration {
 struct LifeIllustrationImageView: View {
     let url: URL
     var contentMode: ContentMode = .fit
-    @State private var image: Image?
+    @State private var loaded: Image?
+    @State private var loadedURL: URL?
+
+    private var currentImage: Image? {
+        if loadedURL == url, let loaded { return loaded }
+        return LifeIllustrationImageCache.shared.swiftUIImage(url)
+    }
 
     var body: some View {
         Color.clear.aspectRatio(1, contentMode: .fit)
-            .overlay { if let image { image.resizable().aspectRatio(contentMode: contentMode) } }
+            .overlay {
+                if let img = currentImage {
+                    img.resizable().aspectRatio(contentMode: contentMode)
+                }
+            }
             .clipped()
-        .task(id: url) {
-            image = nil
-            let bytes = await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
-            guard !Task.isCancelled, let bytes else { return }
-            #if os(iOS)
-            image = UIImage(data: bytes).map { Image(uiImage: $0) }
-            #else
-            image = NSImage(data: bytes).map { Image(nsImage: $0) }
-            #endif
-        }
+            .task(id: url) {
+                if let hit = LifeIllustrationImageCache.shared.swiftUIImage(url) {
+                    loadedURL = url
+                    loaded = hit
+                    return
+                }
+                guard let platform = await LifeIllustrationImageCache.shared.load(url), !Task.isCancelled else { return }
+                loadedURL = url
+                #if os(iOS)
+                loaded = Image(uiImage: platform)
+                #else
+                loaded = Image(nsImage: platform)
+                #endif
+            }
     }
 }
 
@@ -79,6 +140,7 @@ struct LifeIllustrationMetadata: View {
             if count > 1 {
                 Text(String(format: "%02d / %02d", position, count))
                     .font(.system(.caption2, design: .monospaced))
+                    .contentTransition(.numericText())
                     .fixedSize()
                     .accessibilityIdentifier("lifeIllustration.viewer.page")
             }
@@ -120,7 +182,7 @@ struct LifeIllustrationSettingsControls: View {
         }))
         .disabled(!store.settings.supported || saving)
         .accessibilityIdentifier("lifeIllustration.settings.enabled")
-        Picker("生成间隔", selection: Binding(get: { store.settings.intervalHours }, set: {
+        Picker("批量生成", selection: Binding(get: { store.settings.intervalHours }, set: {
             save(enabled: store.settings.enabled, interval: $0)
         })) {
             ForEach([2, 3, 4, 6], id: \.self) { hours in Text("每 \(hours) 小时").tag(hours) }
@@ -165,6 +227,7 @@ struct LifeIllustrationViewer: View {
     @State private var zoomed = false
     @State private var failure: String?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     init(store: LifeIllustrationStore, initialID: String, showSource: @escaping (LifeIllustration) -> Void) {
         self.store = store
@@ -183,59 +246,71 @@ struct LifeIllustrationViewer: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                let side = max(0, min(geometry.size.width - 48, geometry.size.height * 0.54))
+                let side = max(0, min(geometry.size.width - 48, geometry.size.height * 0.50))
                 ScrollView {
-                VStack(spacing: 16) {
-                    if let selected {
-                        LifeIllustrationMetadata(illustration: selected,
-                            position: (items.firstIndex(where: { $0.id == selection }) ?? 0) + 1,
-                            count: items.count)
+                    VStack(spacing: 14) {
+                        if let selected {
+                            LifeIllustrationMetadata(
+                                illustration: selected,
+                                position: (items.firstIndex(where: { $0.id == selection }) ?? 0) + 1,
+                                count: items.count
+                            )
                             .frame(width: side)
-                    }
-                    TabView(selection: $selection) {
-                        ForEach(items) { item in
-                            Group {
-                                if let url = store.imageURL(for: item, thumbnail: false) {
-                                    LifeIllustrationZoomView(url: url, zoomed: Binding(
-                                        get: { selection == item.id && zoomed },
-                                        set: { if selection == item.id { zoomed = $0 } }))
-                                        .id(item.id + (selection == item.id ? "-selected" : "-offscreen"))
+                            .animation(.snappy(duration: 0.2), value: selection)
+                        }
+                        TabView(selection: $selection) {
+                            ForEach(items) { item in
+                                Group {
+                                    if let url = store.imageURL(for: item, thumbnail: false) {
+                                        LifeIllustrationZoomView(
+                                            url: url,
+                                            isSelected: selection == item.id,
+                                            zoomed: Binding(
+                                                get: { selection == item.id && zoomed },
+                                                set: { if selection == item.id { zoomed = $0 } }
+                                            )
+                                        )
                                         .frame(width: side, height: side)
                                         .modifier(LifeIllustrationPlate())
+                                    }
                                 }
-                            }
-                            .tag(item.id)
-                            .contextMenu {
-                                Button("查看依据", systemImage: "text.alignleft") { dismiss(); showSource(item) }
-                                Button("删除", systemImage: "trash", role: .destructive) {
-                                    Task {
-                                        do { try await store.delete(item); if items.isEmpty { dismiss() } }
-                                        catch { failure = error.localizedDescription }
+                                .tag(item.id)
+                                .contextMenu {
+                                    Button("查看依据", systemImage: "text.alignleft") { dismiss(); showSource(item) }
+                                    Button("删除", systemImage: "trash", role: .destructive) {
+                                        Task {
+                                            do { try await store.delete(item); if items.isEmpty { dismiss() } }
+                                            catch { failure = error.localizedDescription }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .frame(height: side)
-                    .accessibilityIdentifier("lifeIllustration.viewer.image")
-                    if let selected {
-                        let index = items.firstIndex { $0.id == selected.id } ?? 0
-                        LifeIllustrationDetailView(illustration: selected, previous: index > 0 ? items[index - 1] : nil) {
-                            dismiss(); showSource(selected)
+                        .tabViewStyle(.page(indexDisplayMode: .never))
+                        .frame(height: side)
+                        .accessibilityIdentifier("lifeIllustration.viewer.image")
+
+                        if items.count > 1 {
+                            stickerSwitcherBar(width: side)
                         }
-                        .padding(.horizontal, 24)
+
+                        if let selected {
+                            let index = items.firstIndex { $0.id == selected.id } ?? 0
+                            LifeIllustrationDetailView(illustration: selected, previous: index > 0 ? items[index - 1] : nil) {
+                                dismiss(); showSource(selected)
+                            }
+                            .padding(.horizontal, 24)
+                            .animation(.snappy(duration: 0.2), value: selection)
+                        }
                     }
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.vertical, 20)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background {
+                    VerticalPullDismissInstaller(enabled: !zoomed) { dismiss() }
                 }
             }
             .background(MoMoPalette.canvas)
-            .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
-                if !zoomed, value.translation.height > 100,
-                   abs(value.translation.height) > abs(value.translation.width) * 1.5 { dismiss() }
-            })
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
@@ -249,6 +324,15 @@ struct LifeIllustrationViewer: View {
                 }
             }
         }
+        .task(id: items.map(\.id)) {
+            // Pre-decode all full-size stickers of this day off the main thread so swiping is 120Hz-smooth.
+            for item in items {
+                if Task.isCancelled { return }
+                if let url = store.imageURL(for: item, thumbnail: false) {
+                    _ = await LifeIllustrationImageCache.shared.load(url)
+                }
+            }
+        }
         .onChange(of: selection) { zoomed = false }
         .onChange(of: items.map(\.id)) { _, ids in
             if ids.isEmpty { dismiss() }
@@ -258,11 +342,126 @@ struct LifeIllustrationViewer: View {
             Button("好", role: .cancel) { failure = nil }
         } message: { Text(failure ?? "") }
     }
+
+    private func stickerSwitcherBar(width: CGFloat) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(items) { item in
+                        let active = item.id == selection
+                        Button {
+                            withAnimation(.snappy(duration: 0.22)) {
+                                selection = item.id
+                            }
+                        } label: {
+                            if let thumb = store.imageURL(for: item) {
+                                LifeIllustrationImageView(url: thumb)
+                                    .frame(width: 40, height: 40)
+                                    .padding(4)
+                                    .background(LifeIllustrationPaper.fill(for: colorScheme), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .strokeBorder(
+                                                active ? MoMoPalette.ink.opacity(0.65) : MoMoPalette.line,
+                                                lineWidth: active ? 1.2 : 0.6
+                                            )
+                                    }
+                                    .scaleEffect(active ? 1.0 : 0.94)
+                                    .opacity(active ? 1.0 : 0.68)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .id(item.id)
+                        .accessibilityLabel(item.dateCaption)
+                        .accessibilityIdentifier("lifeIllustration.viewer.thumb.\(item.id)")
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 2)
+            }
+            .frame(width: width)
+            .onChange(of: selection) { _, newID in
+                withAnimation(.snappy(duration: 0.22)) {
+                    proxy.scrollTo(newID, anchor: .center)
+                }
+            }
+        }
+    }
 }
 
-// UIScrollView keeps pinch zoom and image panning native, without taking timeline gestures.
+// Strictly vertical downward pan recognizer so horizontal TabView swipes never contend with SwiftUI DragGesture.
+private struct VerticalPullDismissInstaller: UIViewRepresentable {
+    let enabled: Bool
+    let onDismiss: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(enabled: enabled, onDismiss: onDismiss) }
+
+    func makeUIView(context: Context) -> PassthroughInstallerView {
+        let view = PassthroughInstallerView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: PassthroughInstallerView, context: Context) {
+        context.coordinator.enabled = enabled
+        context.coordinator.onDismiss = onDismiss
+        uiView.attachIfNeeded()
+    }
+
+    final class PassthroughInstallerView: UIView {
+        weak var coordinator: Coordinator?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+        func attachIfNeeded() {
+            guard let coordinator, let host = superview?.superview else { return }
+            if coordinator.recognizer.view !== host {
+                coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
+                host.addGestureRecognizer(coordinator.recognizer)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var enabled: Bool
+        var onDismiss: () -> Void
+        lazy var recognizer: UIPanGestureRecognizer = {
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handle(_:)))
+            pan.cancelsTouchesInView = false
+            pan.delegate = self
+            return pan
+        }()
+
+        init(enabled: Bool, onDismiss: @escaping () -> Void) {
+            self.enabled = enabled
+            self.onDismiss = onDismiss
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard enabled, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let v = pan.velocity(in: pan.view)
+            return v.y > 0 && abs(v.y) > abs(v.x) * 1.6
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        @objc private func handle(_ pan: UIPanGestureRecognizer) {
+            guard enabled, pan.state == .ended else { return }
+            let t = pan.translation(in: pan.view)
+            if t.y > 95 && abs(t.y) > abs(t.x) * 1.5 {
+                onDismiss()
+            }
+        }
+    }
+}
+
+// UIScrollView keeps pinch zoom and image panning native, without tearing down pages during horizontal swipes.
 struct LifeIllustrationZoomView: UIViewRepresentable {
     let url: URL
+    var isSelected: Bool = true
     @Binding var zoomed: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -275,21 +474,25 @@ struct LifeIllustrationZoomView: UIViewRepresentable {
         scroll.panGestureRecognizer.isEnabled = false
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
-        scroll.imageView.image = UIImage(contentsOfFile: url.path)
         scroll.imageView.contentMode = .scaleAspectFit
         scroll.addSubview(scroll.imageView)
         let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         scroll.addGestureRecognizer(doubleTap)
+        context.coordinator.loadImage(into: scroll, url: url)
         return scroll
     }
 
     func updateUIView(_ scroll: ImageScrollView, context: Context) {
         context.coordinator.parent = self
         if context.coordinator.url != url {
-            scroll.setZoomScale(1, animated: false)
-            scroll.imageView.image = UIImage(contentsOfFile: url.path)
             context.coordinator.url = url
+            scroll.setZoomScale(1, animated: false)
+            scroll.panGestureRecognizer.isEnabled = false
+            context.coordinator.loadImage(into: scroll, url: url)
+        } else if !isSelected, scroll.zoomScale > 1.001 {
+            scroll.setZoomScale(1, animated: false)
+            scroll.panGestureRecognizer.isEnabled = false
         }
     }
 
@@ -301,16 +504,34 @@ struct LifeIllustrationZoomView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, UIScrollViewDelegate {
+    @MainActor final class Coordinator: NSObject, UIScrollViewDelegate {
         var parent: LifeIllustrationZoomView
         var url: URL
+        private var loadTask: Task<Void, Never>?
+
         init(parent: LifeIllustrationZoomView) { self.parent = parent; url = parent.url }
+
+        func loadImage(into scroll: ImageScrollView, url: URL) {
+            loadTask?.cancel()
+            if let hit = LifeIllustrationImageCache.shared.cached(url) {
+                scroll.imageView.image = hit
+                return
+            }
+            loadTask = Task { [weak scroll] in
+                guard let decoded = await LifeIllustrationImageCache.shared.load(url),
+                      !Task.isCancelled, let scroll else { return }
+                scroll.imageView.image = decoded
+            }
+        }
+
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ImageScrollView)?.imageView }
+
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             let zoomed = scrollView.zoomScale > 1.01
             scrollView.panGestureRecognizer.isEnabled = zoomed
             parent.zoomed = zoomed
         }
+
         @objc func doubleTap(_ gesture: UITapGestureRecognizer) {
             guard let scroll = gesture.view as? ImageScrollView else { return }
             if scroll.zoomScale > 1.01 {
@@ -336,7 +557,7 @@ struct LifeIllustrationZoomView: NSViewRepresentable {
         scroll.allowsMagnification = true
         scroll.minMagnification = 1
         scroll.maxMagnification = 5
-        scroll.imageView.image = NSImage(contentsOf: url)
+        scroll.imageView.image = LifeIllustrationImageCache.shared.cached(url) ?? NSImage(contentsOf: url)
         scroll.imageView.imageScaling = .scaleProportionallyUpOrDown
         scroll.documentView = scroll.imageView
         let doubleClick = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleClick(_:)))
@@ -348,7 +569,7 @@ struct LifeIllustrationZoomView: NSViewRepresentable {
     func updateNSView(_ scroll: ImageScrollView, context: Context) {
         if context.coordinator.url != url {
             scroll.magnification = 1
-            scroll.imageView.image = NSImage(contentsOf: url)
+            scroll.imageView.image = LifeIllustrationImageCache.shared.cached(url) ?? NSImage(contentsOf: url)
             context.coordinator.url = url
         }
     }
@@ -388,7 +609,7 @@ struct LifeIllustrationDetailView: View {
                     }
                 }
                 if let previous, let departure = previous.placeEnd, let arrival = illustration.placeStart,
-                   arrival >= departure, let place = previous.place, !place.isEmpty {
+                   arrival >= departure, let place = previous.place, !place.isEmpty, place != illustration.place {
                     Text("\(place) \(previous.clock(departure)) → \(illustration.clock(arrival))")
                         .font(.system(.caption, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
                 }

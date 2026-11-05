@@ -7,22 +7,24 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         continueAfterFailure = false
         let app = launch(appearance: .light)
         defer { app.terminate() }
-        let picture = app.buttons["lifeIllustration.stamp.sample-night"]
+        let firstStamp = app.buttons["lifeIllustration.stamp.sample-morning"]
         try assertJournalStrip(app)
         attach(app, name: "01_iphone_timeline_inline")
-        picture.tap()
+        firstStamp.tap()
         assertMap(app)
         attach(app, name: "02_iphone_journey_map")
+        assertMapZoomAndReset(app)
         app.buttons["lifeIllustration.map.card.sample-night"].tap()
         let caption = app.staticTexts["lifeIllustration.viewer.caption"]
         XCTAssertTrue(caption.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["lifeIllustration.viewer.share"].exists)
-        XCTAssertTrue(caption.label.contains("20:00–23:00"))
-        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "03 / 03")
+        XCTAssertTrue(caption.label.contains("20:15–20:50"))
+        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "04 / 04")
         XCTAssertFalse(app.staticTexts["lifeIllustration.viewer.summary"].label.isEmpty)
+        XCTAssertTrue(app.buttons["lifeIllustration.viewer.thumb.sample-morning"].exists)
         attach(app, name: "03_iphone_detail_zoom")
         attach(app, name: "02_iphone_fullscreen_viewer")
-        assertViewerInteractions(app, picture: picture)
+        assertViewerInteractions(app, picture: firstStamp)
         app.buttons["library.more"].tap()
         app.buttons["设置"].tap()
         let row = app.buttons["settings.lifeIllustrations"]
@@ -38,7 +40,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
     }
 
     private func assertViewerInteractions(_ app: XCUIApplication, picture: XCUIElement) {
-        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "03 / 03")
+        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "04 / 04")
         let caption = app.staticTexts["lifeIllustration.viewer.caption"]
         let viewer = app.descendants(matching: .any)["lifeIllustration.viewer.image"]
         XCTAssertGreaterThanOrEqual(viewer.frame.width, 300)
@@ -73,14 +75,23 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         viewer.swipeRight()
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", lastCaption), object: caption)
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 5), .completed)
+        // Verify smooth direct thumbnail switching in the viewer strip
+        app.buttons["lifeIllustration.viewer.thumb.sample-morning"].tap()
+        let jumpedFirst = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "01 / 04"),
+            object: app.staticTexts["lifeIllustration.viewer.page"]
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [jumpedFirst], timeout: 5), .completed)
         app.swipeDown()
         XCTAssertTrue(app.buttons["lifeIllustration.map.close"].waitForExistence(timeout: 5))
         app.buttons["lifeIllustration.map.close"].tap()
         XCTAssertTrue(picture.waitForExistence(timeout: 5))
         XCTAssertTrue(picture.isHittable)
         picture.tap()
-        app.buttons["lifeIllustration.map.card.sample-night"].tap()
+        // Verify tapping an individual sticker inside the multi-image stop opens that exact moment
+        app.buttons["lifeIllustration.map.sticker.sample-code"].tap()
         XCTAssertTrue(app.buttons["lifeIllustration.viewer.close"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "02 / 04")
         app.buttons["lifeIllustration.viewer.close"].tap()
         app.buttons["lifeIllustration.map.close"].tap()
         XCTAssertTrue(picture.isHittable)
@@ -100,11 +111,11 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         continueAfterFailure = false
         let app = launch(appearance: .dark)
         defer { app.terminate() }
-        let picture = app.buttons["lifeIllustration.stamp.sample-night"]
+        let firstStamp = app.buttons["lifeIllustration.stamp.sample-morning"]
         try assertJournalStrip(app)
         try assertDarkCanvas(app)
         attach(app, name: "01b_iphone_timeline_inline_dark")
-        picture.tap()
+        firstStamp.tap()
         assertMap(app)
         attach(app, name: "02b_iphone_journey_map_dark")
         app.buttons["lifeIllustration.map.card.sample-night"].tap()
@@ -112,7 +123,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         try assertDarkCanvas(app)
         attach(app, name: "02b_iphone_fullscreen_viewer_dark")
         attach(app, name: "03b_iphone_detail_zoom_dark")
-        assertViewerInteractions(app, picture: picture)
+        assertViewerInteractions(app, picture: firstStamp)
     }
 
     private func assertMap(_ app: XCUIApplication) {
@@ -124,25 +135,41 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["地图暂不可用 · 已保留定位连线"].exists)
         XCTAssertFalse(app.staticTexts["低功耗定位 · 道路连线为估算"].exists)
         XCTAssertFalse(app.staticTexts["今日行程手帐"].exists)
-        let cards = ["sample-code", "sample-outdoor", "sample-night"].map {
-            app.buttons["lifeIllustration.map.card.\($0)"]
-        }
+        // Single-page map: never paginate into multiple pages
+        XCTAssertFalse(app.buttons["上一页"].exists)
+        XCTAssertFalse(app.buttons["下一页"].exists)
+        XCTAssertTrue(app.buttons["lifeIllustration.map.zoomIn"].isHittable)
+        XCTAssertTrue(app.buttons["lifeIllustration.map.zoomOut"].isHittable)
+        let firstStop = app.descendants(matching: .any)["lifeIllustration.map.card.sample-morning"].firstMatch
+        let secondStop = app.buttons["lifeIllustration.map.card.sample-outdoor"]
+        let thirdStop = app.buttons["lifeIllustration.map.card.sample-night"]
+        let cards = [firstStop, secondStop, thirdStop]
         for card in cards {
             XCTAssertTrue(card.exists)
-            XCTAssertTrue(card.isHittable)
             XCTAssertTrue(app.frame.contains(card.frame))
         }
+        // Multi-image stop at 望京工作室 exposes both sticker buttons
+        XCTAssertTrue(app.buttons["lifeIllustration.map.sticker.sample-morning"].isHittable)
+        XCTAssertTrue(app.buttons["lifeIllustration.map.sticker.sample-code"].isHittable)
         XCTAssertFalse(cards[0].frame.intersects(cards[1].frame))
         XCTAssertFalse(cards[1].frame.intersects(cards[2].frame))
         XCTAssertFalse(cards[0].frame.intersects(cards[2].frame))
         XCTAssertGreaterThan(cards[0].frame.minX, cards[1].frame.minX)
         XCTAssertGreaterThan(cards[2].frame.minX, cards[1].frame.minX)
-        XCTAssertTrue(cards[0].label.contains("望京工作室"))
-        XCTAssertTrue(cards[1].label.contains("亮马河畔步道"))
-        XCTAssertTrue(cards[2].label.contains("东四胡同书房"))
-        XCTAssertTrue(cards[0].label.contains("积木"))
-        XCTAssertTrue(cards[1].label.contains("叶"))
-        XCTAssertTrue(cards[2].label.contains("画册"))
+        XCTAssertTrue(secondStop.label.contains("亮马河畔步道"))
+        XCTAssertTrue(thirdStop.label.contains("东四胡同书房"))
+    }
+
+    private func assertMapZoomAndReset(_ app: XCUIApplication) {
+        let zoomIn = app.buttons["lifeIllustration.map.zoomIn"]
+        XCTAssertTrue(zoomIn.isHittable)
+        zoomIn.tap()
+        let fitAll = app.buttons["lifeIllustration.map.fitAll"]
+        XCTAssertTrue(fitAll.waitForExistence(timeout: 5))
+        fitAll.tap()
+        let resetDone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: fitAll)
+        XCTAssertEqual(XCTWaiter.wait(for: [resetDone], timeout: 5), .completed)
+        XCTAssertTrue(app.buttons["lifeIllustration.map.card.sample-night"].waitForExistence(timeout: 5))
     }
 
     private func launch(appearance: XCUIDevice.Appearance) -> XCUIApplication {
@@ -175,23 +202,28 @@ final class LifeIllustrationJourneyTests: XCTestCase {
     private func assertJournalStrip(_ app: XCUIApplication) throws {
         let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
         XCTAssertTrue(strip.waitForExistence(timeout: 30))
-        XCTAssertEqual(strip.frame.width, app.frame.width, accuracy: 1)
-        XCTAssertGreaterThanOrEqual(strip.frame.height, 68)
-        XCTAssertLessThanOrEqual(strip.frame.height, 80)
-        XCTAssertGreaterThan(strip.frame.minY, app.frame.height * 0.65)
-        let cards = ["sample-code", "sample-outdoor", "sample-night"].map {
+        XCTAssertEqual(strip.frame.width, app.frame.width - 48, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(strip.frame.height, 70)
+        XCTAssertLessThanOrEqual(strip.frame.height, 84)
+        let cards = ["sample-morning", "sample-code"].map {
             app.buttons["lifeIllustration.stamp.\($0)"]
         }
         for (index, card) in cards.enumerated() {
             XCTAssertTrue(card.isHittable)
-            XCTAssertEqual(card.frame.width, 104, accuracy: 1)
-            XCTAssertGreaterThanOrEqual(card.frame.height, 44)
-            XCTAssertLessThanOrEqual(card.frame.height, 60)
+            XCTAssertEqual(card.frame.width, 144, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(card.frame.height, 50)
+            XCTAssertLessThanOrEqual(card.frame.height, 64)
             XCTAssertEqual(card.frame.minY, cards[0].frame.minY, accuracy: 1)
-            XCTAssertEqual(card.frame.minX, 24 + CGFloat(index) * 116, accuracy: 1)
+            XCTAssertEqual(card.frame.minX, 24 + CGFloat(index) * 154, accuracy: 1)
             XCTAssertGreaterThanOrEqual(card.frame.minY, strip.frame.minY)
             XCTAssertLessThanOrEqual(card.frame.maxY, strip.frame.maxY)
+            // Meaningful text instead of repetitive xx–xx clock slots or №01
+            XCTAssertFalse(card.label.contains("№"))
+            XCTAssertFalse(card.label.contains("11–14"))
+            XCTAssertFalse(card.label.contains("14–17"))
         }
+        XCTAssertTrue(cards[0].label.contains("草图纸"))
+        XCTAssertTrue(cards[1].label.contains("积木"))
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
         let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
         let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
@@ -208,6 +240,15 @@ final class LifeIllustrationJourneyTests: XCTestCase {
             let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
             XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
         }
+        // Verify the strip scrolls with timeline content instead of sticking as a fixed bottom overlay.
+        let bottomY = strip.frame.minY
+        preceding.swipeDown()
+        XCTAssertTrue(!strip.exists || strip.frame.minY > bottomY + 40)
+        for _ in 0..<4 {
+            if strip.exists && cards[0].isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(cards[0].isHittable)
     }
 
     private func pixel(_ image: CGImage, x: Int, y: Int) throws -> [UInt8] {

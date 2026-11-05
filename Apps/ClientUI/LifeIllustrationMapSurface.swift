@@ -9,8 +9,9 @@ private typealias JourneyMapRepresentable = NSViewRepresentable
 #endif
 
 struct LifeIllustrationMapSurface: JourneyMapRepresentable {
-    let items: [LifeIllustration]
+    let stops: [IllustrationJourneyStop]
     let legs: [IllustrationJourneyLeg]
+    var command: JourneyMapCommand? = nil
     let project: (JourneyProjection) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -18,12 +19,14 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
     private func makeMap(coordinator: Coordinator) -> JourneyMapView {
         let map = JourneyMapView()
         let configuration = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .default)
-        configuration.pointOfInterestFilter = .excludingAll
+        configuration.pointOfInterestFilter = .includingAll
         configuration.showsTraffic = false
         map.preferredConfiguration = configuration
         map.showsBuildings = true
         map.showsCompass = false
         map.showsScale = false
+        map.isZoomEnabled = true
+        map.isScrollEnabled = true
         map.isRotateEnabled = false
         map.isPitchEnabled = false
         map.delegate = coordinator
@@ -56,7 +59,12 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
     @MainActor final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: LifeIllustrationMapSurface
         private var signature = ""
+        private var lastCommandID: Int?
         private var size = CGSize.zero
+        private var fittedRect = MKMapRect.null
+        private var cameraCustomized = false
+        private var isUpdating = false
+        private var suppressCustomizationUntil: ContinuousClock.Instant = .now
         private var fitted: [String: [CLLocationCoordinate2D]] = [:]
         private var task: Task<Void, Never>?
         private var graceTask: Task<Void, Never>?
@@ -76,13 +84,16 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
         }
 
         func update(_ parent: LifeIllustrationMapSurface, map: MKMapView) {
+            isUpdating = true
+            defer { isUpdating = false }
             self.parent = parent
-            let signature = parent.items.map { "\($0.id):\($0.updatedAt)" }.joined(separator: ",")
+            let signature = parent.stops.flatMap(\.illustrations).map { "\($0.id):\($0.updatedAt)" }.joined(separator: ",")
             if self.signature != signature {
                 cancel()
                 self.signature = signature
                 fitted = [:]
                 routesResolved = parent.legs.isEmpty
+                cameraCustomized = false
                 size = .zero
                 layout(map)
                 if !parent.legs.isEmpty {
@@ -125,33 +136,86 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
                     if let map { project(map) }
                 }
             }
+            if let command = parent.command, command.id != lastCommandID {
+                lastCommandID = command.id
+                apply(command.action, to: map)
+            }
+        }
+
+        private func apply(_ action: JourneyMapCommand.Action, to map: MKMapView) {
+            switch action {
+            case .zoomIn:
+                cameraCustomized = true
+                let span = MKCoordinateSpan(
+                    latitudeDelta: max(0.0012, map.region.span.latitudeDelta * 0.5),
+                    longitudeDelta: max(0.0012, map.region.span.longitudeDelta * 0.5)
+                )
+                map.setRegion(MKCoordinateRegion(center: map.region.center, span: span), animated: true)
+            case .zoomOut:
+                cameraCustomized = true
+                let span = MKCoordinateSpan(
+                    latitudeDelta: min(90.0, map.region.span.latitudeDelta * 2.0),
+                    longitudeDelta: min(120.0, map.region.span.longitudeDelta * 2.0)
+                )
+                map.setRegion(MKCoordinateRegion(center: map.region.center, span: span), animated: true)
+            case .fitAll:
+                fitAll(map, animated: true)
+            }
+        }
+
+        private func fitAll(_ map: MKMapView, animated: Bool) {
+            guard map.bounds.width > 0, map.bounds.height > 0 else { return }
+            let coordinates = parent.stops.compactMap(\.coordinate) + parent.legs.flatMap(\.coordinates)
+            var rect = MKMapRect.null
+            for coordinate in coordinates {
+                let point = MKMapPoint(coordinate)
+                rect = rect.union(MKMapRect(x: point.x, y: point.y, width: 1, height: 1))
+            }
+            guard !rect.isNull else { return }
+            let minimum: Double = 1800
+            rect = rect.insetBy(dx: -max(0, (minimum - rect.width) / 2), dy: -max(0, (minimum - rect.height) / 2))
+            #if os(iOS)
+            let padding = UIEdgeInsets(top: 56, left: map.bounds.width * 0.22, bottom: 96, right: map.bounds.width * 0.22)
+            #else
+            let padding = NSEnginePadding(top: 56, left: map.bounds.width * 0.22, bottom: 96, right: map.bounds.width * 0.22)
+            #endif
+            suppressCustomizationUntil = .now + .milliseconds(animated ? 700 : 120)
+            cameraCustomized = false
+            fittedRect = map.mapRectThatFits(rect, edgePadding: padding)
+            map.setVisibleMapRect(rect, edgePadding: padding, animated: animated)
+            project(map)
         }
 
         func layout(_ map: MKMapView) {
             guard map.bounds.width > 0, map.bounds.height > 0 else { return }
             if size != map.bounds.size {
                 size = map.bounds.size
-                let coordinates = parent.items.compactMap(\.coordinate) + parent.legs.flatMap(\.coordinates)
-                var rect = MKMapRect.null
-                for coordinate in coordinates {
-                    let point = MKMapPoint(coordinate)
-                    rect = rect.union(MKMapRect(x: point.x, y: point.y, width: 1, height: 1))
-                }
-                if !rect.isNull {
-                    let minimum: Double = 2400
-                    rect = rect.insetBy(dx: -max(0, (minimum - rect.width) / 2), dy: -max(0, (minimum - rect.height) / 2))
-                    #if os(iOS)
-                    let padding = UIEdgeInsets(top: 64, left: size.width * 0.25, bottom: 132, right: size.width * 0.25)
-                    #else
-                    let padding = NSEdgeInsets(top: 64, left: size.width * 0.25, bottom: 132, right: size.width * 0.25)
-                    #endif
-                    map.setVisibleMapRect(rect, edgePadding: padding, animated: false)
+                if !cameraCustomized {
+                    fitAll(map, animated: false)
+                    return
                 }
             }
             project(map)
         }
 
-        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) { project(mapView) }
+        #if !os(iOS)
+        private func NSEnginePadding(top: CGFloat, left: CGFloat, bottom: CGFloat, right: CGFloat) -> NSEdgeInsets {
+            NSEdgeInsets(top: top, left: left, bottom: bottom, right: right)
+        }
+        #endif
+
+        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            if ContinuousClock.now >= suppressCustomizationUntil, !fittedRect.isNull {
+                let current = mapView.visibleMapRect
+                let scaleRatio = current.size.width / max(1, fittedRect.size.width)
+                let dx = abs(current.midX - fittedRect.midX) / max(1, fittedRect.size.width)
+                let dy = abs(current.midY - fittedRect.midY) / max(1, fittedRect.size.height)
+                if scaleRatio < 0.84 || scaleRatio > 1.19 || dx > 0.14 || dy > 0.14 {
+                    cameraCustomized = true
+                }
+            }
+            project(mapView)
+        }
 
         func mapViewDidFinishRenderingMap(_ mapView: MKMapView, fullyRendered: Bool) {
             if fullyRendered { tilesLoaded = true; mapFailed = false }
@@ -166,8 +230,8 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
 
         private func project(_ map: MKMapView) {
             var projection = JourneyProjection()
-            for item in parent.items {
-                if let coordinate = item.coordinate { projection.pins[item.id] = map.convert(coordinate, toPointTo: map) }
+            for stop in parent.stops {
+                if let coordinate = stop.coordinate { projection.pins[stop.id] = map.convert(coordinate, toPointTo: map) }
             }
             for leg in parent.legs {
                 projection.routes[leg.id] = (fitted[leg.id] ?? leg.coordinates).map { map.convert($0, toPointTo: map) }
@@ -175,11 +239,16 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
             projection.fitted = Set(fitted.keys)
             projection.mapLoaded = tilesLoaded && routesResolved
             projection.mapFailed = mapFailed
+            projection.cameraCustomized = cameraCustomized
             projectionTask?.cancel()
-            projectionTask = Task { [weak self] in
-                await Task.yield()
-                guard !Task.isCancelled else { return }
-                self?.parent.project(projection)
+            if !isUpdating {
+                parent.project(projection)
+            } else {
+                projectionTask = Task { [weak self] in
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    self?.parent.project(projection)
+                }
             }
         }
     }

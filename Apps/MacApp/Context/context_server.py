@@ -260,8 +260,9 @@ class ContextService:
                 generator = CodexIllustrationGenerator(self.data)
                 if generator.availability()['supported']:
                     illustrations.scan(store)
-                    if memory_review.chat_idle(self.data, time.time()):
-                        illustrations.advance(generator, store)
+                    while not self.stopped.is_set() and memory_review.chat_idle(self.data, time.time()):
+                        if not illustrations.advance(generator, store):
+                            break
                 else:
                     illustrations.reconcile(store)
             except Exception as error:

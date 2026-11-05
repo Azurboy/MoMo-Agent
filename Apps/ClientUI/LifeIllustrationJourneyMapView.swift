@@ -1,3 +1,4 @@
+import CoreLocation
 import MapKit
 import MoMoAgentClient
 import SwiftUI
@@ -9,7 +10,8 @@ struct LifeIllustrationJourneyMapView: View {
     let showSource: (LifeIllustration) -> Void
     @State private var detail: LifeIllustration?
     @State private var projection = JourneyProjection()
-    @State private var page = 0
+    @State private var resolvedPlaces: [String: String] = [:]
+    @State private var mapCommand: JourneyMapCommand?
     @State private var failure: String?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -19,34 +21,19 @@ struct LifeIllustrationJourneyMapView: View {
         return store.items.filter { $0.logicalDay == day }.sorted { $0.windowStart < $1.windowStart }
     }
 
+    private var stops: [IllustrationJourneyStop] {
+        IllustrationJourneyStop.group(items: items)
+    }
+
     private var dayTimeSpan: String? {
-        guard let first = items.first, let last = items.last else { return nil }
-        return "\(first.clock(first.placeStart ?? first.windowStart))–\(last.clock(last.placeEnd ?? last.windowEnd))"
+        guard let first = stops.first, let last = stops.last else { return nil }
+        return "\(first.primary.clock(first.startTime))–\(last.primary.clock(last.endTime))"
     }
 
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                let capacity = max(1, min(3, Int((geometry.size.height - 32) / 146)))
-                let pageCount = max(1, (items.count + capacity - 1) / capacity)
-                let visible = Array(items.dropFirst(min(page, pageCount - 1) * capacity).prefix(capacity))
-                mapContent(visible: visible, size: geometry.size)
-                    .overlay(alignment: .bottom) {
-                        if pageCount > 1 {
-                            HStack(spacing: 20) {
-                                Button("上一页", systemImage: "chevron.left") { page -= 1 }
-                                    .disabled(page == 0)
-                                Text("\(min(page + 1, pageCount)) / \(pageCount)").monospacedDigit()
-                                Button("下一页", systemImage: "chevron.right") { page += 1 }
-                                    .disabled(page + 1 >= pageCount)
-                            }
-                            .labelStyle(.iconOnly).font(.caption)
-                            .padding(10).background(.regularMaterial, in: Capsule()).padding(.bottom, 12)
-                        }
-                    }
-                    .onAppear {
-                        page = (items.firstIndex { $0.id == initialID } ?? 0) / capacity
-                    }
+                mapContent(size: geometry.size)
             }
             .background(JourneyPalette.canvas(for: colorScheme))
             .navigationTitle(items.first?.logicalDay ?? "")
@@ -73,6 +60,9 @@ struct LifeIllustrationJourneyMapView: View {
             }
         }
         .accessibilityIdentifier("lifeIllustration.map")
+        .task(id: stops.map { "\($0.id):\($0.place ?? "")" }.joined(separator: "|")) {
+            await resolveMissingPlaceNames()
+        }
         #if os(iOS)
         .fullScreenCover(item: $detail) { item in
             LifeIllustrationViewer(store: store, initialID: item.id) { source in
@@ -130,105 +120,366 @@ struct LifeIllustrationJourneyMapView: View {
         return items[index - 1]
     }
 
-    private func mapContent(visible: [LifeIllustration], size: CGSize) -> some View {
-        let geographic = items.contains { $0.coordinate != nil }
-        let legs = IllustrationJourneyLeg.make(items: items)
-        let pins = geographic ? projection.pins : Dictionary(uniqueKeysWithValues: visible.enumerated().map { index, item in
-            (item.id, CGPoint(x: index.isMultiple(of: 2) ? size.width * 0.20 : size.width * 0.82,
-                y: 44 + CGFloat(index) * max(150, (size.height - 200) / CGFloat(max(1, visible.count - 1)))))
-        })
-        let cards = JourneyCallout.layout(items: visible, allItems: items, pins: pins, size: size)
-        return ZStack {
-            if geographic {
-                LifeIllustrationMapSurface(items: items, legs: legs) { value in
-                    if projection != value { projection = value }
-                }
-                .saturation(colorScheme == .dark ? 1.55 : 1.32)
-                .contrast(colorScheme == .dark ? 1.07 : 1.03)
-                .brightness(colorScheme == .dark ? 0.08 : 0.01)
-                .overlay {
-                    if colorScheme == .dark {
-                        Color(red: 0.09, green: 0.14, blue: 0.22)
-                            .blendMode(.screen)
-                            .allowsHitTesting(false)
-                    } else {
-                        Color(red: 1.0, green: 0.96, blue: 0.88)
-                            .opacity(0.10)
-                            .blendMode(.softLight)
-                            .allowsHitTesting(false)
-                    }
-                }
-            } else {
-                JourneyPalette.canvas(for: colorScheme)
-            }
-            JourneyInkLayer(cards: cards, pins: pins, projection: projection, legs: legs, geographic: geographic)
-                .allowsHitTesting(false).accessibilityHidden(true)
-            ForEach(cards) { card in
-                storyCard(card)
-                    .frame(width: card.frame.width, height: card.frame.height)
-                    .position(x: card.frame.midX, y: card.frame.midY)
-            }
+    private func displayPlace(for stop: IllustrationJourneyStop) -> String? {
+        if let place = stop.place, !place.isEmpty { return place }
+        if let resolved = resolvedPlaces[stop.id], !resolved.isEmpty { return resolved }
+        if let pointTitle = stop.illustrations.flatMap(\.routePoints)
+            .compactMap({ $0.title?.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }) {
+            return pointTitle
         }
-        .clipped()
-        .overlay(alignment: .topTrailing) {
-            if geographic && !projection.mapLoaded && !projection.mapFailed {
-                ProgressView("载入地图").labelStyle(.iconOnly)
-                    .padding(12).background(.regularMaterial, in: Circle()).padding(12)
-                    .accessibilityIdentifier("lifeIllustration.map.loading")
+        return nil
+    }
+
+    private func resolveMissingPlaceNames() async {
+        let geocoder = CLGeocoder()
+        for stop in stops {
+            if Task.isCancelled { return }
+            guard stop.place == nil, resolvedPlaces[stop.id] == nil, let coord = stop.coordinate else { continue }
+            do {
+                let placemarks = try await geocoder.reverseGeocodeLocation(
+                    CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+                )
+                guard !Task.isCancelled, let placemark = placemarks.first,
+                      let title = JourneyPlaceFormatter.format(placemark) else { continue }
+                resolvedPlaces[stop.id] = title
+            } catch {
+                continue
             }
         }
     }
 
-    private func storyCard(_ card: JourneyCallout) -> some View {
-        let accent = JourneyPalette.stopAccent(number: card.number, scheme: colorScheme)
-        let selected = card.item.id == initialID
-        return Button { detail = card.item } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(accent)
-                        .frame(width: 6, height: 6)
-                    Text(card.item.stayCaption)
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(JourneyPalette.cardMuted(for: colorScheme))
-                }
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let place = card.item.place, !place.isEmpty {
-                            Text(place)
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
-                                .lineLimit(1)
+    private func sendMapCommand(_ action: JourneyMapCommand.Action) {
+        mapCommand = JourneyMapCommand(id: (mapCommand?.id ?? 0) + 1, action: action)
+    }
+
+    private func visibleStops(in size: CGSize, pins: [String: CGPoint]) -> [IllustrationJourneyStop] {
+        let viewport = CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24)
+        let candidates: [IllustrationJourneyStop]
+        if projection.cameraCustomized, !pins.isEmpty {
+            candidates = stops.filter { stop in
+                guard let pin = pins[stop.id] else { return false }
+                return viewport.contains(pin)
+            }
+        } else {
+            candidates = stops
+        }
+        return JourneyCallout.selectFittingStops(from: candidates, focusedID: initialID, size: size)
+    }
+
+    @ViewBuilder
+    private func mapContent(size: CGSize) -> some View {
+        let geographic = stops.contains { $0.coordinate != nil }
+        if !geographic {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(items) { item in
+                        Button { detail = item } label: {
+                            HStack(spacing: 14) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(item.clock(item.windowStart) + "–" + item.clock(item.windowEnd))
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(JourneyPalette.cardMuted(for: colorScheme))
+                                    Text(item.summary ?? item.caption)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                                        .lineSpacing(3)
+                                        .multilineTextAlignment(.leading)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if let url = store.imageURL(for: item) {
+                                    LifeIllustrationImageView(url: url)
+                                        .frame(width: 68, height: 68)
+                                        .rotationEffect(.degrees(item.stickerAngle))
+                                }
+                            }
+                            .padding(14)
+                            .modifier(JourneyCardSurface(selected: item.id == initialID))
                         }
-                        Text(card.item.summary ?? card.item.caption)
-                            .font(.system(size: 12))
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("lifeIllustration.map.card.\(item.id)")
+                    }
+                }
+                .padding(20)
+            }
+            .background(JourneyPalette.canvas(for: colorScheme))
+        } else {
+            let legs = IllustrationJourneyLeg.make(stops: stops, allItems: items)
+            let pins = projection.pins
+            let visible = visibleStops(in: size, pins: pins)
+            let cards = JourneyCallout.layout(stops: visible, allStops: stops, pins: pins, size: size)
+            let cardIDs = Set(cards.map(\.id))
+            ZStack {
+                LifeIllustrationMapSurface(stops: stops, legs: legs, command: mapCommand) { value in
+                    if projection != value { projection = value }
+                }
+                .brightness(colorScheme == .dark ? 0.03 : 0)
+                JourneyInkLayer(allStops: stops, cards: cards, pins: pins, projection: projection, legs: legs, geographic: true)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+                ForEach(stops) { stop in
+                    if !cardIDs.contains(stop.id),
+                       let pin = pins[stop.id],
+                       CGRect(origin: .zero, size: size).contains(pin) {
+                        Button {
+                            detail = stop.illustrations.first { $0.id == initialID } ?? stop.primary
+                        } label: {
+                            Color.clear.frame(width: 30, height: 30).contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .position(x: pin.x, y: pin.y)
+                        .accessibilityLabel(displayPlace(for: stop) ?? stop.stayCaption)
+                        .accessibilityIdentifier("lifeIllustration.map.pin.\(stop.id)")
+                    }
+                }
+                ForEach(cards) { card in
+                    storyCard(card)
+                        .frame(width: card.frame.width, height: card.frame.height)
+                        .position(x: card.frame.midX, y: card.frame.midY)
+                }
+            }
+            .clipped()
+            .overlay(alignment: .topTrailing) {
+                if !projection.mapLoaded && !projection.mapFailed {
+                    ProgressView("载入地图").labelStyle(.iconOnly)
+                        .padding(12).background(.regularMaterial, in: Circle()).padding(12)
+                        .accessibilityIdentifier("lifeIllustration.map.loading")
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                mapZoomControls
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 16)
+            }
+        }
+    }
+
+    private var mapZoomControls: some View {
+        VStack(spacing: 0) {
+            Button {
+                sendMapCommand(.zoomIn)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("放大地图")
+            .accessibilityIdentifier("lifeIllustration.map.zoomIn")
+
+            Rectangle()
+                .fill(JourneyPalette.cardBorder(for: colorScheme, selected: false))
+                .frame(width: 22, height: 0.7)
+
+            Button {
+                sendMapCommand(.zoomOut)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("缩小地图")
+            .accessibilityIdentifier("lifeIllustration.map.zoomOut")
+
+            if projection.cameraCustomized {
+                Rectangle()
+                    .fill(JourneyPalette.cardBorder(for: colorScheme, selected: false))
+                    .frame(width: 22, height: 0.7)
+
+                Button {
+                    sendMapCommand(.fitAll)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("适应全天行程")
+                .accessibilityIdentifier("lifeIllustration.map.fitAll")
+            }
+        }
+        .background(JourneyPalette.cardFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(JourneyPalette.cardBorder(for: colorScheme, selected: false), lineWidth: 0.8)
+        }
+        .shadow(color: JourneyPalette.cardShadow(for: colorScheme), radius: 8, y: 2)
+    }
+
+    @ViewBuilder
+    private func storyCard(_ card: JourneyCallout) -> some View {
+        let stop = card.stop
+        let focused = stop.illustrations.first { $0.id == initialID } ?? stop.primary
+        let isFocusedStop = stop.contains(id: initialID)
+        let placeTitle = displayPlace(for: stop)
+
+        if card.compact {
+            compactStoryCard(card: card, stop: stop, focused: focused, isFocusedStop: isFocusedStop, placeTitle: placeTitle)
+        } else if stop.illustrations.count == 1 {
+            Button { detail = focused } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    cardHeader(place: placeTitle, stay: stop.stayCaption, count: 1)
+                    HStack(spacing: 8) {
+                        Text(focused.summary ?? focused.caption)
+                            .font(.system(size: 11))
                             .foregroundStyle(JourneyPalette.cardBody(for: colorScheme))
-                            .lineSpacing(2)
-                            .lineLimit(3)
+                            .lineSpacing(1.8)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if let url = store.imageURL(for: focused) {
+                            LifeIllustrationImageView(url: url)
+                                .frame(width: 50, height: 50)
+                                .rotationEffect(.degrees(focused.stickerAngle))
+                        }
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .modifier(JourneyCardSurface(selected: isFocusedStop))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("lifeIllustration.map.card.\(card.id)")
+            .contextMenu {
+                Button("查看转录", systemImage: "text.alignleft") { closeMap(); showSource(focused) }
+                Button("删除", systemImage: "trash", role: .destructive) { delete(focused) }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                Button { detail = focused } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        cardHeader(place: placeTitle, stay: stop.stayCaption, count: stop.illustrations.count)
+                        Text(focused.summary ?? focused.caption)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(JourneyPalette.cardBody(for: colorScheme))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                multiStickerRow(stop: stop, iconSize: 42)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .modifier(JourneyCardSurface(selected: isFocusedStop))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("lifeIllustration.map.card.\(card.id)")
+        }
+    }
+
+    @ViewBuilder
+    private func compactStoryCard(
+        card: JourneyCallout,
+        stop: IllustrationJourneyStop,
+        focused: LifeIllustration,
+        isFocusedStop: Bool,
+        placeTitle: String?
+    ) -> some View {
+        if stop.illustrations.count == 1 {
+            Button { detail = focused } label: {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text((placeTitle?.isEmpty == false ? placeTitle! : focused.stampExcerpt))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                            .lineLimit(1)
+                        Text(stop.stayCaption)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(JourneyPalette.cardMuted(for: colorScheme))
+                            .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    if let url = store.imageURL(for: card.item) {
+                    if let url = store.imageURL(for: focused) {
                         LifeIllustrationImageView(url: url)
-                            .frame(width: 58, height: 58)
-                            .rotationEffect(.degrees(card.item.stickerAngle))
+                            .frame(width: 38, height: 38)
+                            .rotationEffect(.degrees(focused.stickerAngle))
                     }
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .modifier(JourneyCardSurface(selected: isFocusedStop))
             }
-            .padding(12)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("lifeIllustration.map.card.\(card.id)")
+            .contextMenu {
+                Button("查看转录", systemImage: "text.alignleft") { closeMap(); showSource(focused) }
+                Button("删除", systemImage: "trash", role: .destructive) { delete(focused) }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Button { detail = focused } label: {
+                    cardHeader(place: placeTitle ?? focused.stampExcerpt, stay: stop.stayCaption, count: stop.illustrations.count)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                multiStickerRow(stop: stop, iconSize: 30)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(JourneyPalette.cardFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(accent.opacity(selected ? 0.62 : 0.28), lineWidth: selected ? 1.4 : 1.0)
-            }
-            .shadow(color: JourneyPalette.cardShadow(for: colorScheme), radius: 10, y: 4)
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .modifier(JourneyCardSurface(selected: isFocusedStop))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("lifeIllustration.map.card.\(card.id)")
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("lifeIllustration.map.card.\(card.id)")
-        .contextMenu {
-            Button("查看转录", systemImage: "text.alignleft") { closeMap(); showSource(card.item) }
-            Button("删除", systemImage: "trash", role: .destructive) { delete(card.item) }
+    }
+
+    @ViewBuilder
+    private func multiStickerRow(stop: IllustrationJourneyStop, iconSize: CGFloat) -> some View {
+        let content = HStack(spacing: 6) {
+            ForEach(stop.illustrations) { item in
+                Button { detail = item } label: {
+                    if let url = store.imageURL(for: item) {
+                        LifeIllustrationImageView(url: url)
+                            .frame(width: iconSize, height: iconSize)
+                            .rotationEffect(.degrees(item.stickerAngle))
+                            .padding(3)
+                            .background(
+                                JourneyPalette.thumbnailChip(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(JourneyPalette.cardBorder(for: colorScheme, selected: item.id == initialID), lineWidth: 0.7)
+                            }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.stampExcerpt)
+                .accessibilityIdentifier("lifeIllustration.map.sticker.\(item.id)")
+                .contextMenu {
+                    Button("查看转录", systemImage: "text.alignleft") { closeMap(); showSource(item) }
+                    Button("删除", systemImage: "trash", role: .destructive) { delete(item) }
+                }
+            }
+        }
+        if stop.illustrations.count > 3 {
+            ScrollView(.horizontal, showsIndicators: false) { content }
+        } else {
+            content
+        }
+    }
+
+    private func cardHeader(place: String?, stay: String, count: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if let place, !place.isEmpty {
+                Text(place)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(JourneyPalette.cardInk(for: colorScheme))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Text(count > 1 ? "\(stay) · \(count)" : stay)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(JourneyPalette.cardMuted(for: colorScheme))
+                .fixedSize()
         }
     }
 
@@ -240,74 +491,143 @@ struct LifeIllustrationJourneyMapView: View {
     }
 }
 
+enum JourneyPlaceFormatter {
+    static func format(_ placemark: CLPlacemark) -> String? {
+        let aoi = placemark.areasOfInterest?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subLocality = placemark.subLocality?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let locality = placemark.locality?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let admin = placemark.administrativeArea?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let aoi, !aoi.isEmpty {
+            if let subLocality, !subLocality.isEmpty, !aoi.contains(subLocality) {
+                return "\(subLocality) · \(aoi)"
+            }
+            return aoi
+        }
+
+        if var rawName = placemark.name?.trimmingCharacters(in: .whitespacesAndNewlines), !rawName.isEmpty {
+            for prefix in [admin, locality].compactMap({ $0 }) where !prefix.isEmpty && rawName.count > prefix.count {
+                if rawName.hasPrefix(prefix) { rawName.removeFirst(prefix.count) }
+            }
+            rawName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawName.isEmpty {
+                if let subLocality, !subLocality.isEmpty, !rawName.contains(subLocality) {
+                    return "\(subLocality) · \(rawName)"
+                }
+                return rawName
+            }
+        }
+
+        let fallback = [subLocality, placemark.thoroughfare].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+        return fallback.isEmpty ? locality : fallback
+    }
+}
+
+private struct JourneyCardSurface: ViewModifier {
+    let selected: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .background(JourneyPalette.cardFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(JourneyPalette.cardBorder(for: colorScheme, selected: selected), lineWidth: selected ? 1.2 : 0.8)
+            }
+            .shadow(color: JourneyPalette.cardShadow(for: colorScheme), radius: 10, y: 3)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+    }
+}
+
 private enum JourneyPalette {
     static func canvas(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.12, green: 0.16, blue: 0.22)
-            : Color(red: 0.968, green: 0.960, blue: 0.936)
+            ? Color(red: 0.114, green: 0.110, blue: 0.104)
+            : Color(red: 0.969, green: 0.961, blue: 0.941)
     }
 
     static func cardFill(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.165, green: 0.195, blue: 0.255).opacity(0.96)
-            : Color(red: 0.994, green: 0.989, blue: 0.975).opacity(0.97)
+            ? Color(red: 0.148, green: 0.143, blue: 0.136).opacity(0.95)
+            : Color(red: 0.992, green: 0.988, blue: 0.976).opacity(0.96)
+    }
+
+    static func thumbnailChip(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.195, green: 0.188, blue: 0.178)
+            : Color(red: 0.968, green: 0.960, blue: 0.942)
+    }
+
+    static func cardBorder(for scheme: ColorScheme, selected: Bool) -> Color {
+        if scheme == .dark {
+            return Color(red: 0.94, green: 0.92, blue: 0.88).opacity(selected ? 0.38 : 0.14)
+        }
+        return Color(red: 0.14, green: 0.13, blue: 0.11).opacity(selected ? 0.34 : 0.13)
     }
 
     static func cardInk(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.97, green: 0.96, blue: 0.94)
-            : Color(red: 0.13, green: 0.14, blue: 0.16)
+            ? Color(red: 0.965, green: 0.953, blue: 0.930)
+            : Color(red: 0.105, green: 0.100, blue: 0.094)
     }
 
     static func cardBody(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.86, green: 0.88, blue: 0.92)
-            : Color(red: 0.24, green: 0.25, blue: 0.28)
+            ? Color(red: 0.83, green: 0.81, blue: 0.77)
+            : Color(red: 0.24, green: 0.23, blue: 0.21)
     }
 
     static func cardMuted(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.68, green: 0.74, blue: 0.83)
-            : Color(red: 0.45, green: 0.47, blue: 0.50)
+            ? Color(red: 0.64, green: 0.61, blue: 0.57)
+            : Color(red: 0.45, green: 0.43, blue: 0.39)
     }
 
     static func cardShadow(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.03, green: 0.05, blue: 0.10).opacity(0.38)
-            : Color(red: 0.16, green: 0.14, blue: 0.10).opacity(0.10)
+            ? Color.black.opacity(0.36)
+            : Color(red: 0.12, green: 0.10, blue: 0.08).opacity(0.09)
     }
 
     static func routeCasing(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.97, green: 0.95, blue: 0.91).opacity(0.86)
-            : Color(red: 0.995, green: 0.990, blue: 0.975).opacity(0.95)
+            ? Color(red: 0.095, green: 0.090, blue: 0.084).opacity(0.92)
+            : Color(red: 0.992, green: 0.988, blue: 0.976).opacity(0.94)
     }
 
     static func routeRibbon(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.99, green: 0.50, blue: 0.36)
-            : Color(red: 0.89, green: 0.36, blue: 0.25)
+            ? Color(red: 0.925, green: 0.902, blue: 0.855)
+            : Color(red: 0.175, green: 0.162, blue: 0.146)
     }
 
-    static func stopAccent(number: Int, scheme: ColorScheme) -> Color {
-        let light: [Color] = [
-            Color(red: 0.89, green: 0.36, blue: 0.25), // Warm Coral Vermilion
-            Color(red: 0.19, green: 0.57, blue: 0.48), // River Sage Emerald
-            Color(red: 0.28, green: 0.44, blue: 0.72), // Storybook Cobalt
-            Color(red: 0.82, green: 0.53, blue: 0.18), // Sunlit Ochre
-        ]
-        let dark: [Color] = [
-            Color(red: 0.99, green: 0.52, blue: 0.38),
-            Color(red: 0.32, green: 0.78, blue: 0.66),
-            Color(red: 0.48, green: 0.65, blue: 0.95),
-            Color(red: 0.95, green: 0.68, blue: 0.32),
-        ]
-        let palette = scheme == .dark ? dark : light
-        return palette[max(0, number - 1) % palette.count]
+    static func connectorStem(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.88, green: 0.85, blue: 0.80).opacity(0.62)
+            : Color(red: 0.22, green: 0.20, blue: 0.18).opacity(0.60)
+    }
+
+    static func pinFill(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.935, green: 0.914, blue: 0.872)
+            : Color(red: 0.145, green: 0.136, blue: 0.125)
+    }
+
+    static func pinRim(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.13, green: 0.12, blue: 0.11)
+            : Color(red: 0.992, green: 0.988, blue: 0.976)
+    }
+
+    static func pinText(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.12, green: 0.11, blue: 0.10)
+            : Color(red: 0.985, green: 0.978, blue: 0.960)
     }
 }
 
 private struct JourneyInkLayer: View {
+    let allStops: [IllustrationJourneyStop]
     let cards: [JourneyCallout]
     let pins: [String: CGPoint]
     let projection: JourneyProjection
@@ -319,28 +639,31 @@ private struct JourneyInkLayer: View {
         Canvas { context, size in
             let casing = JourneyPalette.routeCasing(for: colorScheme)
             let ribbon = JourneyPalette.routeRibbon(for: colorScheme)
-            let cream = Color(red: 0.995, green: 0.990, blue: 0.976)
+            let stemColor = JourneyPalette.connectorStem(for: colorScheme)
+            let pinFill = JourneyPalette.pinFill(for: colorScheme)
+            let pinRim = JourneyPalette.pinRim(for: colorScheme)
+            let pinText = JourneyPalette.pinText(for: colorScheme)
 
-            // 1. Curved organic route ribbons with warm casing and directional chevrons
+            // 1. Editorial fountain-pen ink route curves
             let routeEntries: [(points: [CGPoint], seed: Int)] = geographic
                 ? legs.enumerated().compactMap { index, leg in projection.routes[leg.id].map { ($0, index) } }
                 : [(cards.map(\.pin), 0)]
 
             for (points, seed) in routeEntries where points.count >= 2 {
                 let path = journeyCurve(points, seed: seed)
-                context.stroke(path, with: .color(casing), style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round))
-                context.stroke(path, with: .color(ribbon), style: StrokeStyle(lineWidth: 4.8, lineCap: .round, lineJoin: .round))
+                context.stroke(path, with: .color(casing), style: StrokeStyle(lineWidth: 8.2, lineCap: .round, lineJoin: .round))
+                context.stroke(path, with: .color(ribbon), style: StrokeStyle(lineWidth: 3.6, lineCap: .round, lineJoin: .round))
                 if let sample = journeyRouteSample(points, seed: seed, fraction: 0.52) {
                     let mid = sample.point, angle = sample.angle
                     var chevron = Path()
-                    chevron.move(to: CGPoint(x: mid.x - 5.5 * cos(angle - 0.62), y: mid.y - 5.5 * sin(angle - 0.62)))
+                    chevron.move(to: CGPoint(x: mid.x - 5.0 * cos(angle - 0.62), y: mid.y - 5.0 * sin(angle - 0.62)))
                     chevron.addLine(to: CGPoint(x: mid.x + 1.5 * cos(angle), y: mid.y + 1.5 * sin(angle)))
-                    chevron.addLine(to: CGPoint(x: mid.x - 5.5 * cos(angle + 0.62), y: mid.y - 5.5 * sin(angle + 0.62)))
-                    context.stroke(chevron, with: .color(cream), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+                    chevron.addLine(to: CGPoint(x: mid.x - 5.0 * cos(angle + 0.62), y: mid.y - 5.0 * sin(angle + 0.62)))
+                    context.stroke(chevron, with: .color(pinRim), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                 }
             }
 
-            // 2. Compact transit time pills hugging the curved route (with short curved stem only when nudged)
+            // 2. Compact transit time pills hugging the route
             var badges: [CGRect] = []
             for (legIndex, leg) in legs.enumerated() {
                 guard let caption = leg.timeCaption,
@@ -368,7 +691,7 @@ private struct JourneyInkLayer: View {
                 }
 
                 if let chosen {
-                    let pill = CGRect(x: chosen.badgeCenter.x - 48, y: chosen.badgeCenter.y - 10.5, width: 96, height: 21)
+                    let pill = CGRect(x: chosen.badgeCenter.x - 46, y: chosen.badgeCenter.y - 10, width: 92, height: 20)
                     badges.append(pill)
                     let dist = hypot(chosen.badgeCenter.x - chosen.routeAnchor.x, chosen.badgeCenter.y - chosen.routeAnchor.y)
                     if dist > 10 {
@@ -379,12 +702,12 @@ private struct JourneyInkLayer: View {
                         var stem = Path()
                         stem.move(to: chosen.routeAnchor)
                         stem.addQuadCurve(to: chosen.badgeCenter, control: mid)
-                        context.stroke(stem, with: .color(casing), style: StrokeStyle(lineWidth: 3.4, lineCap: .round))
-                        context.stroke(stem, with: .color(ribbon.opacity(0.85)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        context.stroke(stem, with: .color(casing), style: StrokeStyle(lineWidth: 2.8, lineCap: .round))
+                        context.stroke(stem, with: .color(stemColor), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
                     }
-                    let pillPath = Path(roundedRect: pill, cornerRadius: 10.5)
+                    let pillPath = Path(roundedRect: pill, cornerRadius: 10)
                     context.fill(pillPath, with: .color(JourneyPalette.cardFill(for: colorScheme)))
-                    context.stroke(pillPath, with: .color(ribbon.opacity(0.38)), lineWidth: 0.9)
+                    context.stroke(pillPath, with: .color(JourneyPalette.cardBorder(for: colorScheme, selected: false)), lineWidth: 0.8)
                     context.draw(
                         Text(caption)
                             .font(.system(size: 9.5, weight: .medium, design: .monospaced))
@@ -394,30 +717,33 @@ private struct JourneyInkLayer: View {
                 }
             }
 
-            // 3. Silky S-curved card connectors + vibrant colored enamel pebble stop pins
+            // 3. Delicate graphite S-curve stems for visible callout cards
             for card in cards {
                 guard let pin = pins[card.id], CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24).contains(pin) else { continue }
-                let accent = JourneyPalette.stopAccent(number: card.number, scheme: colorScheme)
                 let connector = journeyCardConnector(pin: pin, frame: card.frame, right: card.right)
 
-                context.stroke(connector.path, with: .color(casing.opacity(0.9)), style: StrokeStyle(lineWidth: 4.2, lineCap: .round))
-                context.stroke(connector.path, with: .color(accent.opacity(0.88)), style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+                context.stroke(connector.path, with: .color(casing.opacity(0.85)), style: StrokeStyle(lineWidth: 3.2, lineCap: .round))
+                context.stroke(connector.path, with: .color(stemColor), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
 
-                let dotRect = CGRect(x: connector.anchor.x - 3.2, y: connector.anchor.y - 3.2, width: 6.4, height: 6.4)
-                context.fill(Path(ellipseIn: dotRect), with: .color(accent))
-                context.stroke(Path(ellipseIn: dotRect), with: .color(cream), lineWidth: 1.2)
+                let dotRect = CGRect(x: connector.anchor.x - 2.6, y: connector.anchor.y - 2.6, width: 5.2, height: 5.2)
+                context.fill(Path(ellipseIn: dotRect), with: .color(pinFill))
+                context.stroke(Path(ellipseIn: dotRect), with: .color(pinRim), lineWidth: 1.0)
+            }
 
-                let pinRect = CGRect(x: pin.x - 14, y: pin.y - 11.5, width: 28, height: 23)
-                let shadowRect = pinRect.offsetBy(dx: 0, dy: 2)
-                context.fill(JourneyPebble().path(in: shadowRect), with: .color(.black.opacity(colorScheme == .dark ? 0.34 : 0.15)))
+            // 4. Ceramic charcoal/ivory pebble pins for every located stop on the single-page map
+            for (idx, stop) in allStops.enumerated() {
+                guard let pin = pins[stop.id], CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24).contains(pin) else { continue }
+                let pinRect = CGRect(x: pin.x - 13, y: pin.y - 11, width: 26, height: 22)
+                let shadowRect = pinRect.offsetBy(dx: 0, dy: 1.8)
+                context.fill(JourneyPebble().path(in: shadowRect), with: .color(.black.opacity(colorScheme == .dark ? 0.34 : 0.14)))
 
                 let pebble = JourneyPebble().path(in: pinRect)
-                context.fill(pebble, with: .color(accent))
-                context.stroke(pebble, with: .color(cream), lineWidth: 2.0)
+                context.fill(pebble, with: .color(pinFill))
+                context.stroke(pebble, with: .color(pinRim), lineWidth: 1.8)
                 context.draw(
-                    Text("\(card.number)")
-                        .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                        .foregroundStyle(cream),
+                    Text("\(idx + 1)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(pinText),
                     at: pin
                 )
             }
