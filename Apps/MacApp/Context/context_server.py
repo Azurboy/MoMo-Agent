@@ -122,7 +122,7 @@ class ContextService:
                         result = service.memory.list(after, limit, int(revision) if revision is not None else None)
                     elif url.path == "/v1/sources":
                         summarize = query.get("summarize", ["0"])[0] == "1"
-                        result = store.list_sources(after, min(limit, 200), summarize=summarize)
+                        result = store.list_sources(after, min(limit, 200), summarize=summarize, include_organization=False)
                         for item in result["items"]:
                             item["summary"] = item.pop("recorded_summary", None); item["organization"] = None
                     elif url.path == "/v1/source":

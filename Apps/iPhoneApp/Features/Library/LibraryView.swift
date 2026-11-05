@@ -17,6 +17,7 @@ struct LibraryView: View {
     let batches: [TranscriptionBatch]
     let delete: (UUID) async throws -> Void
     let refresh: () async -> Void
+    var onAppearRefresh: (() async -> Void)? = nil
     let canDiscuss: Bool
     let discuss: (SourceReference) -> Void
     var illustrations: LifeIllustrationStore? = nil
@@ -141,7 +142,7 @@ struct LibraryView: View {
         .alert("资料暂不可用", isPresented: Binding(get: { navigationFailure != nil }, set: { if !$0 { navigationFailure = nil } })) {
             Button("好", role: .cancel) { navigationFailure = nil }
         } message: { Text(navigationFailure ?? "") }
-        .task { page.scrollTo(id: timeline.selectedDay, anchor: .leading); await refresh() }
+        .task { page.scrollTo(id: timeline.selectedDay, anchor: .leading); await (onAppearRefresh ?? refresh)() }
         .task(id: timeline.selectedDay) { await timeline.load(timeline.selectedDay) }
         .onChange(of: page.viewID(type: TimelineDay.self)) { _, day in
             guard readingStates.isPagerSettled, page.isPositionedByUser,

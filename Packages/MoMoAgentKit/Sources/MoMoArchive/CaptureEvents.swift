@@ -6,9 +6,9 @@ extension ArchiveStore {
         if try sessionIsDeleted(event.sessionID) { return }
         try database.transaction {
             try validateCaptureIdentity(sessionID: event.sessionID, epochID: event.epochID, sourceDeviceID: event.sourceDeviceID)
-            for row in try database.rows("SELECT manifest FROM chunks WHERE epoch_id=?", [.text(event.epochID.uuidString)]) {
-                let manifest = try WireJSON.decode(ChunkManifest.self, from: row.requireData(0))
-                guard manifest.frames.end <= event.endFrame else { throw ArchiveError.conflictingEpoch(event.epochID) }
+            if let maxEnd = try database.rows("SELECT MAX(end_frame) FROM chunks WHERE epoch_id=?", [.text(event.epochID.uuidString)]).first?.integer(0),
+               maxEnd > event.endFrame {
+                throw ArchiveError.conflictingEpoch(event.epochID)
             }
             for row in try database.rows("SELECT payload FROM capture_events WHERE epoch_id=? AND kind='mark'", [.text(event.epochID.uuidString)]) {
                 let mark = try WireJSON.decode(CaptureMark.self, from: row.requireData(0))
@@ -51,11 +51,9 @@ extension ArchiveStore {
             return try closure.requireInt(0)
         }
         guard let bounds = try interruptedEpochBounds(epochID: epochID) else { return nil }
-        let receivedEnds = try database.rows("SELECT manifest FROM chunks WHERE epoch_id=?", [.text(epochID.uuidString)]).map {
-            try WireJSON.decode(ChunkManifest.self, from: $0.requireData(0)).frames.end
-        }
+        let maxReceivedEnd = try database.rows("SELECT COALESCE(MAX(end_frame), 0) FROM chunks WHERE epoch_id=?", [.text(epochID.uuidString)]).first?.integer(0) ?? 0
         // A subsequently recovered tail extends available input without inventing a precise capture end.
-        return max(bounds.sealed, receivedEnds.max() ?? 0)
+        return max(bounds.sealed, maxReceivedEnd)
     }
 
     public func receiveMark(_ event: CaptureMark) throws {

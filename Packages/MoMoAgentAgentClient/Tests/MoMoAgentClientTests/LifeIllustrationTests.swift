@@ -167,6 +167,31 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(cursors, ["0", "1"])
     }
 
+    @MainActor func testOfflineRelaunchRestoresVerifiedCachedIllustrationsUntilRevoked() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let route = IllustrationTransport()
+        let initial = try makeStore(directory, route: route)
+        await initial.refresh()
+        let cachedItem = try XCTUnwrap(initial.items.first)
+
+        // Simulate app relaunch while Tailscale DERP / cellular is temporarily unreachable.
+        await route.setOffline(true)
+        let relaunched = try makeStore(directory, route: route)
+        XCTAssertTrue(relaunched.items.isEmpty)
+        await relaunched.refresh()
+        XCTAssertFalse(relaunched.hasLoadedSettings)
+        XCTAssertEqual(relaunched.items, [cachedItem])
+        XCTAssertNotNil(relaunched.imageURL(for: cachedItem))
+
+        // Once connection returns with HTTP 401, cached authorization must be revoked immediately.
+        await route.setOffline(false)
+        await route.setUnauthorized(true)
+        await relaunched.refresh()
+        XCTAssertTrue(relaunched.items.isEmpty)
+        XCTAssertNil(relaunched.imageURL(for: cachedItem))
+    }
+
     func testPendingTranscriptionMetadataDoesNotChangeTextIdentity() throws {
         let source = SourceEnvelope(library: UUID(), session: UUID(), device: UUID(), generation: 1, version: 2,
             recordedAt: Date(), spans: [.init(id: UUID(), text: "finished words", recordedAt: Date())])
@@ -205,6 +230,8 @@ private actor IllustrationTransport: AgentTransport {
     var corruptAssets = false
     var invalidPagination = false
     var deletedHistory = false
+    var offline = false
+    var unauthorized = false
 
     init() {
         var settings = LifeIllustrationSettings()
@@ -220,9 +247,18 @@ private actor IllustrationTransport: AgentTransport {
     func setInvalidPagination() { invalidPagination = true }
     func removeItem() { deleted = true }
     func replayDeletedHistory() { deletedHistory = true }
+    func setOffline(_ value: Bool) { offline = value }
+    func setUnauthorized(_ value: Bool) { unauthorized = value }
 
     func open(_ request: URLRequest) async throws -> AgentByteStream? {
         requests.append(request)
+        if offline { throw URLError(.notConnectedToInternet) }
+        if unauthorized {
+            return AgentByteStream(status: 401, contentType: "application/json", chunks: AsyncThrowingStream { continuation in
+                continuation.yield(Data("{\"error\":{\"code\":\"unauthorized\"}}".utf8))
+                continuation.finish()
+            })
+        }
         let url = try XCTUnwrap(request.url)
         let data: Data
         switch url.lastPathComponent {

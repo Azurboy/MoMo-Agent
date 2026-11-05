@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 import uuid
@@ -207,32 +208,59 @@ def location_evidence_is_current(context, point):
             and (record.get('title') or '').strip() == (point.get('title') or ''))
 
 
-def evidence_for(context, start, end):
-    passages, versions, pending = [], {}, False
-    summaries = {row['fingerprint']: row['result'] for row in context.db.execute(
-        "SELECT fingerprint,result FROM recording_summaries WHERE state='done' AND result IS NOT NULL")}
-    active = {row['fingerprint'] for row in context.db.execute(
-        "SELECT fingerprint FROM recording_summaries WHERE state IN ('pending','running')")}
+_ILLUSTRATION_DB_LOCK = threading.Lock()
+_INITIALIZED_ILLUSTRATION_DBS = set()
+
+
+def _preload_source_entries(context):
+    entries = []
     for row in context.db.execute("SELECT id,revision,payload FROM sources WHERE deleted=0 ORDER BY id"):
         payload = json.loads(row['payload'])
-        pending |= any(float(part['start']) < end and float(part['end']) > start
-                       for part in payload.get('pending_transcription_ranges', []))
-        spans = sorted((span for span in payload.get('spans', []) if start <= span['recorded_at'] < end),
+        spans = payload.get('spans', [])
+        pending_ranges = [(float(part['start']), float(part['end']))
+                          for part in payload.get('pending_transcription_ranges', [])]
+        if spans:
+            min_ts = min(span['recorded_at'] for span in spans)
+            max_ts = max(span['recorded_at'] for span in spans)
+        else:
+            min_ts = max_ts = None
+        entries.append((row['id'], row['revision'], spans, pending_ranges, min_ts, max_ts))
+    return entries
+
+
+def evidence_for(context, start, end, source_entries=None, include_summaries=True):
+    passages, versions, pending = [], {}, False
+    if include_summaries:
+        summaries = {row['fingerprint']: row['result'] for row in context.db.execute(
+            "SELECT fingerprint,result FROM recording_summaries WHERE state='done' AND result IS NOT NULL")}
+        active = {row['fingerprint'] for row in context.db.execute(
+            "SELECT fingerprint FROM recording_summaries WHERE state IN ('pending','running')")}
+    else:
+        summaries, active = {}, set()
+    entries = _preload_source_entries(context) if source_entries is None else source_entries
+    for source_id, revision, all_spans, pending_ranges, min_ts, max_ts in entries:
+        if pending_ranges:
+            pending |= any(p_start < end and p_end > start for p_start, p_end in pending_ranges)
+        if min_ts is None or max_ts < start or min_ts >= end:
+            continue
+        spans = sorted((span for span in all_spans if start <= span['recorded_at'] < end),
                        key=lambda span: (span['recorded_at'], span['id']))
         if not spans:
             continue
-        versions[row['id']] = row['revision']
-        # Consume complete transcripts and complete matching summaries, never UI previews.
-        groups = []
-        for span in spans:
-            if groups and span['recorded_at'] - groups[-1][-1]['recorded_at'] - min(60, len(groups[-1][-1]['text']) * 0.22) <= 300:
-                groups[-1].append(span)
-            else:
-                groups.append([span])
-        fingerprints = [digest('\n\n'.join(span['text'] for span in group)) for group in groups]
-        pending |= any(fingerprint in active for fingerprint in fingerprints)
-        complete_summaries = [summaries[fingerprint] for fingerprint in fingerprints if fingerprint in summaries]
-        passages.append(dict(source_id=row['id'], source_revision=row['revision'],
+        versions[source_id] = revision
+        complete_summaries = []
+        if include_summaries:
+            # Consume complete transcripts and complete matching summaries, never UI previews.
+            groups = []
+            for span in spans:
+                if groups and span['recorded_at'] - groups[-1][-1]['recorded_at'] - min(60, len(groups[-1][-1]['text']) * 0.22) <= 300:
+                    groups[-1].append(span)
+                else:
+                    groups.append([span])
+            fingerprints = [digest('\n\n'.join(span['text'] for span in group)) for group in groups]
+            pending |= any(fingerprint in active for fingerprint in fingerprints)
+            complete_summaries = [summaries[fingerprint] for fingerprint in fingerprints if fingerprint in summaries]
+        passages.append(dict(source_id=source_id, source_revision=revision,
                              summary='\n\n'.join(complete_summaries) or None, spans=spans))
     visits = visit_evidence(context, start, end)
     evidence = dict(passages=passages, visits=visits)
@@ -247,27 +275,44 @@ class LifeIllustrations:
         self.directory = self.data / 'life-illustrations'
         self.assets = self.directory / 'assets'
         self.assets.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(self.directory / 'state.sqlite', timeout=10, isolation_level=None)
+        db_file = self.directory / 'state.sqlite'
+        self.db = sqlite3.connect(db_file, timeout=10, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        self.db.execute('PRAGMA journal_mode=WAL')
-        self.db.executescript('''
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,
-                interval_hours INTEGER NOT NULL DEFAULT 3,active_from REAL,updated_at REAL NOT NULL DEFAULT 0);
-            INSERT OR IGNORE INTO settings(id) VALUES(1);
-            CREATE TABLE IF NOT EXISTS slots (
-                id TEXT PRIMARY KEY,window_start REAL NOT NULL,window_end REAL NOT NULL,
-                logical_day TEXT NOT NULL,timezone TEXT NOT NULL,state TEXT NOT NULL,
-                source_versions TEXT NOT NULL,evidence TEXT NOT NULL,semantic_hash TEXT NOT NULL,
-                brief TEXT,request_id TEXT,response_id TEXT,attempt INTEGER NOT NULL DEFAULT 0,
-                retry_at REAL NOT NULL DEFAULT 0,error TEXT,place TEXT,asset_sha256 TEXT,thumbnail_sha256 TEXT,
-                width INTEGER,height INTEGER,created_at REAL NOT NULL,updated_at REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS changes (
-                cursor INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL,payload TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS slots_window ON slots(window_start,window_end);
-            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        ''')
-        self.ensure_columns()
+        try:
+            st = os.stat(db_file)
+            db_id = (str(db_file.resolve()), st.st_dev, st.st_ino)
+        except OSError:
+            db_id = None
+        if db_id is None or db_id not in _INITIALIZED_ILLUSTRATION_DBS:
+            with _ILLUSTRATION_DB_LOCK:
+                if db_id is None or db_id not in _INITIALIZED_ILLUSTRATION_DBS:
+                    self.db.execute('PRAGMA journal_mode=WAL')
+                    self.db.executescript('''
+                        CREATE TABLE IF NOT EXISTS settings (
+                            id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,
+                            interval_hours INTEGER NOT NULL DEFAULT 3,active_from REAL,updated_at REAL NOT NULL DEFAULT 0);
+                        INSERT OR IGNORE INTO settings(id) VALUES(1);
+                        CREATE TABLE IF NOT EXISTS slots (
+                            id TEXT PRIMARY KEY,window_start REAL NOT NULL,window_end REAL NOT NULL,
+                            logical_day TEXT NOT NULL,timezone TEXT NOT NULL,state TEXT NOT NULL,
+                            source_versions TEXT NOT NULL,evidence TEXT NOT NULL,semantic_hash TEXT NOT NULL,
+                            brief TEXT,request_id TEXT,response_id TEXT,attempt INTEGER NOT NULL DEFAULT 0,
+                            retry_at REAL NOT NULL DEFAULT 0,error TEXT,place TEXT,asset_sha256 TEXT,thumbnail_sha256 TEXT,
+                            width INTEGER,height INTEGER,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+                        CREATE TABLE IF NOT EXISTS changes (
+                            cursor INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL,payload TEXT NOT NULL);
+                        CREATE INDEX IF NOT EXISTS slots_window ON slots(window_start,window_end);
+                        CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                    ''')
+                    self.ensure_columns()
+                    if db_id is None:
+                        try:
+                            st = os.stat(db_file)
+                            db_id = (str(db_file.resolve()), st.st_dev, st.st_ino)
+                        except OSError:
+                            db_id = None
+                    if db_id is not None:
+                        _INITIALIZED_ILLUSTRATION_DBS.add(db_id)
 
     def ensure_columns(self):
         with self.write():
@@ -391,8 +436,13 @@ class LifeIllustrations:
         previous = self.db.execute("SELECT value FROM metadata WHERE key='reconciled_sources'").fetchone()
         if previous and previous['value'] == signature:
             return
-        for row in self.db.execute("SELECT * FROM slots WHERE state NOT IN ('deleted','invalid','skipped')").fetchall():
-            _, versions, semantic, _ = evidence_for(context, row['window_start'], row['window_end'])
+        rows = self.db.execute("SELECT * FROM slots WHERE state NOT IN ('deleted','invalid','skipped')").fetchall()
+        source_entries = _preload_source_entries(context) if rows else []
+        for row in rows:
+            _, versions, semantic, _ = evidence_for(
+                context, row['window_start'], row['window_end'],
+                source_entries=source_entries, include_summaries=False
+            )
             evidence = json.loads(row['evidence'])
             invalid_visit = any(not location_evidence_is_current(context, point)
                                 for point in evidence.get('visits', []) + evidence.get('trajectory', []))

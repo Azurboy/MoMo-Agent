@@ -32,6 +32,7 @@ final class LibraryModel {
     @ObservationIgnored let archive: ArchiveStore
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var pendingFileInspection = false
+    @ObservationIgnored private(set) var hasLoadedOnce = false
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private var speakerFeedbackChain: Task<Void, Never>?
     @ObservationIgnored private var inFlightSpeakerFeedbackCount = 0
@@ -489,7 +490,12 @@ final class LibraryModel {
             let runFileInspection = pendingFileInspection
             pendingFileInspection = false
             let selection = generation
+            let wasLoadedOnce = hasLoadedOnce
             do {
+                if !wasLoadedOnce {
+                    // Populate the selected timeline day first on cold launch before loading session pages/previews.
+                    await timeline.refresh()
+                }
                 let visibleCount = max(50, self.recordings.count)
                 var recordings: [RecordingSummary] = []
                 var cursor: String?
@@ -511,27 +517,29 @@ final class LibraryModel {
                     || self.fileIssues.mapValues(\.fingerprint) != issuesByID.mapValues(\.fingerprint)
                     || searchedRecordings.mapValues(RecordingSearchIdentity.init) != searched.mapValues(RecordingSearchIdentity.init)
                 if changed {
-                    let oldByID = Dictionary(uniqueKeysWithValues: self.recordings.map { ($0.id, $0) })
-                    var affectedDays: Set<TimelineDay> = []
-                    for current in recordings {
-                        if let old = oldByID[current.id], RecordingSearchIdentity(old) == RecordingSearchIdentity(current),
-                           self.fileIssues[current.id]?.fingerprint == issuesByID[current.id]?.fingerprint {
-                            continue
+                    if wasLoadedOnce || !issuesByID.isEmpty {
+                        let oldByID = Dictionary(uniqueKeysWithValues: self.recordings.map { ($0.id, $0) })
+                        var affectedDays: Set<TimelineDay> = []
+                        for current in recordings {
+                            if let old = oldByID[current.id], RecordingSearchIdentity(old) == RecordingSearchIdentity(current),
+                               self.fileIssues[current.id]?.fingerprint == issuesByID[current.id]?.fingerprint {
+                                continue
+                            }
+                            affectedDays.insert(TimelineDay(current.recordedAt))
+                            affectedDays.insert(TimelineDay(Date()))
                         }
-                        affectedDays.insert(TimelineDay(current.recordedAt))
-                        affectedDays.insert(TimelineDay(Date()))
-                    }
-                    var invalidatedAnySession = false
-                    for old in self.recordings {
-                        let current = recordings.first { $0.id == old.id }
-                        if current == nil || current?.generation != old.generation || issuesByID[old.id] != nil {
-                            timeline.invalidate(sessionID: old.id)
-                            invalidatedAnySession = true
+                        var invalidatedAnySession = false
+                        for old in self.recordings {
+                            let current = recordings.first { $0.id == old.id }
+                            if current == nil || current?.generation != old.generation || issuesByID[old.id] != nil {
+                                timeline.invalidate(sessionID: old.id)
+                                invalidatedAnySession = true
+                            }
                         }
-                    }
-                    if !invalidatedAnySession {
-                        if affectedDays.isEmpty { timeline.discardPendingReads() }
-                        else { timeline.discardPendingReads(days: affectedDays) }
+                        if !invalidatedAnySession {
+                            if affectedDays.isEmpty { timeline.discardPendingReads() }
+                            else { timeline.discardPendingReads(days: affectedDays) }
+                        }
                     }
                     searchGeneration &+= 1
                     searchRevision &+= 1
@@ -543,6 +551,7 @@ final class LibraryModel {
                             || issuesByID[result.recording.id] != nil
                     }
                 }
+                hasLoadedOnce = true
                 self.recordings = recordings
                 self.speakerProfiles = self.mergeInFlightOptimisticProfiles(into: loadedProfiles)
                 self.previews = previews

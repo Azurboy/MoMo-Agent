@@ -36,7 +36,7 @@ extension ArchiveStore {
             throw ArchiveError.missingRecording(sessionID)
         }
         let document: TranscriptDocument?
-        if session?.integer(0) == 1 { document = nil }
+        if session?.integer(0) == 1 || marks.isEmpty { document = nil }
         else { document = try currentTranscriptOrNil(sessionID: sessionID) }
         var epochs: [EpochCoverage] = []
         for epochID in epochIDs {
@@ -53,13 +53,23 @@ extension ArchiveStore {
             epochs: epochs, watchCapturedDuration: captured, watchStatusUpdatedAt: status?.snapshot.sampledAt)
     }
 
-    private func epochCoverage(epochID: UUID, rate: Double?, fingerprint: String?,
-                               marks: [CaptureMark], document: TranscriptDocument?) throws -> EpochCoverage {
+    func epochCoverage(epochID: UUID, rate: Double?, fingerprint: String?,
+                       marks: [CaptureMark], document: TranscriptDocument?) throws -> EpochCoverage {
+        struct ChunkCoverageMeta {
+            let chunkID: UUID
+            let frames: FrameRange
+        }
         let key: [SQLValue] = [.text(epochID.uuidString)]
         let configurationKey = key + [fingerprint.map(SQLValue.text) ?? .null]
-        let rows = try database.rows("SELECT c.manifest,c.retention,j.state,j.configuration_hash,j.error_code FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id WHERE c.epoch_id=? ORDER BY c.rowid", key)
-        let manifests = try rows.map { try WireJSON.decode(ChunkManifest.self, from: $0.requireData(0)) }
-        let received = try CoverageRanges.union(manifests.map(\.frames))
+        let rows = try database.rows("SELECT c.id,c.start_frame,c.end_frame,c.retention,j.state,j.configuration_hash,j.error_code FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id WHERE c.epoch_id=? ORDER BY c.start_frame,c.rowid", key)
+        var chunks: [ChunkCoverageMeta] = []
+        chunks.reserveCapacity(rows.count)
+        for row in rows {
+            let start = try row.requireInt(1)
+            let end = try row.requireInt(2)
+            chunks.append(ChunkCoverageMeta(chunkID: try row.requireUUID(0), frames: try FrameRange(start: start, count: end - start)))
+        }
+        let received = try CoverageRanges.union(chunks.map(\.frames))
         let closure = try database.rows("SELECT end_frame FROM epoch_closures WHERE epoch_id=?", key).first?.requireInt(0)
         let bounds = try interruptedEpochBounds(epochID: epochID)
         let observed = max(max(received.last?.end ?? 0, marks.map(\.sourceFrame).max() ?? 0), bounds?.observed ?? 0)
@@ -81,33 +91,40 @@ extension ArchiveStore {
         }
         let hasEpochAnalysis = fingerprint == nil ? false : try !database.rows("SELECT 1 FROM analysis_epochs WHERE epoch_id=? AND configuration_hash=?", configurationKey).isEmpty
         let legacyCompleted = fingerprint == nil || hasEpochAnalysis ? [] : rows.indices.filter {
-            rows[$0].string(2) == "complete" && rows[$0].string(3) == fingerprint
-        }.map { manifests[$0].frames }
+            rows[$0].string(4) == "complete" && rows[$0].string(5) == fingerprint
+        }.map { chunks[$0].frames }
         let transcribed = try CoverageRanges.intersection(windows + legacyCompleted, received)
         let processed = try CoverageRanges.union(transcribed + noSpeech)
-        var failures = rows.indices.filter { fingerprint != nil && rows[$0].string(2) == "failed" && rows[$0].string(3) == fingerprint }.map {
-            CoverageFailure(chunkID: manifests[$0].chunkID, frames: manifests[$0].frames, errorCode: rows[$0].string(4))
+        var failures = rows.indices.filter { fingerprint != nil && rows[$0].string(4) == "failed" && rows[$0].string(5) == fingerprint }.map {
+            CoverageFailure(chunkID: chunks[$0].chunkID, frames: chunks[$0].frames, errorCode: rows[$0].string(6))
         }
         for row in try database.rows("SELECT f.start_frame,f.end_frame,f.error_code FROM processing_failures f JOIN sessions s ON s.id=f.session_id WHERE f.epoch_id=? AND f.configuration_hash=? AND f.generation=s.generation AND s.deleted=0", configurationKey) {
             let range = try FrameRange(start: row.requireInt(0), count: row.requireInt(1) - row.requireInt(0))
-            guard let manifest = manifests.first(where: { $0.frames.start < range.end && $0.frames.end > range.start }) else { throw ArchiveError.invalidTranscript }
-            failures.append(CoverageFailure(chunkID: manifest.chunkID, frames: range, errorCode: row.string(2)))
+            var lo = 0, hi = chunks.count
+            while lo < hi {
+                let mid = (lo + hi) >> 1
+                if chunks[mid].frames.end <= range.start { lo = mid + 1 } else { hi = mid }
+            }
+            guard lo < chunks.count, chunks[lo].frames.start < range.end, chunks[lo].frames.end > range.start else {
+                throw ArchiveError.invalidTranscript
+            }
+            failures.append(CoverageFailure(chunkID: chunks[lo].chunkID, frames: range, errorCode: row.string(2)))
         }
         let failed = try CoverageRanges.subtract(failures.map(\.frames), processed)
-        let unavailable = try CoverageRanges.union(rows.indices.filter { rows[$0].string(1) != "present" }.map { manifests[$0].frames })
+        let unavailable = try CoverageRanges.union(rows.indices.filter { rows[$0].string(3) != "present" }.map { chunks[$0].frames })
         let locations = marks.sorted {
             $0.sourceFrame == $1.sourceFrame ? $0.markID.uuidString < $1.markID.uuidString : $0.sourceFrame < $1.sourceFrame
         }.map { mark in
-            let chunks = manifests.filter { $0.frames.contains(mark.sourceFrame) }.map(\.chunkID)
-            let location: MarkCoverageLocation = !chunks.isEmpty ? .received
+            let matchingChunkIDs = chunks.filter { $0.frames.contains(mark.sourceFrame) }.map(\.chunkID)
+            let location: MarkCoverageLocation = !matchingChunkIDs.isEmpty ? .received
                 : closure == mark.sourceFrame ? .epochEnd
                 : mark.sourceFrame < through ? .notReceived : .unknownTail
             let sources = document.map { document in
                 document.spans.filter { span in
-                    span.sourceRanges.contains { chunks.contains($0.chunkID) && $0.frames.contains(mark.sourceFrame) }
+                    span.sourceRanges.contains { matchingChunkIDs.contains($0.chunkID) && $0.frames.contains(mark.sourceFrame) }
                 }.map { document.source(for: $0) }
             } ?? []
-            return ArchiveMarkCoverage(mark: mark, location: location, chunkIDs: chunks, sources: sources)
+            return ArchiveMarkCoverage(mark: mark, location: location, chunkIDs: matchingChunkIDs, sources: sources)
         }
         return EpochCoverage(epochID: epochID, timebaseHz: rate, closedAtFrame: closure, observedThroughFrame: through,
             received: received, analyzed: analyzed, transcribed: transcribed, noSpeech: noSpeech, processed: processed,
@@ -125,8 +142,23 @@ private extension FrameRange {
 
 enum CoverageRanges {
     static func union(_ ranges: [FrameRange]) throws -> [FrameRange] {
+        guard ranges.count > 1 else { return ranges }
+        var isSorted = true
+        var needsMerge = false
+        for index in 1..<ranges.count {
+            if ranges[index].start < ranges[index - 1].start {
+                isSorted = false
+                break
+            }
+            if ranges[index].start <= ranges[index - 1].end {
+                needsMerge = true
+            }
+        }
+        if isSorted && !needsMerge { return ranges }
+        let ordered = isSorted ? ranges : ranges.sorted(by: { $0.start < $1.start })
         var result: [FrameRange] = []
-        for range in ranges.sorted(by: { $0.start < $1.start }) {
+        result.reserveCapacity(ordered.count)
+        for range in ordered {
             if let last = result.last, range.start <= last.end {
                 result[result.count - 1] = try FrameRange(start: last.start, count: max(last.end, range.end) - last.start)
             } else { result.append(range) }

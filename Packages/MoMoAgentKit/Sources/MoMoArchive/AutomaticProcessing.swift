@@ -82,7 +82,7 @@ extension ArchiveStore {
             let rate = manifest.timebaseHz
             guard rate.isFinite, rate > 0 else { continue }
             for windowRow in try database.rows("""
-                SELECT w.descriptor FROM analysis_windows w
+                SELECT w.core_start, w.core_end, w.descriptor FROM analysis_windows w
                 WHERE w.epoch_id=? AND w.configuration_hash=? AND w.generation=?
                   AND w.state='pending'
                   AND NOT EXISTS(SELECT 1 FROM processing_failures f WHERE f.epoch_id=w.epoch_id
@@ -94,12 +94,15 @@ extension ArchiveStore {
                     AND m.start_frame<w.core_end AND m.end_frame>w.core_start)
                 ORDER BY w.rowid
                 """, [.text(epochID.uuidString), .text(configurationFingerprint), .integer(generation), .double(now.timeIntervalSince1970)]) {
-                let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: windowRow.requireData(0))
-                let tier = policy.freshnessTier(window.coreFrames, manifest: manifest, sessionID: sessionID,
+                let coreStart = try windowRow.requireInt(0)
+                let coreEnd = try windowRow.requireInt(1)
+                guard coreEnd >= coreStart, let coreFrames = try? FrameRange(start: coreStart, count: coreEnd - coreStart) else { continue }
+                let tier = policy.freshnessTier(coreFrames, manifest: manifest, sessionID: sessionID,
                     focusedDay: focusedDay, focusedSessionID: focusedSessionID)
-                let qualifies = policy.priority(window.coreFrames, manifest: manifest) == 0
+                let qualifies = policy.priority(coreFrames, manifest: manifest) == 0
                     || (allowFocusedHistorical && tier <= 1)
                 guard qualifies else { continue }
+                let window = try WireJSON.decode(ArchiveAnalysisWindow.self, from: windowRow.requireData(2))
                 if try !batchReserves(window) && windowHasRetainedContextInputs(window) {
                     hasToday = true
                     if policy.isHotLive(window.coreFrames, manifest: manifest) {

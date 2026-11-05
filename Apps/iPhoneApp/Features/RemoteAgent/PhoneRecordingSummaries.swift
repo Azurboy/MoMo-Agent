@@ -16,22 +16,66 @@ final class PhoneRecordingSummaries {
     @ObservationIgnored private var polling: Task<Void, Never>?
     @ObservationIgnored private var inFlight: Task<Void, Never>?
     @ObservationIgnored private var active = false
+    nonisolated private static let terminalStates: Set<String> = ["done", "needs_review", "superseded"]
+
+    nonisolated private static func isTerminal(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return terminalStates.contains(state)
+    }
+
     private struct Item: Codable {
-        let window: TimelineWindow
+        let windowID: TimelineWindowID
+        var window: TimelineWindow?
         var receipt: RemoteSummaryReceipt?
+
+        init(window: TimelineWindow, receipt: RemoteSummaryReceipt? = nil) {
+            self.windowID = window.id
+            self.window = PhoneRecordingSummaries.isTerminal(receipt?.state) ? nil : window
+            self.receipt = receipt
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case windowID, window, receipt
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let decodedReceipt = try container.decodeIfPresent(RemoteSummaryReceipt.self, forKey: .receipt)
+            let decodedWindow = try container.decodeIfPresent(TimelineWindow.self, forKey: .window)
+            if let explicitID = try container.decodeIfPresent(TimelineWindowID.self, forKey: .windowID) {
+                self.windowID = explicitID
+            } else if let decodedWindow {
+                self.windowID = decodedWindow.id
+            } else {
+                throw DecodingError.keyNotFound(
+                    CodingKeys.windowID,
+                    DecodingError.Context(codingPath: container.codingPath, debugDescription: "Missing windowID and window")
+                )
+            }
+            self.receipt = decodedReceipt
+            self.window = PhoneRecordingSummaries.isTerminal(decodedReceipt?.state) ? nil : decodedWindow
+        }
     }
     private struct State: Codable {
         let libraryID: UUID
         let connection: AgentConnection
         var items: [String: Item] = [:]
     }
+    private var hasActiveItems: Bool {
+        saved.items.values.contains { $0.window != nil && !Self.isTerminal($0.receipt?.state) }
+    }
     init(directory: URL, archive: ArchiveStore, connection: AgentConnection, client: AgentClient) throws {
         self.archive = archive; self.client = client
         file = directory.appendingPathComponent("recording-summaries.json")
         if FileManager.default.fileExists(atPath: file.path) {
-            saved = try JSONDecoder().decode(State.self, from: Data(contentsOf: file))
+            let rawData = try Data(contentsOf: file)
+            saved = try JSONDecoder().decode(State.self, from: rawData)
             guard saved.libraryID == archive.libraryInstanceID, saved.connection.hasSameIdentity(as: connection) else {
                 throw PhoneContextSync.SyncError.identity
+            }
+            // Compact legacy multi-MB files that retained full TimelineWindow payloads on terminal items.
+            if rawData.count > 256 * 1024 {
+                try? commit(saved)
             }
         } else { saved = State(libraryID: archive.libraryInstanceID, connection: connection) }
     }
@@ -56,7 +100,7 @@ final class PhoneRecordingSummaries {
             let revision = window.summaryRevision
             if updated.items[revision] == nil {
                 // Coalesce superseded windows before admission; already accepted jobs stay on Mac.
-                updated.items = updated.items.filter { $0.value.window.id != window.id }
+                updated.items = updated.items.filter { $0.value.windowID != window.id }
                 updated.items[revision] = Item(window: window)
             }
         }
@@ -83,7 +127,7 @@ final class PhoneRecordingSummaries {
         inFlight?.cancel() // Detaches only. Never cancels a Mac run.
     }
     private func refresh() {
-        guard inFlight == nil, !saved.items.isEmpty else { return }
+        guard inFlight == nil, hasActiveItems else { return }
         inFlight = Task { [weak self] in
             guard let self else { return }
             defer { inFlight = nil }
@@ -98,18 +142,24 @@ final class PhoneRecordingSummaries {
         }
     }
     private func synchronize() async throws {
-        let candidates = saved.items
-        let valid = try await archive.validTimelineSummaryRevisions(candidates.values.map(\.window))
+        var pendingWindows: [String: TimelineWindow] = [:]
+        for (revision, item) in saved.items where !Self.isTerminal(item.receipt?.state) {
+            if let window = item.window {
+                pendingWindows[revision] = window
+            }
+        }
+        guard !pendingWindows.isEmpty else { return }
+        let valid = try await archive.validTimelineSummaryRevisions(Array(pendingWindows.values))
         var updated = saved
         var dirty = false
-        for revision in candidates.keys where !valid.contains(revision) {
+        for revision in pendingWindows.keys where !valid.contains(revision) {
             updated.items[revision] = nil
             dirty = true
         }
         if dirty { try commit(updated); dirty = false }
-        let orderedRevisions = saved.items.keys.sorted { lhs, rhs in
-            let lStart = saved.items[lhs]?.window.id.start ?? .distantPast
-            let rStart = saved.items[rhs]?.window.id.start ?? .distantPast
+        let orderedRevisions = pendingWindows.keys.filter { valid.contains($0) && saved.items[$0] != nil }.sorted { lhs, rhs in
+            let lStart = saved.items[lhs]?.windowID.start ?? .distantPast
+            let rStart = saved.items[rhs]?.windowID.start ?? .distantPast
             return lStart == rStart ? lhs < rhs : lStart > rStart
         }
         var firstError: Error?
@@ -117,28 +167,30 @@ final class PhoneRecordingSummaries {
         for revision in orderedRevisions {
             try Task.checkCancellation()
             guard let item = saved.items[revision],
-                  item.receipt?.state != "done",
-                  item.receipt?.state != "needs_review",
-                  item.receipt?.state != "superseded" else { continue }
+                  let window = item.window,
+                  !Self.isTerminal(item.receipt?.state) else { continue }
             do {
                 let receipt: RemoteSummaryReceipt
                 if let id = item.receipt?.id {
                     do {
                         receipt = try await client.recordingSummary(id: id)
                     } catch let AgentClientError.http(status, _, _, _) where status == 404 || status == 409 {
-                        receipt = try await client.summarizeRecording(libraryID: saved.libraryID, windowID: item.window.id.key, revision: revision, text: item.window.text)
+                        receipt = try await client.summarizeRecording(libraryID: saved.libraryID, windowID: window.id.key, revision: revision, text: window.text)
                     }
                 } else {
-                    receipt = try await client.summarizeRecording(libraryID: saved.libraryID, windowID: item.window.id.key, revision: revision, text: item.window.text)
+                    receipt = try await client.summarizeRecording(libraryID: saved.libraryID, windowID: window.id.key, revision: revision, text: window.text)
                 }
                 guard receipt.revision == revision, item.receipt == nil || item.receipt?.id == receipt.id,
                       ["pending", "running", "done", "needs_review", "superseded"].contains(receipt.state),
                       receipt.state != "done" || receipt.text?.isEmpty == false else { throw AgentClientError.invalidResponse }
                 // The source may have changed while the network was suspended.
-                let current = try await archive.validTimelineSummaryRevisions([item.window])
+                let current = try await archive.validTimelineSummaryRevisions([window])
                 guard current.contains(revision), saved.items[revision] != nil else { continue }
                 if saved.items[revision]?.receipt != receipt {
                     saved.items[revision]?.receipt = receipt
+                    if Self.isTerminal(receipt.state) {
+                        saved.items[revision]?.window = nil
+                    }
                     dirty = true
                     if receipt.state == "done" { anyCompleted = true }
                 }

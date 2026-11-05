@@ -139,7 +139,7 @@ struct DesktopSources: View {
                 day = initialToday
             }
             observedToday = initialToday
-            await model.loadContext()
+            await model.loadContext(silent: !model.sources.isEmpty)
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(8)) } catch { break }
                 let today = logicalToday
@@ -221,7 +221,7 @@ struct DesktopSources: View {
                         }
                         .id(item.id)
                     }
-                    if visible.isEmpty && !model.contextLoading && model.memoryError == nil {
+                    if windows.isEmpty && !model.contextLoading && model.memoryError == nil {
                         ContentUnavailableView(
                             query.isEmpty ? "这一天还没有转录" : "没有匹配的转录",
                             systemImage: "waveform",
@@ -232,7 +232,7 @@ struct DesktopSources: View {
                             Button("查看最近的转录") { day = logicalDay(for: Date(timeIntervalSince1970: latest)) }
                         }
                     }
-                    if model.contextLoading { ProgressView("正在读取记录").padding(24) }
+                    if model.contextLoading && windows.isEmpty { ProgressView("正在读取记录").padding(24) }
                 }
                 .scrollTargetLayout()
                 .padding(.horizontal, 12)

@@ -34,11 +34,84 @@ extension ArchiveStore {
         }
     }
 
+    private func audioFileExists(
+        relativePath: String,
+        rootPrefix: String,
+        localDirectories: inout [String: Set<String>?]
+    ) -> Bool {
+        let fullPath = rootPrefix + relativePath
+        guard let slash = fullPath.lastIndex(of: "/") else {
+            return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
+        }
+        let dirPath = String(fullPath[..<slash])
+        let fileName = String(fullPath[fullPath.index(after: slash)...])
+        if let localEntry = localDirectories[dirPath] {
+            if let names = localEntry {
+                return names.contains(fileName)
+            }
+            return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
+        }
+        let dirURL = URL(fileURLWithPath: dirPath, isDirectory: true)
+        guard let stamp = FileStatStamp.read(at: dirURL) else {
+            verifiedAudioDirectoryFilesCache.removeValue(forKey: dirPath)
+            localDirectories[dirPath] = []
+            return false
+        }
+        guard (stamp.mode & UInt16(S_IFMT)) == UInt16(S_IFDIR) else {
+            verifiedAudioDirectoryFilesCache.removeValue(forKey: dirPath)
+            localDirectories[dirPath] = nil
+            return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
+        }
+        if let cached = verifiedAudioDirectoryFilesCache[dirPath], cached.stamp == stamp {
+            localDirectories[dirPath] = cached.fileNames
+            return cached.fileNames.contains(fileName)
+        }
+        guard let dir = dirPath.withCString({ Darwin.opendir($0) }) else {
+            localDirectories[dirPath] = nil
+            return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
+        }
+        defer { Darwin.closedir(dir) }
+        var names = Set<String>(minimumCapacity: 64)
+        while let entry = Darwin.readdir(dir) {
+            let nameLen = Int(entry.pointee.d_namlen)
+            if nameLen == 0 { continue }
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
+                String(decoding: raw.prefix(nameLen), as: UTF8.self)
+            }
+            if name == "." || name == ".." { continue }
+            let dtype = Int32(entry.pointee.d_type)
+            if dtype == DT_LNK || dtype == DT_UNKNOWN {
+                let candidate = dirPath + "/" + name
+                if candidate.withCString({ Darwin.access($0, F_OK) == 0 }) {
+                    names.insert(name)
+                }
+            } else {
+                names.insert(name)
+            }
+        }
+        if verifiedAudioDirectoryFilesCache.count >= 64, verifiedAudioDirectoryFilesCache[dirPath] == nil {
+            verifiedAudioDirectoryFilesCache.removeValue(forKey: verifiedAudioDirectoryFilesCache.keys.first!)
+        }
+        verifiedAudioDirectoryFilesCache[dirPath] = (stamp, names)
+        localDirectories[dirPath] = names
+        return names.contains(fileName)
+    }
+
     private func timelineDaySnapshotImpl(_ day: TimelineDay, configurationFingerprint: String? = nil) throws -> TimelineDaySnapshot {
+        if let configurationFingerprint, !ContentHash.isValid(configurationFingerprint) { throw ArchiveError.invalidQuery }
         try Task.checkCancellation()
         #if DEBUG
         timelineDayBuildCount += 1
         #endif
+        struct TimelineSessionMeta {
+            let generation: Int64
+            let transcriptVersion: Int64
+            let projectionBlocked: Bool
+        }
+        struct TimelineChunkMeta {
+            let chunkID: UUID
+            let frames: FrameRange
+        }
         let rootPrefix = rootURL.standardizedFileURL.path + "/"
         let localStart = day.startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
         let localEnd = day.adding(days: 1).startDate(calendar: TimelineDay.calendar).timeIntervalSince1970
@@ -53,51 +126,61 @@ extension ArchiveStore {
                    + MAX(COALESCE(ec.end_frame, 0), e.max_received_end_frame) / e.timebase) > ?
             """, [.double(localEnd + 0.001), .double(localStart - 0.001)])
         var slices: [TimelineBuilder] = []
-        var coverages: [UUID: RecordingCoverage] = [:]
+        var sessionMetas: [UUID: TimelineSessionMeta] = [:]
+        var sessionMarksCache: [UUID: [CaptureMark]] = [:]
         var documents: [UUID: TranscriptDocument] = [:]
-        var summaries: [UUID: RecordingSummary] = [:]
+        var loadedDocuments: Set<UUID> = []
+        var localAudioDirectories: [String: Set<String>?] = [:]
         var receivedSeconds = 0.0, processedSeconds = 0.0, unavailableSeconds = 0.0, awaitingSyncSeconds = 0.0
         for row in rows {
             try Task.checkCancellation()
             let anchor = try WireJSON.decode(ChunkManifest.self, from: row.requireData(0))
             let sessionID = anchor.sessionID
-            let summary: RecordingSummary
-            if let cached = summaries[sessionID] { summary = cached }
-            else {
-                summary = try recordingSummary(sessionID: sessionID)
-                summaries[sessionID] = summary
+            let sessionMeta: TimelineSessionMeta
+            if let cached = sessionMetas[sessionID] {
+                sessionMeta = cached
+            } else {
+                guard let srow = try database.rows(
+                    "SELECT generation, transcript_version, projection_blocked FROM sessions WHERE id=? AND deleted=0",
+                    [.text(sessionID.uuidString)]
+                ).first else {
+                    throw ArchiveError.missingRecording(sessionID)
+                }
+                let loaded = TimelineSessionMeta(
+                    generation: try srow.requireInt(0),
+                    transcriptVersion: try srow.requireInt(1),
+                    projectionBlocked: srow.integer(2) == 1
+                )
+                sessionMetas[sessionID] = loaded
+                sessionMeta = loaded
             }
-            let coverage: RecordingCoverage
-            if let cached = coverages[sessionID] { coverage = cached }
-            else {
-                coverage = try recordingCoverage(sessionID: sessionID, configurationFingerprint: configurationFingerprint)
-                coverages[sessionID] = coverage
-                let blocked = try database.rows("SELECT projection_blocked FROM sessions WHERE id=?", [.text(sessionID.uuidString)]).first?.integer(0) == 1
-                if !blocked, let document = try currentTranscriptOrNil(sessionID: sessionID) { documents[sessionID] = document }
+            if !loadedDocuments.contains(sessionID) {
+                loadedDocuments.insert(sessionID)
+                if !sessionMeta.projectionBlocked && sessionMeta.transcriptVersion > 0,
+                   let document = try currentTranscriptOrNil(sessionID: sessionID) {
+                    documents[sessionID] = document
+                }
             }
-            guard let epoch = coverage.epochs.first(where: { $0.epochID == anchor.epochID }),
-                  epoch.observedThroughFrame > 0 else { continue }
-            struct TimelineChunkMeta {
-                let chunkID: UUID
-                let frames: FrameRange
+            let allMarks: [CaptureMark]
+            if let cachedMarks = sessionMarksCache[sessionID] {
+                allMarks = cachedMarks
+            } else {
+                let fetched = try marks(sessionID: sessionID)
+                sessionMarksCache[sessionID] = fetched
+                allMarks = fetched
             }
-            let chunkRows = try database.rows("SELECT c.id,c.start_frame,c.end_frame,c.retention,c.relative_path,j.state,j.error_code FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id WHERE c.epoch_id=? ORDER BY c.start_frame", [.text(anchor.epochID.uuidString)])
-            let chunks = try chunkRows.map { row -> TimelineChunkMeta in
-                try Task.checkCancellation()
-                let startFrame = try row.requireInt(1)
-                let endFrame = try row.requireInt(2)
-                return TimelineChunkMeta(chunkID: try row.requireUUID(0),
-                    frames: try FrameRange(start: startFrame, count: endFrame - startFrame))
-            }
-            let speechWindows = try database.rows("SELECT core_start,core_end FROM analysis_windows WHERE epoch_id=? AND configuration_hash=?",
-                [.text(anchor.epochID.uuidString), configurationFingerprint.map(SQLValue.text) ?? .null])
-                .map { try FrameRange(start: $0.requireInt(0), count: $0.requireInt(1) - $0.requireInt(0)) }
-            let discardedWindows = try database.rows("SELECT core_start,core_end FROM analysis_windows WHERE epoch_id=? AND state='complete' AND raw_result=?",
-                [.text(anchor.epochID.uuidString), .blob(TranscriptText.discardedPunctuation)])
-                .map { try FrameRange(start: $0.requireInt(0), count: $0.requireInt(1) - $0.requireInt(0)) }
-            let byID = Dictionary(uniqueKeysWithValues: chunks.enumerated().map { ($0.element.chunkID, $0.offset) })
-            let base = anchor.wallClockAnchor.timeIntervalSince1970
+            let epochMarks = allMarks.filter { $0.epochID == anchor.epochID }
             let rate = anchor.timebaseHz
+            if !rate.isFinite || rate <= 0 { throw ArchiveError.database(11) }
+            let epoch = try epochCoverage(
+                epochID: anchor.epochID,
+                rate: rate,
+                fingerprint: configurationFingerprint,
+                marks: epochMarks,
+                document: epochMarks.isEmpty ? nil : documents[sessionID]
+            )
+            guard epoch.observedThroughFrame > 0 else { continue }
+            let base = anchor.wallClockAnchor.timeIntervalSince1970
             let offset = Double(anchor.timezoneOffset)
             let knownEnd = base + Double(epoch.observedThroughFrame) / rate
             let lower = max(base, localStart - offset)
@@ -107,6 +190,7 @@ extension ArchiveStore {
             let throughFrame = min(epoch.observedThroughFrame, Int64(((upper - base) * rate).rounded(.up)))
             guard throughFrame > firstFrame else { continue }
             let dayFrames = try FrameRange(start: firstFrame, count: throughFrame - firstFrame)
+
             func seconds(_ ranges: [FrameRange]) throws -> Double {
                 try CoverageRanges.intersection(ranges, [dayFrames]).reduce(0) { $0 + Double($1.count) / rate }
             }
@@ -114,20 +198,99 @@ extension ArchiveStore {
             processedSeconds += try seconds(epoch.processed)
             unavailableSeconds += try seconds(epoch.unavailableAudio)
             awaitingSyncSeconds += try seconds(epoch.notReceived)
-            let documentSpans = (documents[sessionID]?.spans ?? []).filter { byID[$0.chunkID] != nil }
-            let audioAvailable = try chunkRows.map { row in
+
+            let epochIDText = anchor.epochID.uuidString
+            let chunkRows = try database.rows("""
+                SELECT c.id,c.start_frame,c.end_frame,c.retention,c.relative_path,j.state,j.error_code
+                FROM chunks c LEFT JOIN transcription_jobs j ON j.chunk_id=c.id
+                WHERE c.epoch_id=? AND c.end_frame > ? AND c.start_frame < ?
+                ORDER BY c.start_frame
+                """, [.text(epochIDText), .integer(firstFrame), .integer(throughFrame)])
+            var chunks: [TimelineChunkMeta] = []
+            chunks.reserveCapacity(chunkRows.count)
+            var audioAvailable: [Bool] = []
+            audioAvailable.reserveCapacity(chunkRows.count)
+            var chunkAudioByID: [UUID: Bool] = Dictionary(minimumCapacity: chunkRows.count)
+            for chunkRow in chunkRows {
                 try Task.checkCancellation()
-                guard row.string(3) == "present" else { return false }
-                let path = try row.requireString(4)
-                let fullPath = rootPrefix + path
-                return fullPath.withCString { Darwin.access($0, F_OK) == 0 }
+                let cid = try chunkRow.requireUUID(0)
+                let startFrame = try chunkRow.requireInt(1)
+                let endFrame = try chunkRow.requireInt(2)
+                chunks.append(TimelineChunkMeta(chunkID: cid, frames: try FrameRange(start: startFrame, count: endFrame - startFrame)))
+                let isAvail: Bool
+                if chunkRow.string(3) == "present" {
+                    let path = try chunkRow.requireString(4)
+                    isAvail = audioFileExists(relativePath: path, rootPrefix: rootPrefix, localDirectories: &localAudioDirectories)
+                } else {
+                    isAvail = false
+                }
+                audioAvailable.append(isAvail)
+                chunkAudioByID[cid] = isAvail
             }
+
+            let marginFrames = max(1, Int64((rate * 2).rounded(.up)))
+            let spanLowerBound = max(0, firstFrame - marginFrames)
+            let spanUpperBound = throughFrame + marginFrames
+            let candidateSpans = (documents[sessionID]?.spans ?? []).filter {
+                $0.frames.end > spanLowerBound && $0.frames.start < spanUpperBound
+            }
+            if !candidateSpans.isEmpty {
+                var missingChunkIDs: Set<UUID> = []
+                for span in candidateSpans {
+                    if chunkAudioByID[span.chunkID] == nil { missingChunkIDs.insert(span.chunkID) }
+                    for source in span.sourceRanges where chunkAudioByID[source.chunkID] == nil {
+                        missingChunkIDs.insert(source.chunkID)
+                    }
+                }
+                if !missingChunkIDs.isEmpty {
+                    let idList = Array(missingChunkIDs)
+                    for batchStart in stride(from: 0, to: idList.count, by: 200) {
+                        let slice = idList[batchStart..<min(batchStart + 200, idList.count)]
+                        let placeholders = slice.map { _ in "?" }.joined(separator: ",")
+                        let extraRows = try database.rows(
+                            "SELECT id,retention,relative_path FROM chunks WHERE epoch_id=? AND id IN (\(placeholders))",
+                            [.text(epochIDText)] + slice.map { .text($0.uuidString) }
+                        )
+                        for extra in extraRows {
+                            let cid = try extra.requireUUID(0)
+                            if extra.string(1) == "present" {
+                                let path = try extra.requireString(2)
+                                chunkAudioByID[cid] = audioFileExists(relativePath: path, rootPrefix: rootPrefix, localDirectories: &localAudioDirectories)
+                            } else {
+                                chunkAudioByID[cid] = false
+                            }
+                        }
+                    }
+                }
+            }
+            let documentSpans = candidateSpans
+                .filter { chunkAudioByID[$0.chunkID] != nil }
+                .sorted { $0.frames.start < $1.frames.start }
+
+            let speechWindows: [FrameRange]
+            if let configurationFingerprint {
+                speechWindows = try database.rows("""
+                    SELECT core_start,core_end FROM analysis_windows
+                    WHERE epoch_id=? AND configuration_hash=? AND core_end > ? AND core_start < ?
+                    """, [.text(epochIDText), .text(configurationFingerprint), .integer(firstFrame), .integer(throughFrame)])
+                    .map { try FrameRange(start: $0.requireInt(0), count: $0.requireInt(1) - $0.requireInt(0)) }
+            } else {
+                speechWindows = []
+            }
+            let discardedWindows = try CoverageRanges.union(
+                database.rows("""
+                    SELECT core_start,core_end FROM analysis_windows
+                    WHERE epoch_id=? AND state='complete' AND core_end > ? AND core_start < ? AND raw_result=?
+                    """, [.text(epochIDText), .integer(firstFrame), .integer(throughFrame), .blob(TranscriptText.discardedPunctuation)])
+                    .map { try FrameRange(start: $0.requireInt(0), count: $0.requireInt(1) - $0.requireInt(0)) }
+            )
+
             let availableRanges = chunks.indices.filter { audioAvailable[$0] }.map { chunks[$0].frames }
             var epochIssues: [TimelineIssue] = []
             func addIssues(_ kind: TimelineIssue.Kind, ranges: [FrameRange], reason: TimelineIssue.FailureReason? = nil) throws {
                 for range in try CoverageRanges.intersection(ranges, [dayFrames]) {
                     epochIssues.append(TimelineIssue(kind: kind,
-                        source: TimelineAudioSource(sessionID: sessionID, generation: summary.generation,
+                        source: TimelineAudioSource(sessionID: sessionID, generation: sessionMeta.generation,
                             epochID: anchor.epochID, frames: range, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor),
                         failureReason: reason))
                 }
@@ -159,16 +322,25 @@ extension ArchiveStore {
                         reason: failed ? TimelineIssue.FailureReason(code: chunkRows[index].string(6)) : nil)
                 }
             }
-            let missingUnexpected = chunks.indices.filter {
-                chunkRows[$0].string(3) == "missing_unexpected" || (chunkRows[$0].string(3) == "present" && !audioAvailable[$0])
-            }.map { chunks[$0].frames }
-            let unfinishedUnavailable = chunks.indices.filter {
-                !audioAvailable[$0] && chunkRows[$0].string(5) != "complete"
-            }.map { chunks[$0].frames }
+            var isMissingUnexpected = [Bool](repeating: false, count: chunks.count)
+            var missingUnexpected: [FrameRange] = []
+            var unfinishedUnavailable: [FrameRange] = []
+            for index in chunks.indices {
+                let retention = chunkRows[index].string(3)
+                if retention == "missing_unexpected" || (retention == "present" && !audioAvailable[index]) {
+                    isMissingUnexpected[index] = true
+                    missingUnexpected.append(chunks[index].frames)
+                }
+                if !audioAvailable[index] && chunkRows[index].string(5) != "complete" {
+                    unfinishedUnavailable.append(chunks[index].frames)
+                }
+            }
             try addIssues(.audioUnavailable, ranges: missingUnexpected + unfinishedUnavailable)
-            if documents[sessionID] == nil && summary.transcriptVersion > 0 {
+            if documents[sessionID] == nil && sessionMeta.transcriptVersion > 0 {
                 try addIssues(.transcriptUnavailable, ranges: [dayFrames])
             }
+            epochIssues.sort { $0.source.frames.start < $1.source.frames.start }
+
             let speech = try CoverageRanges.union(speechWindows + documentSpans.map(\.frames))
             var activity = try CoverageRanges.subtract([dayFrames], epoch.noSpeech)
             if configurationFingerprint == nil {
@@ -177,7 +349,7 @@ extension ArchiveStore {
                 let discarded = chunks.indices.filter { chunkRows[$0].string(6) == "discarded_punctuation" }.map { chunks[$0].frames }
                 activity = speech + unfinished + discarded + epoch.notReceived
             }
-            if documents[sessionID] == nil && summary.transcriptVersion > 0 { activity = [dayFrames] }
+            if documents[sessionID] == nil && sessionMeta.transcriptVersion > 0 { activity = [dayFrames] }
             activity += missingUnexpected
             let dayMarks = epoch.marks.filter { value in
                 let frame = value.mark.sourceFrame
@@ -191,11 +363,37 @@ extension ArchiveStore {
             activity = try CoverageRanges.intersection(activity + speech + marked, [dayFrames])
             // Keep short natural pauses in the audio, then group longer pauses only in the reading UI.
             var connected: [FrameRange] = []
+            connected.reserveCapacity(activity.count)
             for range in activity {
                 if let last = connected.last, Double(range.start - last.end) / rate <= 10 {
                     connected[connected.count - 1] = try FrameRange(start: last.start, count: range.end - last.start)
                 } else { connected.append(range) }
             }
+
+            func overlapsSortedDisjoint(_ ranges: [FrameRange], cursor: inout Int, target: FrameRange) -> Bool {
+                while cursor < ranges.count && ranges[cursor].end <= target.start { cursor += 1 }
+                return cursor < ranges.count && ranges[cursor].start < target.end
+            }
+            func containsFrame(_ sortedDisjoint: [FrameRange], frame: Int64) -> Bool {
+                var lo = 0, hi = sortedDisjoint.count
+                while lo < hi {
+                    let mid = (lo + hi) >> 1
+                    if sortedDisjoint[mid].end <= frame { lo = mid + 1 } else { hi = mid }
+                }
+                return lo < sortedDisjoint.count && sortedDisjoint[lo].start <= frame && frame < sortedDisjoint[lo].end
+            }
+
+            var issueCursor = 0
+            var issueMaxEndBeforeCursor: Int64 = 0
+            var speechCursor = 0
+            var notReceivedCursor = 0
+            var failedCursor = 0
+            var pendingCursor = 0
+            var discardedCursor = 0
+            var chunkCursor = 0
+            var spanCursor = 0
+            let document = documents[sessionID]
+
             for frames in connected {
                 try Task.checkCancellation()
                 let start = base + Double(frames.start) / rate
@@ -205,71 +403,109 @@ extension ArchiveStore {
                 let audioFrames = try FrameRange(start: audioStart, count: audioEnd - audioStart)
                 var builder = TimelineBuilder(start: Date(timeIntervalSince1970: start), end: Date(timeIntervalSince1970: end),
                     offset: anchor.timezoneOffset, configurationFingerprint: configurationFingerprint)
-                builder.sources.append(TimelineAudioSource(sessionID: sessionID, generation: summary.generation,
+                builder.sources.append(TimelineAudioSource(sessionID: sessionID, generation: sessionMeta.generation,
                     epochID: anchor.epochID, frames: audioFrames, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor))
-                builder.issues = try epochIssues.compactMap { issue in
-                    guard let range = try CoverageRanges.intersection([issue.source.frames], [frames]).first else { return nil }
-                    return TimelineIssue(kind: issue.kind,
-                        source: TimelineAudioSource(sessionID: sessionID, generation: summary.generation,
-                            epochID: anchor.epochID, frames: range, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor),
-                        failureReason: issue.failureReason)
+
+                while issueCursor < epochIssues.count,
+                      issueMaxEndBeforeCursor <= frames.start,
+                      epochIssues[issueCursor].source.frames.end <= frames.start {
+                    issueMaxEndBeforeCursor = max(issueMaxEndBeforeCursor, epochIssues[issueCursor].source.frames.end)
+                    issueCursor += 1
                 }
+                let issueScanStart = issueMaxEndBeforeCursor <= frames.start ? issueCursor : 0
+                for issueIdx in issueScanStart..<epochIssues.count {
+                    let issue = epochIssues[issueIdx]
+                    if issue.source.frames.start >= frames.end { break }
+                    let s = max(issue.source.frames.start, frames.start)
+                    let e = min(issue.source.frames.end, frames.end)
+                    if e > s {
+                        let range = try FrameRange(start: s, count: e - s)
+                        builder.issues.append(TimelineIssue(kind: issue.kind,
+                            source: TimelineAudioSource(sessionID: sessionID, generation: sessionMeta.generation,
+                                epochID: anchor.epochID, frames: range, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor),
+                            failureReason: issue.failureReason))
+                    }
+                }
+
                 builder.unknownTail = epoch.unknownTailFromFrame == frames.end
-                builder.speechIntervals = try CoverageRanges.intersection(speech, [frames]).map {
-                    DateInterval(start: Date(timeIntervalSince1970: base + Double($0.start) / rate), duration: Double($0.count) / rate)
+                while speechCursor < speech.count && speech[speechCursor].end <= frames.start { speechCursor += 1 }
+                var sIdx = speechCursor
+                while sIdx < speech.count && speech[sIdx].start < frames.end {
+                    let s = max(speech[sIdx].start, frames.start)
+                    let e = min(speech[sIdx].end, frames.end)
+                    if e > s {
+                        builder.speechIntervals.append(
+                            DateInterval(start: Date(timeIntervalSince1970: base + Double(s) / rate), duration: Double(e - s) / rate)
+                        )
+                    }
+                    sIdx += 1
                 }
+
                 builder.isFinal = epoch.closedAtFrame != nil || knownEnd - end >= TimelineWindow.inactivityGap
                     || (configurationFingerprint != nil && epoch.pending.isEmpty
                         && knownEnd < Date().addingTimeInterval(-30 * 60).timeIntervalSince1970)
-                builder.waitingForSync = builder.waitingForSync || epoch.notReceived.contains { $0.overlaps(frames) }
-                builder.failed = builder.failed || epoch.failed.contains { $0.overlaps(frames) }
-                builder.pending = builder.pending || epoch.pending.contains { $0.overlaps(frames) }
-                builder.marks = dayMarks.compactMap { value in
-                    let mark = value.mark
-                    // Keep a mark at the final sample boundary on the preceding recording day.
-                    // Interior midnight boundaries belong to the following day only.
-                    let atEnd = mark.sourceFrame == epoch.observedThroughFrame && frames.end == epoch.observedThroughFrame
-                    guard frames.start <= mark.sourceFrame, mark.sourceFrame < frames.end || atEnd else { return nil }
-                    return TimelineMark(id: mark.markID, sessionID: sessionID, generation: summary.generation,
-                        epochID: anchor.epochID, sourceFrame: mark.sourceFrame,
-                        recordedAt: anchor.wallClockAnchor.addingTimeInterval(Double(mark.sourceFrame) / rate),
-                        audioAvailable: availableRanges.contains { $0.start <= mark.sourceFrame && mark.sourceFrame < $0.end })
-                }
-                builder.discarded = builder.discarded || discardedWindows.contains { $0.overlaps(frames) }
-                for (index, chunk) in chunks.enumerated() where chunk.frames.overlaps(frames) {
-                    let row = chunkRows[index]
-                    builder.discarded = builder.discarded || row.string(6) == "discarded_punctuation"
-                    let available = audioAvailable[index]
-                    builder.unavailable = builder.unavailable || !available
-                    if missingUnexpected.contains(where: { $0.overlaps(frames) }) { builder.failed = true }
-                    if configurationFingerprint == nil {
-                        builder.failed = builder.failed || row.string(5) == "failed"
-                        builder.pending = builder.pending || (available && row.string(5) != "complete" && row.string(5) != "failed")
+                builder.waitingForSync = builder.waitingForSync || overlapsSortedDisjoint(epoch.notReceived, cursor: &notReceivedCursor, target: frames)
+                builder.failed = builder.failed || overlapsSortedDisjoint(epoch.failed, cursor: &failedCursor, target: frames)
+                builder.pending = builder.pending || overlapsSortedDisjoint(epoch.pending, cursor: &pendingCursor, target: frames)
+                if !dayMarks.isEmpty {
+                    builder.marks = dayMarks.compactMap { value in
+                        let mark = value.mark
+                        // Keep a mark at the final sample boundary on the preceding recording day.
+                        // Interior midnight boundaries belong to the following day only.
+                        let atEnd = mark.sourceFrame == epoch.observedThroughFrame && frames.end == epoch.observedThroughFrame
+                        guard frames.start <= mark.sourceFrame, mark.sourceFrame < frames.end || atEnd else { return nil }
+                        return TimelineMark(id: mark.markID, sessionID: sessionID, generation: sessionMeta.generation,
+                            epochID: anchor.epochID, sourceFrame: mark.sourceFrame,
+                            recordedAt: anchor.wallClockAnchor.addingTimeInterval(Double(mark.sourceFrame) / rate),
+                            audioAvailable: containsFrame(availableRanges, frame: mark.sourceFrame))
                     }
                 }
-                if let document = documents[sessionID] {
-                    var paragraphIDs = Set<UUID>()
-                    for span in documentSpans {
-                        guard byID[span.chunkID] != nil else { continue }
-                        let at = base + Double(span.frames.start) / rate
-                        guard at >= start, at < end else { continue }
-                        let available = span.sourceRanges.allSatisfy { source in
-                            guard let index = byID[source.chunkID] else { return false }
-                            return audioAvailable[index]
+                builder.discarded = builder.discarded || overlapsSortedDisjoint(discardedWindows, cursor: &discardedCursor, target: frames)
+
+                while chunkCursor < chunks.count && chunks[chunkCursor].frames.end <= frames.start { chunkCursor += 1 }
+                var cIdx = chunkCursor
+                while cIdx < chunks.count && chunks[cIdx].frames.start < frames.end {
+                    if chunks[cIdx].frames.end > frames.start {
+                        let cRow = chunkRows[cIdx]
+                        builder.discarded = builder.discarded || cRow.string(6) == "discarded_punctuation"
+                        let available = audioAvailable[cIdx]
+                        builder.unavailable = builder.unavailable || !available
+                        if isMissingUnexpected[cIdx] { builder.failed = true }
+                        if configurationFingerprint == nil {
+                            let jState = cRow.string(5)
+                            builder.failed = builder.failed || jState == "failed"
+                            builder.pending = builder.pending || (available && jState != "complete" && jState != "failed")
                         }
+                    }
+                    cIdx += 1
+                }
+
+                if let document {
+                    while spanCursor < documentSpans.count && (base + Double(documentSpans[spanCursor].frames.start) / rate) < start {
+                        spanCursor += 1
+                    }
+                    var paragraphIDs = Set<UUID>()
+                    var spIdx = spanCursor
+                    while spIdx < documentSpans.count {
+                        let span = documentSpans[spIdx]
+                        let at = base + Double(span.frames.start) / rate
+                        if at >= end { break }
+                        let available = span.sourceRanges.allSatisfy { source in
+                            chunkAudioByID[source.chunkID] == true
+                        }
+                        let location = TimelineAudioSource(sessionID: sessionID, generation: sessionMeta.generation,
+                            epochID: anchor.epochID, frames: span.frames, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor)
                         var paragraph = TimelineParagraph(source: document.source(for: span), text: span.text,
                             recordedAt: Date(timeIntervalSince1970: at), audioAvailable: available, speaker: span.speaker, attribution: span.attribution)
-                        paragraph.audioSource = TimelineAudioSource(sessionID: sessionID, generation: summary.generation,
-                            epochID: anchor.epochID, frames: span.frames, timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor)
+                        paragraph.audioSource = location
                         paragraph.startsNewSpeakerTurn = span.startsNewSpeakerTurn
                         if paragraphIDs.insert(paragraph.id).inserted {
                             builder.paragraphs.append(paragraph)
-                            builder.paragraphLocations[paragraph.id] = TimelineAudioSource(sessionID: sessionID,
-                                generation: summary.generation, epochID: anchor.epochID, frames: span.frames,
-                                timebaseHz: rate, wallClockAnchor: anchor.wallClockAnchor)
+                            builder.paragraphLocations[paragraph.id] = location
                         }
+                        spIdx += 1
                     }
-                } else if summary.transcriptVersion > 0 { builder.failed = true }
+                } else if sessionMeta.transcriptVersion > 0 { builder.failed = true }
                 slices.append(builder)
             }
         }
@@ -296,12 +532,14 @@ extension ArchiveStore {
         try validateSources([source])
         let document = try readTranscript(sessionID: source.sessionID)
         guard let span = document.spans.first(where: { $0.id == source.spanID }),
-              let row = try database.rows("SELECT manifest FROM chunks WHERE id=?", [.text(span.chunkID.uuidString)]).first else {
+              let row = try database.rows("SELECT wall_clock_anchor,timebase_hz,timezone_offset FROM chunks WHERE id=?", [.text(span.chunkID.uuidString)]).first else {
             throw ArchiveError.staleSource
         }
-        let manifest = try WireJSON.decode(ChunkManifest.self, from: row.requireData(0))
-        let at = manifest.wallClockAnchor.addingTimeInterval(Double(span.frames.start) / manifest.timebaseHz)
-        let local = at.addingTimeInterval(Double(manifest.timezoneOffset))
+        let anchorSeconds = try row.requireDouble(0)
+        let rate = try row.requireDouble(1)
+        let tzOffset = try row.requireInt(2)
+        let at = Date(timeIntervalSince1970: anchorSeconds + Double(span.frames.start) / rate)
+        let local = at.addingTimeInterval(Double(tzOffset))
         return try timelineDay(TimelineDay(local, calendar: TimelineDay.calendar), configurationFingerprint: configurationFingerprint)
             .first { $0.references.contains(source) }
     }
@@ -461,11 +699,8 @@ private struct TimelineBuilder {
         let marked = !sortedMarks.isEmpty
         let sortedIssues = issues.sorted { $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start }
         let state: TimelineProcessingState = failed ? .failed : waitingForSync ? .waitingForSync : pending ? .waitingForTranscription : .complete
-        let content = TimelineWindow(id: id, end: end, sources: sortedSources, paragraphs: sortedText, state: state,
-            isFinal: isFinal, isMarked: marked, unavailableAudio: unavailable, revision: "", configurationFingerprint: configurationFingerprint, speechIntervals: intervals,
-            discardedTranscription: discarded, issues: sortedIssues, hasUnknownTail: unknownTail, marks: sortedMarks)
         // Appending text elsewhere in the same session must not regenerate an unchanged summary.
-        let stableParagraphs = content.paragraphs.map { paragraph in
+        let stableParagraphs = sortedText.map { paragraph in
             TimelineParagraph(source: SourceReference(sessionID: paragraph.source.sessionID, spanID: paragraph.source.spanID,
                 transcriptVersion: 0, generation: paragraph.source.generation), text: paragraph.text,
                 recordedAt: paragraph.recordedAt, audioAvailable: paragraph.audioAvailable, speaker: paragraph.speaker,

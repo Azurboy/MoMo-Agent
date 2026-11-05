@@ -326,6 +326,7 @@ final class ArchiveDatabase: @unchecked Sendable {
             "CREATE INDEX IF NOT EXISTS epochs_wall_clock ON epochs(wall_clock_anchor)",
             "CREATE INDEX IF NOT EXISTS analysis_windows_session ON analysis_windows(session_id)",
             "CREATE INDEX IF NOT EXISTS analysis_windows_epoch_state ON analysis_windows(epoch_id, state)",
+            "CREATE INDEX IF NOT EXISTS analysis_windows_epoch_config_core ON analysis_windows(epoch_id, configuration_hash, core_start, core_end)",
             "CREATE INDEX IF NOT EXISTS analysis_windows_epoch_core_end ON analysis_windows(configuration_hash, epoch_id, core_end) WHERE state='complete'",
             "CREATE INDEX IF NOT EXISTS analysis_windows_companion ON analysis_windows(epoch_id, generation, configuration_hash, state, analysis_anchor, model_core_start)",
             "CREATE INDEX IF NOT EXISTS chunks_epoch_start ON chunks(epoch_id, start_frame)",

@@ -44,6 +44,7 @@ final class PhoneRuntime {
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var fileReconciliationRequested = false
+    @ObservationIgnored private var lastFullFileReconciliationAt: Date?
     @ObservationIgnored private var starting = false
     @ObservationIgnored private var startWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var foregrounding = false
@@ -232,7 +233,7 @@ final class PhoneRuntime {
         receiver.onStatusFailure = { [weak self] message in self?.statusFailure = message }
         receiver.onStatusChanged = { [weak self] in
             guard let self, !self.libraryPresentationDeferred else { return }
-            await self.library.refresh()
+            await self.library.refresh(inspectFiles: false)
         }
         receiver.onCurrentWatchStatusChanged = { [weak self] observation in
             guard let self else { return }
@@ -558,6 +559,7 @@ final class PhoneRuntime {
     func leavingForeground() {
         guard isForeground else { return }
         isForeground = false
+        lastFullFileReconciliationAt = nil
         pendingForegroundBatchFlush = false
         let bgAllowed = PhoneBackgroundTasks.resourcesAllowProcessing(foreground: false)
         let bgConstraint = PhoneBackgroundTasks.currentProcessingConstraint(foreground: false)
@@ -894,7 +896,27 @@ final class PhoneRuntime {
         }
     }
 
+    func refreshLibraryOnAppear() async {
+        Task { @MainActor [weak self] in
+            await self?.lifeIllustrations.refresh(minimumInterval: 5)
+        }
+        await library.timeline.refresh()
+        if !library.hasLoadedOnce {
+            await library.refresh(inspectFiles: false)
+        }
+        if let last = lastFullFileReconciliationAt, Date().timeIntervalSince(last) < 30 {
+            return
+        }
+        await refresh(reconcileFiles: false)
+    }
+
     func refresh(reconcileFiles: Bool = true) async {
+        if reconcileFiles {
+            remoteAgent.sourcesChanged()
+            Task { @MainActor [weak self] in
+                await self?.lifeIllustrations.refresh()
+            }
+        }
         refreshRequested = true
         fileReconciliationRequested = fileReconciliationRequested || reconcileFiles
         guard !refreshing else { return }
@@ -907,6 +929,7 @@ final class PhoneRuntime {
             var stage = String(localized: "核对录音文件")
             do {
                 let reconciled = try await archive.reconcileDocumentFiles(onlyBlockedOrChanged: !reconcileFiles)
+                if reconcileFiles { lastFullFileReconciliationAt = Date() }
                 if reconciled.contains(where: { $0.didRevise || $0.didUnblock }) { await transcription?.requestWork() }
                 await refreshBatches()
                 stage = String(localized: "保存转录文件")
@@ -924,7 +947,7 @@ final class PhoneRuntime {
                 refreshFailure = String(localized: "\(stage)未完成：\(error.localizedDescription)")
             }
             // A failed file projection must not hide recordings already committed to the archive.
-            await library.refresh()
+            await library.refresh(inspectFiles: reconcileFiles)
             requestAudioMaintenance()
         }
     }

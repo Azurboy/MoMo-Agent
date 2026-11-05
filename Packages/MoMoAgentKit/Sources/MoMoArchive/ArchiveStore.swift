@@ -87,6 +87,7 @@ public actor ArchiveStore {
     var verifiedManifestProjectionStamps: [UUID: VerifiedManifestProjectionStamp] = [:]
     var verifiedRecordingFilesDataVersion: Int64 = -1
     var verifiedChunkAudioStamps: [UUID: VerifiedChunkAudioStamp] = [:]
+    var verifiedAudioDirectoryFilesCache: [String: (stamp: FileStatStamp, fileNames: Set<String>)] = [:]
     var voiceprintBankCache: VoiceprintBankCache?
     var pendingSpeakerRematchSessionIDs: Set<UUID> = []
     #if DEBUG
@@ -978,5 +979,6 @@ extension SQLRow {
     func requireString(_ i: Int) throws -> String { guard let value = string(i) else { throw ArchiveError.database(11) }; return value }
     func requireData(_ i: Int) throws -> Data { guard let value = data(i) else { throw ArchiveError.database(11) }; return value }
     func requireInt(_ i: Int) throws -> Int64 { guard let value = integer(i) else { throw ArchiveError.database(11) }; return value }
+    func requireDouble(_ i: Int) throws -> Double { guard let value = double(i) else { throw ArchiveError.database(11) }; return value }
     func requireUUID(_ i: Int) throws -> UUID { guard let id = UUID(uuidString: try requireString(i)) else { throw ArchiveError.database(11) }; return id }
 }

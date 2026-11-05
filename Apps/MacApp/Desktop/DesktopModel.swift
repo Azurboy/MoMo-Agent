@@ -359,8 +359,8 @@ final class DesktopModel {
         if let model = Self.readModelConfiguration(from: dataDirectory.appendingPathComponent("hermes/config.yaml")),
            let name = model["default"], !name.isEmpty {
             modelProvider = switch model["provider"] {
-            case "openai-codex": .codex
-            case "anthropic": .claude
+            case "openai-codex", "codex": .codex
+            case "anthropic", "claude": .claude
             default: .api
             }
             providerURL = model["base_url"] ?? ""; modelName = name
@@ -774,6 +774,30 @@ final class DesktopModel {
         } catch { failure = error.localizedDescription }
     }
 
+    nonisolated private static func fetchAllMemories(client: AgentClient) async throws -> [ContextMemory] {
+        var collected: [ContextMemory] = []
+        var cursor: String?
+        var revision: Int64?
+        repeat {
+            let page = try await client.memories(after: cursor, revision: revision, limit: 200)
+            collected += page.items
+            cursor = page.nextCursor
+            revision = page.revision
+        } while cursor != nil
+        return collected
+    }
+
+    nonisolated private static func fetchAllSources(client: AgentClient) async throws -> [ContextSource] {
+        var recordings: [ContextSource] = []
+        var cursor: String?
+        repeat {
+            let page = try await client.sources(after: cursor, summarize: true, limit: 200)
+            recordings += page.items
+            cursor = page.nextCursor
+        } while cursor != nil
+        return recordings
+    }
+
     func loadContext(silent: Bool = false) async {
         if fetchingContext {
             contextRefreshRequested = true
@@ -798,20 +822,13 @@ final class DesktopModel {
             lastContextRefreshAt = Date()
             do {
                 let client = try dataClient(for: connection, url: url)
-                let contextStatus = try await client.contextStatus()
+                async let statusTask = client.contextStatus()
+                async let memoriesTask = Self.fetchAllMemories(client: client)
+                async let sourcesTask = Self.fetchAllSources(client: client)
+                let (contextStatus, collected, recordings) = try await (statusTask, memoriesTask, sourcesTask)
                 memoryReviewStatus = contextStatus.memoryReview
                 transcriptMemoryNeedsReview = contextStatus.memoryNeedsReview ?? 0
-                var collected: [ContextMemory] = []; var cursor: String?; var revision: Int64?
-                repeat {
-                    let page = try await client.memories(after: cursor, revision: revision)
-                    collected += page.items; cursor = page.nextCursor; revision = page.revision
-                } while cursor != nil
                 memories = collected
-                var recordings: [ContextSource] = []; cursor = nil
-                repeat {
-                    let page = try await client.sources(after: cursor, summarize: true)
-                    recordings += page.items; cursor = page.nextCursor
-                } while cursor != nil
                 sources = recordings
                 memoryError = nil
             } catch {

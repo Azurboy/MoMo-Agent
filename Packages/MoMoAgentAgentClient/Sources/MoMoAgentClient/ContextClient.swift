@@ -101,8 +101,8 @@ extension AgentClient {
     public func syncSource(_ source: SourceEnvelope) async throws -> SourceReceipt {
         try decodeContext(await request(path: ["v1", "sources"], method: "POST", body: encodeContext(source)))
     }
-    public func memories(after: String? = nil, revision: Int64? = nil) async throws -> MemoryPage {
-        var query = [URLQueryItem(name: "limit", value: "100")]
+    public func memories(after: String? = nil, revision: Int64? = nil, limit: Int = 100) async throws -> MemoryPage {
+        var query = [URLQueryItem(name: "limit", value: String(limit))]
         if let after { query.append(URLQueryItem(name: "after", value: after)) }
         if let revision { query.append(URLQueryItem(name: "revision", value: String(revision))) }
         return try decodeContext(await request(path: ["v1", "memories"], query: query))
@@ -187,8 +187,9 @@ public struct SourceTextPage: Decodable, Sendable {
     public let spans: [SourceTextSpan]?
 }
 extension AgentClient {
-    public func sources(after: String? = nil, summarize: Bool = false) async throws -> SourcePage {
+    public func sources(after: String? = nil, summarize: Bool = false, limit: Int? = nil) async throws -> SourcePage {
         var query: [URLQueryItem] = []
+        if let limit { query.append(URLQueryItem(name: "limit", value: String(limit))) }
         if let after { query.append(URLQueryItem(name: "after", value: after)) }
         if summarize { query.append(URLQueryItem(name: "summarize", value: "1")) }
         return try decodeContext(await request(path: ["v1", "sources"], query: query))

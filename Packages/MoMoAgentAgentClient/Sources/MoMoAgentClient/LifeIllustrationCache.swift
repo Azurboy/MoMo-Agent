@@ -5,6 +5,7 @@ actor LifeIllustrationCache {
     struct Snapshot: Codable, Sendable {
         var cursor = "0"
         var items: [String: LifeIllustration] = [:]
+        var lastVerifiedSettings: LifeIllustrationSettings?
     }
 
     let directory: URL
@@ -53,7 +54,27 @@ actor LifeIllustrationCache {
         return url
     }
 
-    func apply(_ changes: [LifeIllustrationChange], cursor: String? = nil) throws -> Snapshot {
+    func saveSettings(_ settings: LifeIllustrationSettings?) throws {
+        var snapshot = (try? load()) ?? Snapshot()
+        guard snapshot.lastVerifiedSettings != settings else { return }
+        snapshot.lastVerifiedSettings = settings
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+    }
+
+    func existingAssetURLs(for items: [LifeIllustration]) throws -> [String: URL] {
+        var urls: [String: URL] = [:]
+        for item in items {
+            for hash in Set([item.thumbnailSha256, item.assetSha256]) where urls[hash] == nil {
+                if let url = try verifiedURL(sha256: hash) {
+                    urls[hash] = url
+                }
+            }
+        }
+        return urls
+    }
+
+    func apply(_ changes: [LifeIllustrationChange], cursor: String? = nil, keepHashes: Set<String> = []) throws -> Snapshot {
         var snapshot = try load()
         for change in changes {
             switch change {
@@ -68,7 +89,7 @@ actor LifeIllustrationCache {
         if let cursor { snapshot.cursor = cursor }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
-        let referenced = Set(snapshot.items.values.flatMap { [$0.assetSha256, $0.thumbnailSha256] })
+        let referenced = Set(snapshot.items.values.flatMap { [$0.assetSha256, $0.thumbnailSha256] }).union(keepHashes)
         for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         where url.pathExtension == "png" && !referenced.contains(url.deletingPathExtension().lastPathComponent) {
             try FileManager.default.removeItem(at: url)

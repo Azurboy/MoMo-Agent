@@ -4,12 +4,28 @@ import datetime as _dt
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 import uuid
 
 DEFAULT_DAY_START_HOUR = 8
+_CACHE_LOCK = threading.Lock()
+_INITIALIZED_DBS: set[tuple[str, int, int]] = set()
+_SOURCE_SKELETON_CACHE: dict[tuple[str, int, int, str, str, int], dict] = {}
+_DONE_SUMMARY_CACHE: dict[tuple[str, int, int, str], tuple[str, str | None, int | None, str]] = {}
+
+
+def _db_identity(db_path: Path):
+    try:
+        st = os.stat(db_path)
+        if st.st_size > 0:
+            return (str(db_path.resolve()), st.st_dev, st.st_ino)
+    except OSError:
+        pass
+    return None
 
 
 def read_day_start_hour(directory) -> int:
@@ -48,58 +64,73 @@ class ContextStore:
     def __init__(self, directory):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(self.directory / "context.sqlite", timeout=10, isolation_level=None)
+        db_path = self.directory / "context.sqlite"
+        existing_id = _db_identity(db_path)
+        self.db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
-            INSERT OR IGNORE INTO metadata VALUES (1,0);
-            CREATE TABLE IF NOT EXISTS sources (
-                id TEXT PRIMARY KEY, owner TEXT NOT NULL, generation INTEGER NOT NULL, version INTEGER NOT NULL,
-                revision TEXT NOT NULL, hash TEXT NOT NULL, deleted INTEGER NOT NULL,
-                text TEXT NOT NULL, payload TEXT NOT NULL, updated REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS analyses (
-                source_id TEXT PRIMARY KEY REFERENCES sources(id), source_revision TEXT NOT NULL,
-                summary TEXT NOT NULL, actions TEXT NOT NULL, updated REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS facts (
-                id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, basis TEXT NOT NULL,
-                forgotten INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS evidence (
-                fact_id TEXT NOT NULL REFERENCES facts(id), source_id TEXT NOT NULL REFERENCES sources(id),
-                source_revision TEXT NOT NULL, quote TEXT NOT NULL,
-                PRIMARY KEY(fact_id,source_id,source_revision));
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), source_revision TEXT NOT NULL,
-                state TEXT NOT NULL, run_id TEXT, first_attempt REAL, replay_before REAL, error TEXT);
-            CREATE TABLE IF NOT EXISTS memory_exclusions (source_id TEXT PRIMARY KEY REFERENCES sources(id));
-            CREATE TABLE IF NOT EXISTS mutations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS health_snapshots (
-                device_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL, synced_at REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS phone_source_snapshots (
-                device_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL,
-                synced_at REAL NOT NULL, PRIMARY KEY(device_id,kind));
-        """)
-        if "input" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
-            self.db.execute("ALTER TABLE jobs ADD COLUMN input TEXT")
-        if "result" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
-            self.db.execute("ALTER TABLE jobs ADD COLUMN result TEXT")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS memory_reviews (
-                id TEXT PRIMARY KEY, kind TEXT NOT NULL, input TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'pending', run_id TEXT, first_attempt REAL,
-                replay_before REAL, error TEXT, result TEXT, finished REAL);
-            CREATE TABLE IF NOT EXISTS memory_review_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS recording_summaries (
-                id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, input TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'pending', parts TEXT NOT NULL, outputs TEXT NOT NULL DEFAULT '[]',
-                stage INTEGER NOT NULL DEFAULT 0, part INTEGER NOT NULL DEFAULT 0,
-                attempt INTEGER NOT NULL DEFAULT 0, run_id TEXT, first_attempt REAL, replay_before REAL,
-                error TEXT, result TEXT, finished REAL);
-        """)
-        for table in ('jobs', 'memory_reviews'):
-            if 'attempt' not in {row[1] for row in self.db.execute(f'PRAGMA table_info({table})')}:
-                self.db.execute(f'ALTER TABLE {table} ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0')
+        with _CACHE_LOCK:
+            needs_init = existing_id is None or existing_id not in _INITIALIZED_DBS
+        if needs_init:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.executescript("""
+                CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+                INSERT OR IGNORE INTO metadata VALUES (1,0);
+                CREATE TABLE IF NOT EXISTS sources (
+                    id TEXT PRIMARY KEY, owner TEXT NOT NULL, generation INTEGER NOT NULL, version INTEGER NOT NULL,
+                    revision TEXT NOT NULL, hash TEXT NOT NULL, deleted INTEGER NOT NULL,
+                    text TEXT NOT NULL, payload TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS analyses (
+                    source_id TEXT PRIMARY KEY REFERENCES sources(id), source_revision TEXT NOT NULL,
+                    summary TEXT NOT NULL, actions TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS facts (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, basis TEXT NOT NULL,
+                    forgotten INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS evidence (
+                    fact_id TEXT NOT NULL REFERENCES facts(id), source_id TEXT NOT NULL REFERENCES sources(id),
+                    source_revision TEXT NOT NULL, quote TEXT NOT NULL,
+                    PRIMARY KEY(fact_id,source_id,source_revision));
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), source_revision TEXT NOT NULL,
+                    state TEXT NOT NULL, run_id TEXT, first_attempt REAL, replay_before REAL, error TEXT);
+                CREATE TABLE IF NOT EXISTS memory_exclusions (source_id TEXT PRIMARY KEY REFERENCES sources(id));
+                CREATE TABLE IF NOT EXISTS mutations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS health_snapshots (
+                    device_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL, synced_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS phone_source_snapshots (
+                    device_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL,
+                    synced_at REAL NOT NULL, PRIMARY KEY(device_id,kind));
+            """)
+            if "input" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN input TEXT")
+            if "result" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN result TEXT")
+            self.db.executescript("""
+                CREATE TABLE IF NOT EXISTS memory_reviews (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, input TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending', run_id TEXT, first_attempt REAL,
+                    replay_before REAL, error TEXT, result TEXT, finished REAL);
+                CREATE TABLE IF NOT EXISTS memory_review_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS recording_summaries (
+                    id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, input TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending', parts TEXT NOT NULL, outputs TEXT NOT NULL DEFAULT '[]',
+                    stage INTEGER NOT NULL DEFAULT 0, part INTEGER NOT NULL DEFAULT 0,
+                    attempt INTEGER NOT NULL DEFAULT 0, run_id TEXT, first_attempt REAL, replay_before REAL,
+                    error TEXT, result TEXT, finished REAL);
+                CREATE INDEX IF NOT EXISTS jobs_source ON jobs(source_id, source_revision);
+                CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state);
+                CREATE INDEX IF NOT EXISTS recording_summaries_state ON recording_summaries(state, id, fingerprint);
+            """)
+            for table in ('jobs', 'memory_reviews'):
+                if 'attempt' not in {row[1] for row in self.db.execute(f'PRAGMA table_info({table})')}:
+                    self.db.execute(f'ALTER TABLE {table} ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0')
+            initialized_id = _db_identity(db_path)
+            if initialized_id is not None:
+                with _CACHE_LOCK:
+                    if len(_INITIALIZED_DBS) >= 256:
+                        _INITIALIZED_DBS.clear()
+                    _INITIALIZED_DBS.add(initialized_id)
+        self._db_id = _db_identity(db_path)
 
     def close(self):
         self.db.close()
@@ -271,40 +302,301 @@ class ContextStore:
             })
         return windows
 
-    def list_sources(self, after="", limit=50, summarize=False):
+    @staticmethod
+    def _build_source_skeleton(source_id, total_characters, preview, payload, day_start_hour):
+        spans = payload.get("spans") or []
+        recorded_at = payload.get("recorded_at")
+        if not spans:
+            return {
+                "recorded_at": recorded_at,
+                "total_characters": int(total_characters),
+                "preview": preview,
+                "library_id": None,
+                "latest_span_at": 0.0,
+                "windows": (),
+            }
+        library_id = str(uuid.UUID(payload["library_id"]))
+        groups, position = [], 0
+        latest_span_at = 0.0
+        for idx, span in enumerate(spans):
+            text = span["text"]
+            start = float(span["recorded_at"])
+            if start > latest_span_at:
+                latest_span_at = start
+            end_pos = position + len(text)
+            day = logical_local_date(start, day_start_hour)
+            est_end = start + min(60.0, len(text) * 0.22)
+            if groups and day == groups[-1]["day"] and start - groups[-1]["est_end"] <= 300:
+                groups[-1]["end_at"] = max(groups[-1]["end_at"], start)
+                groups[-1]["est_end"] = max(groups[-1]["est_end"], est_end)
+                groups[-1]["end"] = end_pos
+                groups[-1]["span_end_idx"] = idx + 1
+                groups[-1]["texts"].append(text)
+            else:
+                groups.append({
+                    "day": day,
+                    "recorded_at": start,
+                    "end_at": start,
+                    "est_end": est_end,
+                    "offset": position,
+                    "end": end_pos,
+                    "first_span_id": span["id"],
+                    "span_start_idx": idx,
+                    "span_end_idx": idx + 1,
+                    "texts": [text],
+                })
+            position = end_pos + 1
+        win_skeletons = []
+        for g in groups:
+            texts = g["texts"]
+            w_text = "\n\n".join(texts)
+            fp = digest(w_text)
+            can_enqueue = sum(1 for c in w_text if c.isalnum()) >= 20 and len(w_text.encode()) <= 2_000_000
+            w_preview = "  ".join(texts)[:256].replace("\n", " ")
+            win_skeletons.append({
+                "id": f"{source_id}#{g['first_span_id']}",
+                "recorded_at": g["recorded_at"],
+                "end_at": g["end_at"],
+                "offset": g["offset"],
+                "end": g["end"],
+                "total_characters": g["end"] - g["offset"],
+                "preview": w_preview,
+                "fp": fp,
+                "can_enqueue": can_enqueue,
+                "span_start_idx": g["span_start_idx"],
+                "span_end_idx": g["span_end_idx"],
+            })
+        return {
+            "recorded_at": recorded_at,
+            "total_characters": int(total_characters),
+            "preview": preview,
+            "library_id": library_id,
+            "latest_span_at": latest_span_at,
+            "windows": tuple(win_skeletons),
+        }
+
+    def _load_summary_index(self):
+        srows = self.db.execute(
+            "SELECT id, fingerprint, state FROM recording_summaries WHERE state IN ('done','pending','running')"
+        ).fetchall()
+        active_fps = {r["fingerprint"] for r in srows}
+        done_ids = [r["id"] for r in srows if r["state"] == "done"]
+        if not done_ids:
+            return {}, {}, active_fps
+        db_id = self._db_id
+        cached_entries = {}
+        missing_ids = []
+        if db_id is not None:
+            with _CACHE_LOCK:
+                for sid in done_ids:
+                    entry = _DONE_SUMMARY_CACHE.get((*db_id, sid))
+                    if entry is not None:
+                        cached_entries[sid] = entry
+                    else:
+                        missing_ids.append(sid)
+        else:
+            missing_ids = done_ids
+        if missing_ids:
+            fetched_entries = {}
+            for batch_start in range(0, len(missing_ids), 400):
+                chunk_ids = missing_ids[batch_start:batch_start + 400]
+                placeholders = ",".join("?" for _ in chunk_ids)
+                for drow in self.db.execute(
+                    f"SELECT id, fingerprint, input, result FROM recording_summaries WHERE id IN ({placeholders})",
+                    chunk_ids,
+                ).fetchall():
+                    res = drow["result"]
+                    lib, w_start = None, None
+                    if res:
+                        try:
+                            info = json.loads(drow["input"])
+                            lib = str(uuid.UUID(info["library_id"]))
+                            w_start = int(info["window_id"].rsplit("-", 1)[0])
+                        except Exception:
+                            lib, w_start = None, None
+                    fetched_entries[drow["id"]] = (drow["fingerprint"], lib, w_start, res or "")
+            if db_id is not None and fetched_entries:
+                with _CACHE_LOCK:
+                    if len(_DONE_SUMMARY_CACHE) >= 8_192:
+                        _DONE_SUMMARY_CACHE.clear()
+                    for sid, entry in fetched_entries.items():
+                        _DONE_SUMMARY_CACHE[(*db_id, sid)] = entry
+            cached_entries.update(fetched_entries)
+        done_by_fp, done_by_window = {}, {}
+        for sid in done_ids:
+            entry = cached_entries.get(sid)
+            if not entry:
+                continue
+            fp, lib, w_start, res = entry
+            if res:
+                done_by_fp[fp] = res
+                if lib is not None and w_start is not None:
+                    done_by_window.setdefault(lib, []).append((w_start, res))
+        return done_by_fp, done_by_window, active_fps
+
+    def list_sources(self, after="", limit=50, summarize=False, include_organization=True):
         if not 1 <= limit <= 200:
             raise ValueError("limit must be 1...200")
-        rows = self.db.execute("SELECT id,revision,hash,LENGTH(text) AS total_characters,SUBSTR(text,1,256) AS preview,payload FROM sources WHERE deleted=0 AND id>? ORDER BY id LIMIT ?", (after, limit + 1)).fetchall()
-        done_by_fp, done_by_window, active_fps = {}, {}, set()
-        for srow in self.db.execute("SELECT fingerprint, state, input, result FROM recording_summaries WHERE state IN ('done','pending','running')").fetchall():
-            active_fps.add(srow["fingerprint"])
-            if srow["state"] == "done" and srow["result"]:
-                done_by_fp[srow["fingerprint"]] = srow["result"]
-                try:
-                    info = json.loads(srow["input"])
-                    lib = str(uuid.UUID(info["library_id"]))
-                    w_start = int(info["window_id"].rsplit("-", 1)[0])
-                    done_by_window.setdefault(lib, []).append((w_start, srow["result"]))
-                except Exception:
-                    pass
-        parsed_rows = [(dict(row), json.loads(row["payload"])) for row in rows[:limit]]
-        latest = max((float(s["recorded_at"]) for _, p in parsed_rows for s in (p.get("spans") or ())), default=0.0)
+        header_rows = self.db.execute(
+            "SELECT id, revision, hash FROM sources WHERE deleted=0 AND id>? ORDER BY id LIMIT ?",
+            (after, limit + 1),
+        ).fetchall()
+        page_rows = header_rows[:limit]
+        if not page_rows:
+            return {"revision": self.revision, "items": [], "next_cursor": None}
+
+        day_start_hour = read_day_start_hour(self.directory)
+        db_id = self._db_id
+        skeletons = {}
+        missing_source_ids = []
+        if db_id is not None:
+            with _CACHE_LOCK:
+                for hrow in page_rows:
+                    sid, rev = hrow["id"], hrow["revision"]
+                    cached = _SOURCE_SKELETON_CACHE.get((*db_id, sid, rev, day_start_hour))
+                    if cached is not None:
+                        skeletons[(sid, rev)] = cached
+                    else:
+                        missing_source_ids.append(sid)
+        else:
+            missing_source_ids = [hrow["id"] for hrow in page_rows]
+
+        loaded_payloads = {}
+        if missing_source_ids:
+            placeholders = ",".join("?" for _ in missing_source_ids)
+            full_rows = {
+                r["id"]: r
+                for r in self.db.execute(
+                    f"SELECT id, revision, LENGTH(text) AS total_characters, SUBSTR(text,1,256) AS preview, payload FROM sources WHERE id IN ({placeholders})",
+                    missing_source_ids,
+                ).fetchall()
+            }
+            built = {}
+            for hrow in page_rows:
+                sid, rev = hrow["id"], hrow["revision"]
+                if (sid, rev) in skeletons:
+                    continue
+                frow = full_rows.get(sid)
+                if frow is None or frow["revision"] != rev:
+                    frow = self.db.execute(
+                        "SELECT id, revision, LENGTH(text) AS total_characters, SUBSTR(text,1,256) AS preview, payload FROM sources WHERE id=?",
+                        (sid,),
+                    ).fetchone()
+                if frow is None:
+                    continue
+                payload = json.loads(frow["payload"])
+                loaded_payloads[sid] = payload
+                skel = self._build_source_skeleton(sid, frow["total_characters"], frow["preview"], payload, day_start_hour)
+                skeletons[(sid, frow["revision"])] = skel
+                built[(sid, frow["revision"])] = skel
+            if db_id is not None and built:
+                with _CACHE_LOCK:
+                    if len(_SOURCE_SKELETON_CACHE) >= 1_024:
+                        _SOURCE_SKELETON_CACHE.clear()
+                    for (sid, rev), skel in built.items():
+                        _SOURCE_SKELETON_CACHE[(*db_id, sid, rev, day_start_hour)] = skel
+
+        done_by_fp, done_by_window, active_fps = self._load_summary_index()
+        page_ids = [hrow["id"] for hrow in page_rows]
+        id_placeholders = ",".join("?" for _ in page_ids)
+        excluded_ids = {
+            r[0]
+            for r in self.db.execute(
+                f"SELECT source_id FROM memory_exclusions WHERE source_id IN ({id_placeholders})",
+                page_ids,
+            ).fetchall()
+        }
+        analyses_map = {
+            (r["source_id"], r["source_revision"]): (r["summary"], json.loads(r["actions"]))
+            for r in self.db.execute(
+                f"SELECT source_id, source_revision, summary, actions FROM analyses WHERE source_id IN ({id_placeholders})",
+                page_ids,
+            ).fetchall()
+        }
+
+        latest = max((skel["latest_span_at"] for skel in skeletons.values()), default=0.0)
         cutoff = latest - 172_800
         items = []
-        for value, payload in parsed_rows:
-            value.pop("payload", None)
-            value["recorded_at"] = payload.get("recorded_at")
-            excluded = self.db.execute("SELECT 1 FROM memory_exclusions WHERE source_id=?", (value["id"],)).fetchone() is not None
-            windows = self.build_windows(value["id"], value["revision"], payload, excluded, done_by_fp, done_by_window, active_fps, summarize=summarize, cutoff=cutoff)
-            value["windows"] = windows
-            value["recorded_summary"] = next((w["summary"] for w in reversed(windows) if w["summary"]), None) if not excluded else None
-            analysis = self.db.execute("SELECT summary,actions FROM analyses WHERE source_id=? AND source_revision=?", (value["id"], value["revision"])).fetchone()
-            value["summary"] = analysis["summary"] if analysis else value["recorded_summary"]
-            value["suggested_actions"] = json.loads(analysis["actions"]) if analysis else []
-            job = self.db.execute("SELECT state,error FROM jobs WHERE source_id=? AND source_revision=?", (value["id"], value["revision"])).fetchone()
-            value["organization"] = dict(job) if job else None
-            items.append(value)
-        return {"revision": self.revision, "items": items, "next_cursor": items[-1]["id"] if len(rows) > limit else None}
+        for hrow in page_rows:
+            sid, rev = hrow["id"], hrow["revision"]
+            skel = skeletons.get((sid, rev))
+            if skel is None:
+                continue
+            excluded = sid in excluded_ids
+            library_id = skel["library_id"]
+            windows = []
+            for w in skel["windows"]:
+                fp = w["fp"]
+                w_summary = None
+                if not excluded:
+                    w_summary = done_by_fp.get(fp)
+                    if w_summary is None and library_id is not None:
+                        for w_start, res in done_by_window.get(library_id, ()):
+                            if w["recorded_at"] - 300 <= w_start <= w["end_at"] + 60:
+                                w_summary = res
+                                break
+                    if (
+                        w_summary is None
+                        and summarize
+                        and w["can_enqueue"]
+                        and w["recorded_at"] >= cutoff
+                        and fp not in active_fps
+                        and library_id is not None
+                    ):
+                        import recording_summary
+                        payload = loaded_payloads.get(sid)
+                        if payload is None:
+                            prow = self.db.execute("SELECT payload FROM sources WHERE id=?", (sid,)).fetchone()
+                            payload = json.loads(prow["payload"]) if prow else {}
+                            loaded_payloads[sid] = payload
+                        w_spans = (payload.get("spans") or [])[w["span_start_idx"]:w["span_end_idx"]]
+                        w_text = "\n\n".join(s["text"] for s in w_spans)
+                        tz_offset = int(_dt.datetime.fromtimestamp(w["recorded_at"]).astimezone().utcoffset().total_seconds())
+                        win_key = f"{int(w['recorded_at'])}-{tz_offset}"
+                        try:
+                            recording_summary.enqueue(
+                                self,
+                                {"library_id": library_id, "window_id": win_key, "revision": fp, "text": w_text},
+                            )
+                            active_fps.add(fp)
+                        except Exception:
+                            pass
+                windows.append({
+                    "id": w["id"],
+                    "source_id": sid,
+                    "source_revision": rev,
+                    "recorded_at": w["recorded_at"],
+                    "end_at": w["end_at"],
+                    "offset": w["offset"],
+                    "end": w["end"],
+                    "total_characters": w["total_characters"],
+                    "preview": w["preview"],
+                    "summary": w_summary,
+                })
+            recorded_summary = next((w["summary"] for w in reversed(windows) if w["summary"]), None) if not excluded else None
+            analysis = analyses_map.get((sid, rev))
+            if include_organization:
+                job = self.db.execute(
+                    "SELECT state,error FROM jobs WHERE source_id=? AND source_revision=?",
+                    (sid, rev),
+                ).fetchone()
+                organization = dict(job) if job else None
+            else:
+                organization = None
+            items.append({
+                "id": sid,
+                "revision": rev,
+                "hash": hrow["hash"],
+                "total_characters": skel["total_characters"],
+                "preview": skel["preview"],
+                "recorded_at": skel["recorded_at"],
+                "windows": windows,
+                "recorded_summary": recorded_summary,
+                "summary": analysis[0] if analysis else recorded_summary,
+                "suggested_actions": analysis[1] if analysis else [],
+                "organization": organization,
+            })
+        return {"revision": self.revision, "items": items, "next_cursor": items[-1]["id"] if len(header_rows) > limit and items else None}
 
     def read_source(self, source_id, expected_revision=None, offset=0, limit=12_000):
         row = self.source(source_id, expected_revision)
