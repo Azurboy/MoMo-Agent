@@ -60,6 +60,7 @@ final class PhoneRuntime {
     @ObservationIgnored private let speechPerformance: PhoneSpeechPerformance?
     @ObservationIgnored private var speechWarmup: Task<Void, Never>?
     @ObservationIgnored private var speechWarmed = false
+    @ObservationIgnored private var didAutoBenchmarkSpeechModel = false
     @ObservationIgnored private var speechWarmupRetryAt = Date.distantPast
     @ObservationIgnored private var lastAudioMaintenance: Date?
     @ObservationIgnored private var audioMaintenance: Task<Void, Never>?
@@ -93,7 +94,8 @@ final class PhoneRuntime {
         self.modelDirectory = modelDirectory
         self.speech = speech
         speechSettings = PhoneSpeechSettings(speech: speech,
-            modelDirectory: archive.rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/SpeechModels"))
+            modelDirectory: archive.rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/SpeechModels"),
+            archive: archive)
         modelStatus = speech == nil ? .unavailable(speechFailure ?? String(localized: "本地转写模型未配置")) : .awaitingValidation
         library = LibraryModel(archive: archive, configurationFingerprint: speech?.configurationFingerprint) { [weak remoteAgent] windows in
             try await remoteAgent?.summarizeRecordings(windows) ?? [:]
@@ -626,14 +628,33 @@ final class PhoneRuntime {
               !speechWarmed, speechWarmup == nil, Date() >= speechWarmupRetryAt else { return }
         modelStatus = .preparing
         let archive = self.archive
+        let keepAwakeForBenchmark = ProcessInfo.processInfo.environment["MOMO_BENCHMARK_SESSION_ID"] != nil
+        if keepAwakeForBenchmark { UIApplication.shared.isIdleTimerDisabled = true }
         speechWarmup = Task(priority: .utility) { [weak self, speech] in
-            defer { self?.speechWarmup = nil }
+            defer {
+                if keepAwakeForBenchmark { UIApplication.shared.isIdleTimerDisabled = false }
+                self?.speechWarmup = nil
+            }
             let startedMs = APIPerformanceMonitor.uptimeMilliseconds()
             do {
                 try await speech.warmUp()
                 archive.performanceMonitor.record(.speechWarmUp, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs)
                 self?.speechWarmed = true
                 self?.modelStatus = .ready
+                if let rawSessionID = ProcessInfo.processInfo.environment["MOMO_BENCHMARK_SESSION_ID"],
+                   let targetSessionID = UUID(uuidString: rawSessionID),
+                   let self, !self.didAutoBenchmarkSpeechModel {
+                    self.didAutoBenchmarkSpeechModel = true
+                    try? archive.performanceMonitor.flushNow()
+                    await self.speechSettings.models.runOneHourBenchmark(
+                        sessionID: targetSessionID
+                    )
+                } else if ProcessInfo.processInfo.environment["MOMO_BENCHMARK_SPEECH_MODEL"] == "1",
+                   let self, !self.didAutoBenchmarkSpeechModel {
+                    self.didAutoBenchmarkSpeechModel = true
+                    try? archive.performanceMonitor.flushNow()
+                    await self.speechSettings.models.runBenchmark()
+                }
             } catch is CancellationError {
                 if self?.speechWarmed == false { self?.modelStatus = .awaitingValidation }
             } catch SpeechError.cancelled {

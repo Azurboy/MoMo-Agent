@@ -23,7 +23,10 @@ final class PhoneSpeechPerformance: @unchecked Sendable {
             if diagnostic.outcome == .completed { document.completedCoreFrames += diagnostic.coreModelFrames }
             document.recent.append(diagnostic)
             if document.recent.count > 16 { document.recent.removeFirst(document.recent.count - 16) }
-            persist(force: diagnostic.outcome == .failed)
+            persist(force: diagnostic.outcome == .failed
+                || diagnostic.operation == .warmUp
+                || diagnostic.operation == .dictate
+                || diagnostic.operation == .transcribe)
         }
     }
 

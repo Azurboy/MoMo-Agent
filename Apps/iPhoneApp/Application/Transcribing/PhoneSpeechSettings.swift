@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import MoMoArchive
 import MoMoContracts
 import MoMoSpeech
 
@@ -28,11 +29,14 @@ final class PhoneSpeechSettings {
         DayStartBoundary.label(for: dayStartHour)
     }
 
-    init(speech: SpeechEngine?, defaults: UserDefaults = .standard, modelDirectory: URL? = nil) {
+    init(speech: SpeechEngine?, defaults: UserDefaults = .standard, modelDirectory: URL? = nil,
+         archive: ArchiveStore? = nil,
+         sampleLoader: (@Sendable () async throws -> [Float])? = nil) {
         self.speech = speech
         self.defaults = defaults
         models = PhoneSpeechModelSettings(speech: speech, directory: modelDirectory ??
-            URL.applicationSupportDirectory.appendingPathComponent("MoMoAgent/SpeechModels"), defaults: defaults)
+            URL.applicationSupportDirectory.appendingPathComponent("MoMoAgent/SpeechModels"),
+            defaults: defaults, archive: archive, sampleLoader: sampleLoader)
         language = defaults.string(forKey: Self.languageKey).flatMap(SpeechLanguage.init(rawValue:)) ?? .automatic
         speakerSegmentationModel = defaults.string(forKey: Self.speakerSegmentationModelKey)
             .flatMap(SpeakerSegmentationModel.init(rawValue:)) ?? .diariZenWavLMBase

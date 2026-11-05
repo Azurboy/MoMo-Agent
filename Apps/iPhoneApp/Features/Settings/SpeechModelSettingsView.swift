@@ -25,6 +25,10 @@ struct SpeechModelSettingsView: View {
                 }
                 if settings.switching { ProgressView("正在切换模型…") }
                 else if settings.checking { ProgressView("正在检查模型…") }
+                else if settings.benchmarking { ProgressView("正在用本机真实录音实测神经网络引擎速度…") }
+                if settings.canBenchmark {
+                    benchmarkCard
+                }
                 if let failure = settings.failure {
                     Text(failure).phoneText(.metadata).foregroundStyle(.red)
                 }
@@ -39,7 +43,57 @@ struct SpeechModelSettingsView: View {
         .task { await settings.refresh() }
     }
 
-    private var busy: Bool { settings.downloading != nil || settings.switching || settings.checking }
+    private var busy: Bool {
+        settings.downloading != nil || settings.switching || settings.checking || settings.benchmarking
+    }
+
+    private var benchmarkCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("本机推理测速").phoneText(.body)
+                Spacer()
+                if let result = settings.latestBenchmark, let model = result.model {
+                    Text(model.title).phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                }
+            }
+            if let result = settings.latestBenchmark {
+                if result.inProgress == true, let total = result.totalTargetAudioSeconds, total > 0 {
+                    ProgressView(value: min(result.audioSeconds, total), total: total)
+                    Text("正在实测：\((result.audioSeconds / 60).formatted(.number.precision(.fractionLength(1)))) / \((total / 60).formatted(.number.precision(.fractionLength(1)))) 分钟 · 当前 \(result.realtimeFactor.formatted(.number.precision(.fractionLength(1))))x 实时（1 小时约 \(result.minutesPerHour.formatted(.number.precision(.fractionLength(1)))) 分钟）")
+                        .phoneText(.metadata).monospacedDigit().foregroundStyle(MoMoPalette.ink)
+                } else {
+                    Text("实测 \((result.audioSeconds / 60).formatted(.number.precision(.fractionLength(1)))) 分钟真实录音耗时 \(result.elapsedSeconds.formatted(.number.precision(.fractionLength(1)))) 秒 · \(result.realtimeFactor.formatted(.number.precision(.fractionLength(1))))x 实时（折算 1 小时约 \(result.minutesPerHour.formatted(.number.precision(.fractionLength(2)))) 分钟），识别 \(result.recognizedCharacterCount) 字。")
+                        .phoneText(.metadata).monospacedDigit().foregroundStyle(MoMoPalette.ink)
+                }
+                if let preview = settings.latestBenchmarkPreview, !preview.isEmpty {
+                    Text("片段预览：\(preview)")
+                        .phoneText(.metadata).foregroundStyle(MoMoPalette.muted).lineLimit(3)
+                }
+            } else {
+                Text("读取本机真实录音（只读，不改动任何已有转录），实测当前启用模型在 Apple 神经网络引擎上的转写速度。")
+                    .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+            }
+            HStack(spacing: 12) {
+                Button(settings.benchmarking ? "正在实测…" : "实测 2 分钟片段") {
+                    Task { await settings.runBenchmark() }
+                }
+                .buttonStyle(PhoneActionButtonStyle())
+                .disabled(busy)
+                .accessibilityIdentifier("settings.speech.model.benchmark")
+
+                Button("实测 1 小时录音") {
+                    Task { await settings.runOneHourBenchmark() }
+                }
+                .buttonStyle(PhoneActionButtonStyle())
+                .disabled(busy)
+                .accessibilityIdentifier("settings.speech.model.benchmark1h")
+            }
+        }
+        .foregroundStyle(MoMoPalette.ink)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(MoMoPalette.surface, in: RoundedRectangle(cornerRadius: 20))
+    }
 
     @ViewBuilder
     private func download(_ model: SpeechModelChoice, use: LocalizedStringKey) -> some View {
