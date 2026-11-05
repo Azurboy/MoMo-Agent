@@ -10,12 +10,10 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         let picture = app.buttons["lifeIllustration.inline.sample-night"]
         XCTAssertTrue(picture.waitForExistence(timeout: 30))
         XCTAssertTrue(picture.isHittable)
-        XCTAssertGreaterThanOrEqual(picture.frame.height, 96)
-        XCTAssertLessThanOrEqual(picture.frame.height, 124)
+        XCTAssertGreaterThanOrEqual(picture.frame.height, 44)
+        XCTAssertLessThanOrEqual(picture.frame.height, 52)
         XCTAssertLessThanOrEqual(picture.frame.width, 260)
         XCTAssertLessThan(picture.frame.width, app.frame.width * 0.75)
-        XCTAssertEqual(picture.images.firstMatch.frame.width, 96, accuracy: 1)
-        XCTAssertEqual(picture.images.firstMatch.frame.height, 96, accuracy: 1)
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
         let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
         let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
@@ -24,24 +22,42 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertEqual(picture.frame.maxY, following.frame.minY, accuracy: 1)
         XCTAssertFalse(app.buttons["timeline.journal"].exists)
         XCTAssertTrue(app.staticTexts["明天再继续，今晚先休息。"].exists)
-        // Keep both adjacent transcript rows in the evidence, rather than framing only the image.
-        let desiredTop = app.frame.height * 0.60
-        let delta = desiredTop - picture.frame.minY
-        let dragStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
-        dragStart.press(forDuration: 0.1, thenDragTo: dragStart.withOffset(CGVector(dx: 0, dy: delta)),
-                        withVelocity: .slow, thenHoldForDuration: 0.6)
+        XCTAssertTrue(preceding.isHittable)
+        XCTAssertTrue(following.isHittable)
         try assertConnectedSpine(app, beside: picture)
         attach(app, name: "01_iphone_timeline_inline")
         picture.tap()
         let caption = app.staticTexts["lifeIllustration.viewer.caption"]
         XCTAssertTrue(caption.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["lifeIllustration.viewer.share"].exists)
+        XCTAssertTrue(caption.label.contains("20:00–23:00"))
+        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "03 / 03")
         attach(app, name: "02_iphone_fullscreen_viewer")
+        assertViewerInteractions(app, picture: picture)
+        app.buttons["library.more"].tap()
+        app.buttons["设置"].tap()
+        let row = app.buttons["settings.lifeIllustrations"]
+        for _ in 0..<5 {
+            if row.exists && row.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(row.isHittable)
+        row.tap()
+        XCTAssertTrue(app.switches["lifeIllustration.settings.enabled"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["lifeIllustration.settings.subscription"].label, "Codex 订阅可用")
+        attach(app, name: "03_iphone_settings_row")
+    }
+
+    private func assertViewerInteractions(_ app: XCUIApplication, picture: XCUIElement) {
+        let caption = app.staticTexts["lifeIllustration.viewer.caption"]
         let viewer = app.descendants(matching: .any)["lifeIllustration.viewer.image"]
+        XCTAssertGreaterThanOrEqual(viewer.frame.width, 300)
         let zoom = viewer.scrollViews.firstMatch
         XCTAssertTrue(zoom.exists)
         let image = zoom.images.firstMatch
         let originalWidth = image.frame.width
+        XCTAssertGreaterThanOrEqual(originalWidth, 300)
+        XCTAssertEqual(image.frame.width, image.frame.height, accuracy: 1)
         zoom.pinch(withScale: 2, velocity: 1)
         let enlarged = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             image.frame.width > originalWidth * 1.3
@@ -63,18 +79,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         picture.tap()
         XCTAssertTrue(app.buttons["lifeIllustration.viewer.close"].waitForExistence(timeout: 5))
         app.buttons["lifeIllustration.viewer.close"].tap()
-        app.buttons["library.more"].tap()
-        app.buttons["设置"].tap()
-        let row = app.buttons["settings.lifeIllustrations"]
-        for _ in 0..<5 {
-            if row.exists && row.isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(row.isHittable)
-        row.tap()
-        XCTAssertTrue(app.switches["lifeIllustration.settings.enabled"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["lifeIllustration.settings.subscription"].label, "Codex 订阅可用")
-        attach(app, name: "03_iphone_settings_row")
+        XCTAssertTrue(picture.isHittable)
     }
 
     func testDarkTimelineAndViewer() throws {
@@ -84,7 +89,8 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         let picture = app.buttons["lifeIllustration.inline.sample-night"]
         XCTAssertTrue(picture.waitForExistence(timeout: 30))
         XCTAssertTrue(picture.isHittable)
-        XCTAssertLessThanOrEqual(picture.frame.height, 124)
+        XCTAssertGreaterThanOrEqual(picture.frame.height, 44)
+        XCTAssertLessThanOrEqual(picture.frame.height, 52)
         XCTAssertLessThanOrEqual(picture.frame.width, 260)
         try assertDarkCanvas(app)
         try assertConnectedSpine(app, beside: picture)
@@ -93,8 +99,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["lifeIllustration.viewer.caption"].waitForExistence(timeout: 5))
         try assertDarkCanvas(app)
         attach(app, name: "02b_iphone_fullscreen_viewer_dark")
-        app.buttons["lifeIllustration.viewer.close"].tap()
-        XCTAssertTrue(picture.isHittable)
+        assertViewerInteractions(app, picture: picture)
     }
 
     private func launch(appearance: XCUIDevice.Appearance) -> XCUIApplication {
