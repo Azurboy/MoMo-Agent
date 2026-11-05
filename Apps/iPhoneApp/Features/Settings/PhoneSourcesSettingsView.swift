@@ -43,7 +43,11 @@ struct PhoneSourcesSettingsView: View {
                     PhoneSettingsSurface {
                         VStack(alignment: .leading, spacing: 8) {
                             if let date = preference.lastSynced { PhoneSettingsValueRow(title: "上次同步", value: Text(date, style: .relative)) }
-                            if sources.authorization(kind) == "needs_permission" {
+                            if sources.canPromptAuthorization(kind) {
+                                Button(kind == .visits ? "请求定位权限" : "请求系统权限") {
+                                    Task { await sources.requestPermission(kind) }
+                                }.disabled(busy)
+                            } else if sources.authorization(kind) == "needs_permission" {
                                 Button("打开系统设置") { if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) } }
                             }
                             if kind == .visits && sources.authorization(kind) == "foreground_only" {

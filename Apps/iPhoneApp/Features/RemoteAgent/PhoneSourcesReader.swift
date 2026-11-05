@@ -28,6 +28,17 @@ import MoMoAgentClient
     }
     @objc nonisolated private func eventsChanged() { Task { @MainActor [weak self] in self?.onChange?() } }
 
+    func canPromptAuthorization(_ kind: PhoneSourceKind) -> Bool {
+        switch kind {
+        case .visits:
+            return location.authorizationStatus == .notDetermined
+        case .calendar:
+            return EKEventStore.authorizationStatus(for: .event) == .notDetermined
+        case .reminders:
+            return EKEventStore.authorizationStatus(for: .reminder) == .notDetermined
+        }
+    }
+
     func authorization(_ kind: PhoneSourceKind) -> String {
         if kind == .visits {
             if locationFailed { return "temporarily_unavailable" }
@@ -77,6 +88,9 @@ import MoMoAgentClient
             location.startMonitoringVisits()
             if CLLocationManager.significantLocationChangeMonitoringAvailable() {
                 location.startMonitoringSignificantLocationChanges()
+            }
+            if visits.isEmpty {
+                location.requestLocation()
             }
         } else {
             location.stopMonitoringVisits()
@@ -240,9 +254,13 @@ import MoMoAgentClient
             pruneVisits()
             do { try saveVisits() } catch { locationFailed = true }
             onChange?()
+            if let newest = visits.last, newest.title == nil {
+                await enrichVisit(newest)
+            }
         }
     }
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        if let clError = error as? CLError, clError.code == .locationUnknown { return }
         Task { @MainActor [weak self] in self?.locationFailed = true; self?.onChange?() }
     }
 }

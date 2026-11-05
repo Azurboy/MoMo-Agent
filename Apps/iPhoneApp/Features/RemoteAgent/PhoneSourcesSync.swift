@@ -4,11 +4,16 @@ import MoMoAgentClient
 
 @MainActor protocol PhoneSourcesReading: AnyObject {
     var onChange: (() -> Void)? { get set }
+    func canPromptAuthorization(_ kind: PhoneSourceKind) -> Bool
     func authorization(_ kind: PhoneSourceKind) -> String
     func authorize(_ kind: PhoneSourceKind) async throws
     func setVisitsEnabled(_ enabled: Bool) throws
     func requestBackgroundVisits()
     func read(_ kind: PhoneSourceKind, from: Date, to: Date) async throws -> [PhoneSourceSnapshot.Record]
+}
+
+extension PhoneSourcesReading {
+    func canPromptAuthorization(_ kind: PhoneSourceKind) -> Bool { false }
 }
 
 @MainActor @Observable
@@ -50,8 +55,22 @@ final class PhoneSourcesSync {
         }
     }
     func preference(_ kind: PhoneSourceKind) -> Preference { state.sources[kind.rawValue] ?? Preference() }
+    func canPromptAuthorization(_ kind: PhoneSourceKind) -> Bool { reader.canPromptAuthorization(kind) }
     func authorization(_ kind: PhoneSourceKind) -> String { reader.authorization(kind) }
     func requestBackgroundVisits() { reader.requestBackgroundVisits() }
+    func requestPermission(_ kind: PhoneSourceKind) async {
+        guard !busy.contains(kind) else { return }
+        busy.insert(kind)
+        do {
+            try await reader.authorize(kind)
+            if kind == .visits, preference(kind).enabled { try reader.setVisitsEnabled(true) }
+            failures[kind] = nil
+        } catch {
+            failures[kind] = String(localized: "授权未完成，可在系统设置中检查权限。")
+        }
+        busy.remove(kind)
+        if preference(kind).enabled { await refresh(kind) }
+    }
     func foreground() {
         active = true
         guard polling == nil else { return }
@@ -131,7 +150,15 @@ final class PhoneSourcesSync {
                                      observedAt: now, windowStart: start, windowEnd: end, records: records)
                 try commit(next, kind)
                 try await deliver(kind)
-                failures[kind] = ["enabled", "foreground_only"].contains(status) ? nil : String(localized: "暂时无法读取，请检查系统授权后重试。")
+                if ["enabled", "foreground_only"].contains(status) {
+                    failures[kind] = nil
+                } else if reader.canPromptAuthorization(kind) {
+                    failures[kind] = kind == .visits
+                        ? String(localized: "尚未完成系统定位授权（例如上次选了「允许一次」已过期），请点上方「请求定位权限」。")
+                        : String(localized: "尚未授予系统权限，请点上方「请求系统权限」。")
+                } else {
+                    failures[kind] = String(localized: "暂时无法读取，请检查系统授权后重试。")
+                }
             } catch is CancellationError {
                 pendingRefresh.remove(kind)
                 return
