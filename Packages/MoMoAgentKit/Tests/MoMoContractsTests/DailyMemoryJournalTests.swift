@@ -173,4 +173,10 @@ import Testing
         let loadedCustom = try #require(store.load(dayKey: inputV1.dayKey, style: .chiikawa))
         #expect(loadedCustom.metadata.isFresh(for: inputV2))
     }
+
+    @Test("Place visit shortener strips city/district prefixes cleanly on unspaced Chinese addresses")
+    func shortenUnspacedChineseAddress() {
+        #expect(DailyJournalPlaceVisit.shorten("北京市朝阳区三里屯太古里") == "朝阳 · 三里屯太古里")
+        #expect(DailyJournalPlaceVisit.shorten("中国北京市海淀区中关村软件园二期") == "中关村软件园二期")
+    }
 }

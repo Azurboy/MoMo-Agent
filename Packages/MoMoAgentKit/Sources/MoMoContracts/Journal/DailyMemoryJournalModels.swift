@@ -44,12 +44,38 @@ public struct DailyJournalPlaceVisit: Codable, Equatable, Sendable, Identifiable
                 .replacingOccurrences(of: "市", with: "")
                 .replacingOccurrences(of: "区", with: "")
                 .replacingOccurrences(of: "县", with: "")
-            if last.count <= 5, !prev.isEmpty, prev != last, (prev.count + last.count + 3) <= 10 {
+            if last.count <= 6, !prev.isEmpty, prev != last, (prev.count + last.count + 3) <= 11 {
                 return "\(prev) · \(last)"
             }
             return String(last.prefix(10))
         }
-        return String(parts[0].prefix(10))
+
+        var single = parts[0]
+        for pattern in [
+            #"^中国"#,
+            #"^[\u4e00-\u9fa5]{2,6}(?:省|自治区|特别行政区)"#,
+            #"^[\u4e00-\u9fa5]{2,5}市"#
+        ] {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let ns = single as NSString
+                let range = NSRange(location: 0, length: ns.length)
+                single = regex.stringByReplacingMatches(in: single, range: range, withTemplate: "")
+            }
+        }
+        if let districtRegex = try? NSRegularExpression(pattern: #"^([\u4e00-\u9fa5]{1,4})(?:区|县)(.+)$"#),
+           let match = districtRegex.firstMatch(in: single, range: NSRange(location: 0, length: (single as NSString).length)),
+           match.numberOfRanges == 3 {
+            let ns = single as NSString
+            let district = ns.substring(with: match.range(at: 1))
+            let landmark = ns.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !landmark.isEmpty {
+                if landmark.count <= 6, (district.count + landmark.count + 3) <= 11 {
+                    return "\(district) · \(landmark)"
+                }
+                return String(landmark.prefix(10))
+            }
+        }
+        return String(single.prefix(10))
     }
 }
 
@@ -809,7 +835,11 @@ public enum DailyJournalConceptExtractor {
         }
 
         if let placeLabel, !placeLabel.isEmpty {
-            let shortPlace = String(placeLabel.prefix(6))
+            let landmark = placeLabel
+                .components(separatedBy: "·")
+                .last?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? placeLabel
+            let shortPlace = String((landmark.isEmpty ? placeLabel : landmark).prefix(8))
             return "\(shortPlace) · \(topicCore)"
         }
         let moodPrefix = switch palette {
