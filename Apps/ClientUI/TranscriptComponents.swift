@@ -7,17 +7,20 @@ struct ClientTranscriptRow<Detail: View>: View {
     let status: String?
     let connected: Bool
     let isFinal: Bool
+    var continuesFromPrevious = false
     var bottomSpacing: CGFloat = 26
     @ViewBuilder let detail: () -> Detail
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
-            VStack(spacing: 7) {
+            VStack(spacing: 0) {
+                Rectangle().fill(MoMoPalette.line).frame(width: 1, height: 17)
+                    .opacity(continuesFromPrevious ? 1 : 0)
                 Circle().strokeBorder(MoMoPalette.muted, lineWidth: 1.5)
                     .background(isFinal ? Color.clear : MoMoPalette.ink, in: Circle()).frame(width: 8, height: 8)
                 if connected { Rectangle().fill(MoMoPalette.line).frame(width: 1) }
-            }.padding(.top, 7).frame(width: 12).accessibilityHidden(true)
+            }.frame(width: 12).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 9) {
                 ViewThatFits(in: .horizontal) {
                     HStack { Text(time).phoneText(.menu).monospacedDigit(); Spacer(minLength: 8); state }
@@ -27,9 +30,9 @@ struct ClientTranscriptRow<Detail: View>: View {
                 Text(preview).phoneText(.menu).foregroundStyle(MoMoPalette.muted)
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.padding(.bottom, bottomSpacing)
+            }.padding(.top, 10).padding(.bottom, bottomSpacing)
         }
-        .foregroundStyle(MoMoPalette.ink).padding(.top, 10)
+        .foregroundStyle(MoMoPalette.ink)
         .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true).contentShape(Rectangle())
     }

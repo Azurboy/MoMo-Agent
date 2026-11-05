@@ -99,11 +99,11 @@ struct PhoneUITestConfiguration {
         let base = max(earliestBase, floor((now + Double(offset)) / 1_800) * 1_800 - Double(offset) - 1_800)
         let illustrationBase = todayDay.startDate().timeIntervalSince1970
         let illustrationInputs: [(Double, String)] = [
-            (illustrationBase + 6.25 * 3600, "讨论手机与 Mac 的代码架构：手机负责收集上下文，Mac 负责执行。桌上铺开几张模块草图，逐一梳理依赖关系。"),
+            (illustrationBase + 6.25 * 3600, "讨论代码模块的数据交接。桌上摆着白色和淡蓝色积木，用积木表示还没连好的接口。"),
             (illustrationBase + 8.5 * 3600, "继续核对数据同步的边界，先把可复用的模块拆清楚，暂时还没有决定最后的实现。"),
-            (illustrationBase + 9.3 * 3600, "两位朋友沿着河边小路散步，聊起周末可能去旅行。一个人拿着折叠伞，另一个人抱着装面包的纸袋。"),
-            (illustrationBase + 11.2 * 3600, "走到石桥旁停下来看看鸭子，微风吹动小草。目的地和车票还没有确定，沿着河边继续走。"),
-            (illustrationBase + 12.3 * 3600, "夜晚慢慢收拾房间，把围巾叠好放在椅背上，再给窗边的小盆栽浇一点水。"),
+            (illustrationBase + 9.3 * 3600, "两个人慢慢走了一会儿，停下脚步。"),
+            (illustrationBase + 11.2 * 3600, "蹲下看看脚边的叶子，同伴弯腰凑近，摊开手掌作比较。没有摘走叶子。"),
+            (illustrationBase + 12.3 * 3600, "打开台灯，把白色茶杯和画册放在桌上。"),
             (illustrationBase + 14.3 * 3600, "坐在台灯旁喝茶，翻看画册。"),
             (illustrationBase + 15.2 * 3600, "明天再继续，今晚先休息。")
         ]

@@ -11,6 +11,8 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         await store.refresh()
         XCTAssertNil(store.error)
         let item = try XCTUnwrap(store.items.first)
+        XCTAssertEqual(item.width, 1024)
+        XCTAssertEqual(item.height, 1024)
         let original = try XCTUnwrap(store.imageURL(for: item, thumbnail: false))
         let thumbnail = try XCTUnwrap(store.imageURL(for: item))
         XCTAssertNotEqual(original, thumbnail)
@@ -197,7 +199,7 @@ private actor IllustrationTransport: AgentTransport {
             let tombstone = LifeIllustrationTombstone(id: "illustration-1", deleted: true, updatedAt: 200)
             let item = LifeIllustration(id: "illustration-1", windowStart: 100, windowEnd: 200, logicalDay: "2026-11-05",
                 timezone: "Asia/Shanghai", place: "杭州", assetSha256: LifeIllustrationCache.digest(original),
-                thumbnailSha256: LifeIllustrationCache.digest(thumbnail), width: 1360, height: 1020,
+                thumbnailSha256: LifeIllustrationCache.digest(thumbnail), width: 1024, height: 1024,
                 sourceIds: ["library/session"], createdAt: 201, updatedAt: 201)
             if deletedHistory {
                 data = try encode(LifeIllustrationManifest(items: cursor == "0" ? [.illustration(item)] : [.tombstone(tombstone)],

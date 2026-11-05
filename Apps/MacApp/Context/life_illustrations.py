@@ -330,10 +330,21 @@ class LifeIllustrations:
             candidate.verify()
         with Image.open(io.BytesIO(raw)) as candidate:
             candidate.load()
-            picture = ImageOps.fit(candidate.convert('RGB'), (1360, 1020), method=Image.Resampling.LANCZOS)
+            artwork = candidate.convert('RGBA')
+            alpha = artwork.getchannel('A')
+            # Generated PNGs can contain near-invisible alpha specks far outside the drawing.
+            bounds = alpha.point(lambda value: 255 if value > 8 else 0).getbbox() or alpha.getbbox()
+            if bounds is None:
+                raise ValueError('Illustration contains no visible artwork')
+            bounds = (max(0, bounds[0] - 2), max(0, bounds[1] - 2),
+                      min(artwork.width, bounds[2] + 2), min(artwork.height, bounds[3] + 2))
+            # Fit the complete ink bounds, including detached wisps, without stretching or clipping.
+            artwork = ImageOps.contain(artwork.crop(bounds), (860, 860), method=Image.Resampling.LANCZOS)
+            picture = Image.new('RGBA', (1024, 1024))
+            picture.alpha_composite(artwork, ((1024 - artwork.width) // 2, (1024 - artwork.height) // 2))
         original, thumbnail = io.BytesIO(), io.BytesIO()
         picture.save(original, format='PNG', optimize=True)
-        picture.thumbnail((680, 510), Image.Resampling.LANCZOS)
+        picture.thumbnail((512, 512), Image.Resampling.LANCZOS)
         picture.save(thumbnail, format='PNG', optimize=True)
         encoded = [original.getvalue(), thumbnail.getvalue()]
         hashes = [hashlib.sha256(value).hexdigest() for value in encoded]
@@ -349,7 +360,7 @@ class LifeIllustrations:
                     os.chmod(temp, 0o600); file.write(value); file.flush(); os.fsync(file.fileno())
                 temp.replace(path)
             now = time.time() if now is None else now
-            self.db.execute('''UPDATE slots SET state='ready',asset_sha256=?,thumbnail_sha256=?,width=1360,height=1020,
+            self.db.execute('''UPDATE slots SET state='ready',asset_sha256=?,thumbnail_sha256=?,width=1024,height=1024,
                 updated_at=?,error=NULL WHERE id=?''', (*hashes, now, identity))
             self.publish(self.db.execute('SELECT * FROM slots WHERE id=?', (identity,)).fetchone())
 

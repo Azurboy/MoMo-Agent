@@ -24,8 +24,9 @@ struct LifeIllustrationImageView: View {
     @State private var image: Image?
 
     var body: some View {
-        Color.clear.aspectRatio(4 / 3, contentMode: .fit)
+        Color.clear.aspectRatio(1, contentMode: .fit)
             .overlay { if let image { image.resizable().scaledToFit() } }
+            .modifier(LifeIllustrationPaper())
         .task(id: url) {
             image = nil
             let bytes = await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
@@ -39,31 +40,53 @@ struct LifeIllustrationImageView: View {
     }
 }
 
+// Dark ink needs a light backing even where a transparent vignette has detached fine lines.
+private struct LifeIllustrationPaper: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .background(colorScheme == .dark ? Color(white: 0.96) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
 struct LifeIllustrationInlineView: View {
     let illustration: LifeIllustration
     let url: URL
+    let connected: Bool
     let open: () -> Void
     let showSource: () -> Void
     let delete: () -> Void
 
     var body: some View {
-        Button(action: open) {
-            VStack(alignment: .leading, spacing: 8) {
-                LifeIllustrationImageView(url: url)
-                    .frame(maxWidth: .infinity)
-                    .aspectRatio(4 / 3, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                Text(illustration.caption).font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 14) {
+            Color.clear.frame(width: 12)
+                .overlay {
+                    if connected { Rectangle().fill(MoMoPalette.line).frame(width: 1) }
+                }
+                .accessibilityHidden(true)
+            Button(action: open) {
+                HStack(spacing: 12) {
+                    LifeIllustrationImageView(url: url).frame(width: 96, height: 96)
+                    Text(illustration.caption).phoneText(.caption).foregroundStyle(MoMoPalette.muted)
+                        .lineLimit(3)
+                        .frame(maxWidth: 140, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.dateCaption)
+            .accessibilityIdentifier("lifeIllustration.inline.\(illustration.id)")
+            .contextMenu {
+                Button("查看依据", systemImage: "text.alignleft", action: showSource)
+                Button("删除", systemImage: "trash", role: .destructive, action: delete)
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.dateCaption)
-        .accessibilityIdentifier("lifeIllustration.inline.\(illustration.id)")
-        .contextMenu {
-            Button("查看依据", systemImage: "text.alignleft", action: showSource)
-            Button("删除", systemImage: "trash", role: .destructive, action: delete)
-        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -151,6 +174,10 @@ struct LifeIllustrationViewer: View {
                                     get: { selection == item.id && zoomed },
                                     set: { if selection == item.id { zoomed = $0 } }))
                                     .id(item.id + (selection == item.id ? "-selected" : "-offscreen"))
+                                    .aspectRatio(1, contentMode: .fit)
+                                    .modifier(LifeIllustrationPaper())
+                                    .padding(.horizontal, 24)
+                                    .frame(maxHeight: .infinity)
                             }
                         }
                         .tag(item.id)

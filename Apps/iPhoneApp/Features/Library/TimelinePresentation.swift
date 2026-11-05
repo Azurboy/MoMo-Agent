@@ -218,11 +218,13 @@ struct TimelineRow: View {
     let summary: String?
     let status: String?
     let connected: Bool
+    var continuesFromPrevious = false
     var includeUTCOffset = false
     var body: some View {
         ClientTranscriptRow(time: TimelineDate.range(window.id, end: window.end, includeUTCOffset: includeUTCOffset),
             preview: TimelinePresentation.preview(window, summary: summary), status: status,
-            connected: connected, isFinal: window.isFinal, bottomSpacing: window.marks.isEmpty ? 26 : 2) {
+            connected: connected, isFinal: window.isFinal, continuesFromPrevious: continuesFromPrevious,
+            bottomSpacing: window.marks.isEmpty ? 26 : 2) {
             if window.speechDuration > 0, window.state == .complete {
                 TimelineActivityStrip(window: window).frame(height: 8).accessibilityHidden(true)
                 Text("说话约 \(TimelineDate.duration(window.speechDuration))")

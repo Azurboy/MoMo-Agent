@@ -1,0 +1,5 @@
+2026-11-05 14:10:24.267 xcodebuild[54265:39117963] warning:  The file reference for "Apps/iPhoneApp/Resources" is a member of multiple groups ("iPhoneApp" and ""); this indicates a malformed project.  Only the membership in one of the groups will be preserved (but membership in targets will be unaffected).  If you want a reference to the same file in more than one group, please add another reference to the same path.
+/Users/syh/Workspace/MoMo-Agent-worktrees/life-ill-polish/Apps/MacApp/Desktop/DesktopMemory.swift:190:14: warning: instance method 'webView(_:decidePolicyFor:decisionHandler:)' nearly matches optional requirement 'webView(_:decidePolicyFor:decisionHandler:)' of protocol 'WKNavigationDelegate'
+    |              |- warning: instance method 'webView(_:decidePolicyFor:decisionHandler:)' nearly matches optional requirement 'webView(_:decidePolicyFor:decisionHandler:)' of protocol 'WKNavigationDelegate'
+2026-11-05 14:10:35.324 appintentsmetadataprocessor[54374:39119098] warning: Metadata extraction skipped, no AppIntents.framework dependency found
+** BUILD SUCCEEDED **

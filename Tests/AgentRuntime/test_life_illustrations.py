@@ -32,7 +32,12 @@ TEXT = '两个人在桌边讨论新的模块边界，还没有确定最终方案
 def png():
     from PIL import Image
     out = io.BytesIO()
-    Image.new('RGB', (1536, 1024), '#fff9ef').save(out, format='PNG')
+    image = Image.new('RGBA', (1024, 1024))
+    image.paste((255, 255, 255, 255), (312, 212, 712, 812))
+    # Detached semi-transparent ink must survive cropping and thumbnail generation.
+    image.paste((30, 29, 27, 128), (292, 192, 300, 200))
+    image.paste((30, 29, 27, 1), (1, 1, 5, 5))
+    image.save(out, format='PNG')
     return out.getvalue()
 
 
@@ -120,12 +125,51 @@ class IllustrationTests(unittest.TestCase):
         self.assertEqual('ready', self.row()['state'])
         with io.BytesIO(self.queue.asset(self.row()['asset_sha256'])) as buffer:
             from PIL import Image
-            self.assertEqual((1360, 1020), Image.open(buffer).size)
+            self.assertEqual((1024, 1024), Image.open(buffer).size)
         other = LifeIllustrations(self.data)
         try:
             other.recover(); other.scan(self.context, self.start + 5 * 3600); other.advance(self.generator, self.context)
             self.assertEqual(1, len(self.generator.generated))
         finally: other.close()
+
+    def test_rgba_assets_trim_center_and_preserve_complete_ink_bounds(self):
+        from PIL import Image
+        self.generate()
+        row = self.row()
+        self.assertEqual((1024, 1024), (row['width'], row['height']))
+        for key, side in [('asset_sha256', 1024), ('thumbnail_sha256', 512)]:
+            with Image.open(io.BytesIO(self.queue.asset(row[key]))) as image:
+                self.assertEqual('RGBA', image.mode)
+                self.assertEqual((side, side), image.size)
+                alpha = image.getchannel('A')
+                self.assertEqual((0, 255), alpha.getextrema())
+                left, top, right, bottom = alpha.getbbox()
+                self.assertAlmostEqual((left + right) / 2, side / 2, delta=2)
+                self.assertAlmostEqual((top + bottom) / 2, side / 2, delta=2)
+                self.assertTrue(0.82 * side <= bottom - top <= 0.86 * side)
+                self.assertAlmostEqual((right - left) / (bottom - top), 420 / 620, delta=0.02)
+                self.assertEqual(0, alpha.getpixel((0, 0)))
+                self.assertGreater(sum(alpha.histogram()[100:161]), 0)
+                # The upper-left detached stroke stays charcoal, with its original alpha.
+                self.assertLess(image.getpixel((left + 2, top + 2))[0], 80)
+
+    def test_empty_alpha_is_rejected_without_publishing(self):
+        from PIL import Image
+        self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
+        raw = io.BytesIO(); Image.new('RGBA', (1024, 1024)).save(raw, format='PNG')
+        with self.assertRaisesRegex(ValueError, 'no visible artwork'):
+            self.queue.save_image(self.row()['id'], raw.getvalue())
+        self.assertEqual([], self.queue.manifest()['items'])
+
+    def test_opaque_legacy_png_still_fits_without_stretching_or_losing_edges(self):
+        from PIL import Image
+        self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
+        raw = io.BytesIO(); Image.new('RGB', (1360, 1020), '#fff9ef').save(raw, format='PNG')
+        self.queue.save_image(self.row()['id'], raw.getvalue())
+        with Image.open(io.BytesIO(self.queue.asset(self.row()['asset_sha256']))) as image:
+            self.assertEqual('RGBA', image.mode)
+            left, top, right, bottom = image.getchannel('A').getbbox()
+            self.assertAlmostEqual((right - left) / (bottom - top), 4 / 3, delta=0.01)
 
     def test_delete_is_tombstoned_and_does_not_regenerate(self):
         self.generate(); image = self.queue.manifest()['items'][0]
@@ -241,11 +285,12 @@ class IllustrationTests(unittest.TestCase):
                   dict(id='future', source_name='CoreLocation visits', start=self.start + 4*3600, end=self.start + 5*3600,
                        title='京都', latitude=31, longitude=121, accuracy=20)]
         visits += [dict(visits[0], id='open', end=None), dict(visits[0], id='gps', source_name='current GPS'),
-                   dict(visits[0], id='vague', accuracy=900)]
+                   dict(visits[0], id='vague', accuracy=201), dict(visits[0], id='short', end=self.start + 299),
+                   dict(visits[0], id='boundary', start=self.start + 4000, end=self.start + 4300, accuracy=200)]
         self.context.db.execute('INSERT INTO phone_source_snapshots VALUES(?,?,?,?,?)',
                                (self.payload['device_id'], 'visits', 1, json.dumps(dict(state='enabled', records=visits)), self.start))
         result = visit_evidence(self.context, self.start, self.start + 3*3600)
-        self.assertEqual(['valid'], [visit['id'] for visit in result])
+        self.assertEqual(['valid', 'boundary'], [visit['id'] for visit in result])
 
     def test_visit_becoming_unreliable_withdraws_existing_picture(self):
         visit = dict(id='visit', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
@@ -317,8 +362,16 @@ class NativeImageStreamTests(unittest.TestCase):
         self.assertEqual(image, generator.generate('真实场景', 'operation', ids.append))
         self.assertEqual(['resp_123'], ids)
         self.assertEqual(False, client.kwargs['store']); self.assertEqual(True, client.kwargs['stream'])
-        self.assertEqual('1536x1024', client.kwargs['tools'][0]['size'])
+        self.assertEqual('1024x1024', client.kwargs['tools'][0]['size'])
         self.assertEqual('medium', client.kwargs['tools'][0]['quality'])
+        self.assertEqual('transparent', client.kwargs['tools'][0]['background'])
+        self.assertEqual('png', client.kwargs['tools'][0]['output_format'])
+        content = client.kwargs['input'][0]['content']
+        self.assertEqual('input_image', content[0]['type'])
+        self.assertTrue(content[0]['image_url'].startswith('data:image/png;base64,'))
+        self.assertEqual((ROOT / 'Apps/MacApp/Runtime/momo_character_reference.png').read_bytes(),
+                         base64.b64decode(content[0]['image_url'].split(',', 1)[1]))
+        self.assertEqual({'type': 'input_text', 'text': '真实场景'}, content[1])
         self.assertEqual({'X-Client-Request-Id': 'operation'}, client.kwargs['extra_headers'])
 
 
