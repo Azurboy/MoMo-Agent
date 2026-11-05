@@ -65,9 +65,7 @@ struct SettingsView: View {
                     PhoneSettingsSurface {
                         if let illustrations {
                             NavigationLink { LifeIllustrationSettingsView(store: illustrations) } label: {
-                                PhoneSettingsLinkRow(title: "生活插画", value: illustrations.settings.supported
-                                    ? String(localized: "Codex 订阅可用")
-                                    : illustrations.settings.provider == "anthropic" ? String(localized: "Claude 订阅暂不支持") : String(localized: "需要 Codex 订阅"))
+                                PhoneSettingsLinkRow(title: "生活插画", value: illustrations.settingsRowStatus)
                             }.accessibilityIdentifier("settings.lifeIllustrations")
                             rowDivider
                         }
@@ -124,6 +122,7 @@ struct SettingsView: View {
             .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 24)
         }
         .phonePageSurface().navigationTitle("")
+        .task { await illustrations?.refresh(minimumInterval: 3) }
         .onDisappear { versionTapCount = 0 }
         .fullScreenCover(isPresented: $previewingWelcome) {
             WelcomeExperienceView(finishTitle: "返回设置", finish: { previewingWelcome = false }, closePreview: { previewingWelcome = false })

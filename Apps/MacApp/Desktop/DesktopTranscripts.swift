@@ -21,7 +21,6 @@ struct DesktopSources: View {
     @State private var searching = false
     @State private var choosingDate = false
     @State private var selectedIllustrationID: String?
-    @State private var illustrationExpanded = false
     @State private var illustrationError: String?
     @State private var timelineAnchor: String?
     private let calendar = Calendar.current
@@ -110,30 +109,14 @@ struct DesktopSources: View {
                     timeline
                         .frame(width: wide ? 340 : nil)
                         .frame(maxWidth: wide ? nil : .infinity)
-                        .frame(width: illustrationExpanded ? 0 : nil, alignment: .leading)
                         .clipped()
-                        .accessibilityHidden(illustrationExpanded)
                 }
-                if wide && !illustrationExpanded { Divider() }
-                if let illustration = selectedIllustration,
-                   let url = model.lifeIllustrations.imageURL(for: illustration, thumbnail: false) {
-                    DesktopLifeIllustrationReader(
-                        illustration: illustration,
-                        url: url,
-                        position: (illustrations.firstIndex(where: { $0.id == illustration.id }) ?? 0) + 1,
-                        count: illustrations.count,
-                        expanded: $illustrationExpanded,
-                        close: closeIllustration,
-                        previous: adjacentIllustration(to: illustration, offset: -1).map { item in
-                            { selectedIllustrationID = item.id }
-                        },
-                        next: adjacentIllustration(to: illustration, offset: 1).map { item in
-                            { selectedIllustrationID = item.id }
-                        },
-                        showSource: { showSource(for: illustration) },
-                        delete: { deleteIllustration(illustration) }
-                    )
-                    .frame(maxWidth: .infinity)
+                if wide { Divider() }
+                if let illustration = selectedIllustration {
+                    LifeIllustrationJourneyMapView(store: model.lifeIllustrations, initialID: illustration.id,
+                        close: closeIllustration, showSource: { showSource(for: $0) })
+                        .id(illustration.logicalDay)
+                        .frame(maxWidth: .infinity)
                 } else if let selected {
                     DesktopSourceReader(
                         model: model,
@@ -263,15 +246,8 @@ struct DesktopSources: View {
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func adjacentIllustration(to illustration: LifeIllustration, offset: Int) -> LifeIllustration? {
-        guard let index = illustrations.firstIndex(where: { $0.id == illustration.id }),
-              illustrations.indices.contains(index + offset) else { return nil }
-        return illustrations[index + offset]
-    }
-
     private func closeIllustration() {
         selectedIllustrationID = nil
-        illustrationExpanded = false
     }
 
     private func showSource(for illustration: LifeIllustration) {
@@ -288,17 +264,6 @@ struct DesktopSources: View {
         }
         selectedID = source.id
         timelineAnchor = source.id
-    }
-
-    private func deleteIllustration(_ illustration: LifeIllustration) {
-        Task {
-            do {
-                try await model.lifeIllustrations.delete(illustration)
-                if selectedIllustrationID == illustration.id { closeIllustration() }
-            } catch {
-                illustrationError = error.localizedDescription
-            }
-        }
     }
 
     private var dateBar: some View {
@@ -354,91 +319,6 @@ struct DesktopSources: View {
         if query.isEmpty { return range }
         let dayPrefix = start.formatted(.dateTime.locale(AppLanguage.current.locale).month().day())
         return "\(dayPrefix) \(range)"
-    }
-}
-
-private struct DesktopLifeIllustrationReader: View {
-    let illustration: LifeIllustration
-    let url: URL
-    let position: Int
-    let count: Int
-    @Binding var expanded: Bool
-    let close: () -> Void
-    let previous: (() -> Void)?
-    let next: (() -> Void)?
-    let showSource: () -> Void
-    let delete: () -> Void
-    @FocusState private var hasKeyboardFocus: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                Spacer(minLength: 8)
-                ShareLink(item: url) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .help("分享插画")
-                .accessibilityLabel("分享插画")
-                .accessibilityIdentifier("lifeIllustration.viewer.share")
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                }
-                .help("返回转录")
-                .accessibilityLabel("返回转录")
-                .accessibilityIdentifier("desktop.illustration.close")
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 24)
-            .frame(minHeight: 44)
-
-            GeometryReader { geometry in
-                let side = max(0, min(geometry.size.width, geometry.size.height - 108))
-                VStack(spacing: 16) {
-                    LifeIllustrationMetadata(illustration: illustration, position: position, count: count)
-                        .frame(width: side)
-                    Button { expanded.toggle() } label: {
-                        LifeIllustrationImageView(url: url)
-                            .frame(width: side, height: side)
-                            .modifier(LifeIllustrationPlate())
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(expanded ? "空格还原" : "空格放大")
-                    .accessibilityLabel(expanded ? "还原插画" : "放大插画")
-                    .accessibilityIdentifier("desktop.illustration.image")
-                    .contextMenu {
-                        Button("查看依据", action: showSource)
-                        Button("删除", role: .destructive, action: delete)
-                    }
-                    Button("查看这段转录", action: showSource)
-                        .font(.caption).foregroundStyle(MoMoPalette.muted)
-                        .frame(minHeight: 44).buttonStyle(.plain)
-                        .accessibilityIdentifier("lifeIllustration.viewer.source")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
-        }
-        .background(MoMoPalette.canvas)
-        .focusable()
-        .focusEffectDisabled()
-        .focused($hasKeyboardFocus)
-        .defaultFocus($hasKeyboardFocus, true)
-        .onKeyPress(.leftArrow) { previous?(); return .handled }
-        .onKeyPress(.upArrow) { previous?(); return .handled }
-        .onKeyPress(.rightArrow) { next?(); return .handled }
-        .onKeyPress(.downArrow) { next?(); return .handled }
-        .onKeyPress(.space) { expanded.toggle(); return .handled }
-        .onKeyPress(.escape) {
-            if expanded { expanded = false } else { close() }
-            return .handled
-        }
-        .accessibilityAction(named: "上一幅") { previous?() }
-        .accessibilityAction(named: "下一幅") { next?() }
-        .task(id: illustration.id) {
-            if !hasKeyboardFocus { hasKeyboardFocus = true }
-        }
     }
 }
 

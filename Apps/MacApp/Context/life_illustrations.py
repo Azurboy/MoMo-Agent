@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -65,8 +66,8 @@ def visit_evidence(context, start, end):
             continue
         for visit in snapshot.get('records', []):
             arrival, departure = visit.get('start'), visit.get('end')
-            if (visit.get('source_name') != 'CoreLocation visits' or arrival is None or departure is None
-                    or visit.get('accuracy', 1e9) > 200 or departure <= arrival):
+            if (visit.get('source_name') != 'CoreLocation visits' or not valid_location(visit, 200)
+                    or not finite_number(arrival) or not finite_number(departure) or departure <= arrival):
                 continue
             overlap = min(end, departure) - max(start, arrival)
             if overlap < 300:
@@ -80,6 +81,75 @@ def visit_evidence(context, start, end):
                                latitude=visit.get('latitude'), longitude=visit.get('longitude'),
                                title=(visit.get('title') or '').strip() or None))
     return sorted(result, key=lambda value: (-value['overlap_seconds'], value['id']))
+
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def valid_location(record, accuracy_limit):
+    lat, lon, accuracy = (record.get(key) for key in ('latitude', 'longitude', 'accuracy'))
+    return (all(finite_number(value) for value in (lat, lon, accuracy))
+            and -90 <= lat <= 90 and -180 <= lon <= 180 and 0 <= accuracy <= accuracy_limit)
+
+
+def trajectory_evidence(context, day_start_ts, window_end_ts):
+    points, seen = [], set()
+    for row in context.db.execute("SELECT device_id,revision,payload FROM phone_source_snapshots WHERE kind='visits' ORDER BY device_id"):
+        snapshot = json.loads(row['payload'])
+        if snapshot.get('state') not in ('enabled', 'foreground_only'):
+            continue
+        for record in snapshot.get('records', []):
+            start, end = record.get('start'), record.get('end')
+            stationary = record.get('source_name') == 'CoreLocation visits'
+            if not stationary and record.get('source_name') != 'CoreLocation significant_change':
+                continue
+            if not valid_location(record, 200 if stationary else 500) or not finite_number(start):
+                continue
+            if stationary:
+                if not finite_number(end) or end <= start or end <= day_start_ts or start > window_end_ts:
+                    continue
+            elif not day_start_ts <= start <= window_end_ts:
+                continue
+            key = (stationary, start, end, record['latitude'], record['longitude'])
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append(dict(id=record['id'], device_id=row['device_id'], revision=row['revision'],
+                start=start, end=end, timestamp=max(start, day_start_ts),
+                end_timestamp=min(end, window_end_ts) if stationary else None,
+                latitude=record['latitude'], longitude=record['longitude'],
+                kind='visit' if stationary else 'waypoint', title=(record.get('title') or '').strip() or None))
+    points.sort(key=lambda point: (point['timestamp'], point['id']))
+    # Keep stays and the trajectory endpoints, then evenly sample transit fixes within the wire bound.
+    if len(points) > 64:
+        required = {0, len(points) - 1} | {i for i, point in enumerate(points) if point['kind'] == 'visit'}
+        if len(required) > 64:
+            indices = sorted(required)
+            required = {indices[round(i * (len(indices) - 1) / 63)] for i in range(64)}
+        remaining = [i for i in range(len(points)) if i not in required]
+        count = min(64 - len(required), len(remaining))
+        required.update(remaining[round(i * (len(remaining) - 1) / max(1, count - 1))] for i in range(count))
+        points = [points[i] for i in sorted(required)]
+    return points
+
+
+def location_evidence_is_current(context, point):
+    row = context.db.execute("SELECT payload FROM phone_source_snapshots WHERE device_id=? AND kind='visits'", (point['device_id'],)).fetchone()
+    if not row:
+        return False
+    snapshot = json.loads(row['payload'])
+    if snapshot.get('state') not in ('enabled', 'foreground_only'):
+        return False
+    end = point.get('end') or point['start']
+    if not (snapshot.get('window_start', 0) <= point['start'] and snapshot.get('window_end', 0) >= end):
+        return True  # Aging out of the rolling window is not revocation.
+    record = next((record for record in snapshot.get('records', []) if record['id'] == point['id']), None)
+    stationary = point.get('kind', 'visit') == 'visit'
+    return (record is not None and valid_location(record, 200 if stationary else 500)
+            and record.get('source_name') == ('CoreLocation visits' if stationary else 'CoreLocation significant_change')
+            and all(record.get(key) == point.get(key) for key in ('start', 'end', 'latitude', 'longitude'))
+            and (record.get('title') or '').strip() == (point.get('title') or ''))
 
 
 def evidence_for(context, start, end):
@@ -142,6 +212,15 @@ class LifeIllustrations:
             CREATE INDEX IF NOT EXISTS slots_window ON slots(window_start,window_end);
             CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
         ''')
+        self.ensure_columns()
+
+    def ensure_columns(self):
+        with self.write():
+            columns = {row['name'] for row in self.db.execute('PRAGMA table_info(slots)')}
+            for name, declaration in dict(summary='TEXT', latitude='REAL', longitude='REAL',
+                    place_start='REAL', place_end='REAL', route_points="TEXT NOT NULL DEFAULT '[]'").items():
+                if name not in columns:
+                    self.db.execute(f'ALTER TABLE slots ADD COLUMN {name} {declaration}')
 
     def close(self):
         self.db.close()
@@ -188,8 +267,12 @@ class LifeIllustrations:
             item = dict(id=row['id'], deleted=True, updated_at=row['updated_at'])
         else:
             item = {key: row[key] for key in ('id', 'window_start', 'window_end', 'logical_day', 'timezone', 'place',
+                    'summary', 'latitude', 'longitude', 'place_start', 'place_end',
                     'asset_sha256', 'thumbnail_sha256', 'width', 'height', 'created_at', 'updated_at')}
             item.update(deleted=False, source_ids=sorted(json.loads(row['source_versions'])))
+            item['route_points'] = [{key: point.get(key) for key in
+                ('latitude', 'longitude', 'timestamp', 'end_timestamp', 'kind', 'title')}
+                for point in json.loads(row['route_points'])]
         self.db.execute('INSERT INTO changes(id,payload) VALUES(?,?)', (row['id'], canonical(item)))
         return item
 
@@ -230,9 +313,11 @@ class LifeIllustrations:
                 raise ValueError('Unknown illustration')
             if row['state'] not in ('deleted', 'invalid'):
                 self.db.execute('''UPDATE slots SET state=?,evidence='{}',brief=NULL,source_versions='{}',
+                    summary=NULL,place=NULL,latitude=NULL,longitude=NULL,place_start=NULL,place_end=NULL,route_points='[]',
                     error=NULL,updated_at=? WHERE id=?''', (state, now, identity))
                 row = self.db.execute('SELECT * FROM slots WHERE id=?', (identity,)).fetchone()
                 result = self.publish(row, deleted=True)
+                self.db.execute('UPDATE changes SET payload=? WHERE id=?', (canonical(result), identity))
             else:
                 result = dict(id=identity, deleted=True, updated_at=row['updated_at'])
         self.prune_assets()
@@ -253,23 +338,9 @@ class LifeIllustrations:
             return
         for row in self.db.execute("SELECT * FROM slots WHERE state NOT IN ('deleted','invalid','skipped')").fetchall():
             _, versions, semantic, _ = evidence_for(context, row['window_start'], row['window_end'])
-            invalid_visit = False
-            for visit in json.loads(row['evidence']).get('visits', []):
-                current = context.db.execute("SELECT payload FROM phone_source_snapshots WHERE device_id=? AND kind='visits'", (visit['device_id'],)).fetchone()
-                if not current:
-                    invalid_visit = True; break
-                snapshot = json.loads(current['payload'])
-                # A rolling snapshot aging out old visits is not a deletion.
-                covered = snapshot.get('window_start', 0) <= visit['start'] and snapshot.get('window_end', 0) >= visit['end']
-                if snapshot.get('state') not in ('enabled', 'foreground_only'):
-                    invalid_visit = True; break
-                if covered:
-                    record = next((item for item in snapshot.get('records', []) if item['id'] == visit['id']), None)
-                    if (record is None or record.get('start') != visit['start'] or record.get('end') != visit['end']
-                            or record.get('source_name') != 'CoreLocation visits' or record.get('accuracy', 1e9) > 200
-                            or record.get('latitude') != visit.get('latitude') or record.get('longitude') != visit.get('longitude')
-                            or (record.get('title') or '').strip() != (visit['title'] or '')):
-                        invalid_visit = True; break
+            evidence = json.loads(row['evidence'])
+            invalid_visit = any(not location_evidence_is_current(context, point)
+                                for point in evidence.get('visits', []) + evidence.get('trajectory', []))
             if semantic != row['semantic_hash'] or invalid_visit:
                 # Any semantic correction withdraws the old picture. Never auto-charge for a replacement.
                 self.delete(row['id'], state='invalid')
@@ -302,12 +373,19 @@ class LifeIllustrations:
             if len(semantic_text(text)) < 40:
                 continue
             identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f'momo-life-v1:{start}:{end}'))
-            place = next((visit['title'] for visit in evidence['visits'] if visit['title']), None)
+            primary = evidence['visits'][0] if evidence['visits'] else {}
+            _, zone = local_timezone(start)
+            day_start = dt.datetime.combine(dt.date.fromisoformat(window['logical_day']),
+                dt.time(read_day_start_hour(self.data)), tzinfo=zone).timestamp()
+            route = trajectory_evidence(context, day_start, end)
+            evidence['trajectory'] = route
             self.db.execute('''INSERT OR IGNORE INTO slots
-                (id,window_start,window_end,logical_day,timezone,state,source_versions,evidence,semantic_hash,place,created_at,updated_at)
-                VALUES(?,?,?,?,?,'pending',?,?,?,?,?,?)''',
+                (id,window_start,window_end,logical_day,timezone,state,source_versions,evidence,semantic_hash,
+                 place,latitude,longitude,place_start,place_end,route_points,created_at,updated_at)
+                VALUES(?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)''',
                 (identity, start, end, window['logical_day'], window['timezone'], canonical(versions), canonical(evidence),
-                 semantic, place, now, now))
+                 semantic, primary.get('title'), primary.get('latitude'), primary.get('longitude'),
+                 primary.get('start'), primary.get('end'), canonical(route), now, now))
 
     def asset(self, sha):
         if not isinstance(sha, str) or not re.fullmatch(r'[a-f0-9]{64}', sha):
@@ -395,12 +473,14 @@ class LifeIllustrations:
         if not row:
             return
         evidence, _, _, pending = evidence_for(context, row['window_start'], row['window_end'])
+        evidence['visits'] = json.loads(row['evidence']).get('visits', [])
         if pending:
             return
         if not self.db.execute("UPDATE slots SET state='preparing' WHERE id=? AND state='pending'", (row['id'],)).rowcount:
             return
         try:
-            brief = row['brief'] or generator.prepare(evidence)
+            from life_illustration_generator import parse_scene_output
+            summary, brief = (row['summary'], row['brief']) if row['brief'] else parse_scene_output(generator.prepare(evidence))
             if brief.strip() == 'SKIP':
                 self.db.execute("UPDATE slots SET state='skipped',brief=NULL,error=NULL WHERE id=? AND state='preparing'", (row['id'],))
                 return
@@ -409,15 +489,15 @@ class LifeIllustrations:
                 return
             pending = evidence_for(context, row['window_start'], row['window_end'])[3]
             if pending or not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0] or not generator.availability()['supported']:
-                self.db.execute("UPDATE slots SET state='pending',brief=? WHERE id=? AND state='preparing'", (brief, row['id']))
+                self.db.execute("UPDATE slots SET state='pending',brief=?,summary=? WHERE id=? AND state='preparing'", (brief, summary, row['id']))
                 return
             request_id = row['request_id'] or str(uuid.uuid4())
             with self.write():
                 if not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0]:
                     self.db.execute("UPDATE slots SET state='pending' WHERE id=? AND state='preparing'", (row['id'],))
                     return
-                claimed = self.db.execute("UPDATE slots SET state='submitting',brief=?,request_id=?,attempt=attempt+1,updated_at=? WHERE id=? AND state='preparing'",
-                                          (brief, request_id, now, row['id'])).rowcount
+                claimed = self.db.execute("UPDATE slots SET state='submitting',brief=?,summary=?,request_id=?,attempt=attempt+1,updated_at=? WHERE id=? AND state='preparing'",
+                                          (brief, summary, request_id, now, row['id'])).rowcount
             if not claimed:
                 return
             def remember(response_id):

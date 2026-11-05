@@ -4,8 +4,10 @@ import Observation
 @MainActor @Observable
 public final class LifeIllustrationStore {
     public private(set) var settings = LifeIllustrationSettings()
+    public private(set) var hasLoadedSettings = false
     public private(set) var error: String?
     public private(set) var isRefreshing = false
+    public var isConfigured: Bool { client != nil }
     public var items: [LifeIllustration] { settings.canDisplayIllustrations ? cachedItems : [] }
     private var cachedItems: [LifeIllustration] = []
     private var assetURLs: [String: URL] = [:]
@@ -28,7 +30,7 @@ public final class LifeIllustrationStore {
         refreshTask?.cancel(); refreshTask = nil
         self.scope = scope
         cache = LifeIllustrationCache(directory: directory.appendingPathComponent(LifeIllustrationCache.digest(Data(scope.utf8))))
-        settings = LifeIllustrationSettings(); cachedItems = []; assetURLs = [:]
+        settings = LifeIllustrationSettings(); hasLoadedSettings = false; cachedItems = []; assetURLs = [:]
         refreshedAt = .distantPast; error = nil; isRefreshing = false
     }
 
@@ -54,6 +56,7 @@ public final class LifeIllustrationStore {
 
     public func invalidateSupport() {
         settings.supported = false
+        hasLoadedSettings = false
         refreshedAt = .distantPast
         revision += 1
         refreshTask?.cancel(); refreshTask = nil; isRefreshing = false
@@ -73,6 +76,7 @@ public final class LifeIllustrationStore {
                 try checkCurrent(revision)
                 guard LifeIllustrationSettings.allowedIntervals.contains(settings.intervalHours) else { throw LifeIllustrationError.invalidInterval }
                 self.settings = settings
+                self.hasLoadedSettings = true
                 refreshedAt = Date()
                 guard settings.canDisplayIllustrations else { error = nil; return }
                 var snapshot = try await cache.load()
@@ -140,6 +144,7 @@ public final class LifeIllustrationStore {
                 // A failed capability check cannot authorize displaying a previous provider's images.
                 if case AgentClientError.http(let status, _, _, _) = error, [401, 403, 404].contains(status) {
                     self.settings = LifeIllustrationSettings()
+                    self.hasLoadedSettings = false
                 }
             }
         }
@@ -156,6 +161,7 @@ public final class LifeIllustrationStore {
             let updated = try await client.updateLifeIllustrationSettings(enabled: enabled, intervalHours: intervalHours)
             try checkCurrent(revision)
             settings = updated
+            hasLoadedSettings = true
             error = nil
         } catch { self.error = error.localizedDescription; throw error }
     }

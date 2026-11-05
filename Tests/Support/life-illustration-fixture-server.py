@@ -24,6 +24,7 @@ def main():
     if now < boundary:
         boundary -= dt.timedelta(days=1)
     assets, items = {}, []
+    journey = json.loads((args.samples / 'journey_generation_evidence.json').read_text())
     for index, name in enumerate(('code', 'outdoor', 'night')):
         data = (args.samples / f'sample_{name}.png').read_bytes()
         thumbnail = (args.samples / f'sample_{name}_thumbnail.png').read_bytes()
@@ -38,8 +39,15 @@ def main():
         assets[sha] = data
         assets[thumbnail_sha] = thumbnail
         start = boundary.timestamp() + (6 + index * 3) * 3600
+        generated = journey['manifest']['items'][index]
+        shift = start - generated['window_start']
         items.append(dict(id=f'sample-{name}', deleted=False, window_start=start, window_end=start+10800,
-                          logical_day=boundary.date().isoformat(), timezone='Asia/Shanghai', place=None,
+                          logical_day=boundary.date().isoformat(), timezone='Asia/Shanghai', place=generated['place'],
+                          summary=generated['summary'], latitude=generated['latitude'], longitude=generated['longitude'],
+                          place_start=generated['place_start'] + shift, place_end=generated['place_end'] + shift,
+                          route_points=[dict(point, timestamp=point['timestamp'] + shift,
+                              end_timestamp=point['end_timestamp'] + shift if point.get('end_timestamp') is not None else None)
+                              for point in generated['route_points']],
                           asset_sha256=sha, thumbnail_sha256=thumbnail_sha, width=1024, height=1024,
                           source_ids=[f'acceptance-{name}'], created_at=start+11400, updated_at=start+11400))
     settings = dict(enabled=True, interval_hours=3, day_start_hour=8, provider='openai-codex', supported=True,
