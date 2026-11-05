@@ -713,6 +713,8 @@ final class DesktopModel {
             if tailnet.node != nil { await tailnet.close() }
             return
         }
+        let knownEndpoint = lastEmbeddedEndpoint ?? status?.tunnel.endpoint ?? status?.tunnel.configuredEndpoint
+        if lastEmbeddedEndpoint == nil, let knownEndpoint { lastEmbeddedEndpoint = knownEndpoint }
         var body: [String: Any] = ["state": "needs_setup", "error": String(localized: "请登录 Tailscale。")]
         var probeSession: URLSession?
         do {
@@ -734,15 +736,25 @@ final class DesktopModel {
                 body = ["state": "connected", "endpoint": url.absoluteString]
             } else {
                 tailnetAccessError = nil
-                body["error"] = tailnet.state == "Running" ? String(localized: "正在连接…") : tailnet.message ?? String(localized: "请登录 Tailscale。")
+                if let knownEndpoint, !["NeedsLogin", "NeedsMachineAuth"].contains(tailnet.state) {
+                    body = ["state": "reconnecting", "endpoint": knownEndpoint,
+                            "error": tailnet.state == "Running" ? String(localized: "正在连接…") : String(localized: "正在恢复连接…")]
+                } else {
+                    body["error"] = tailnet.state == "Running" ? String(localized: "正在连接…") : tailnet.message ?? String(localized: "请登录 Tailscale。")
+                }
             }
         } catch {
             if let probeSession { tailnet.failedRequest(error, session: probeSession) }
-            if tailnet.state == "Running", let lastEmbeddedEndpoint, embeddedProbeFailures < 2 {
+            if let knownEndpoint, !["NeedsLogin", "NeedsMachineAuth"].contains(tailnet.state) {
                 embeddedProbeFailures += 1
-                tailnet.prepareForForeground()
+                if embeddedProbeFailures >= 3 {
+                    embeddedProbeFailures = 0
+                    await tailnet.restartForRecovery()
+                } else {
+                    tailnet.prepareForForeground()
+                }
                 tailnetAccessError = nil
-                body = ["state": "reconnecting", "endpoint": lastEmbeddedEndpoint, "error": String(localized: "正在恢复连接…")]
+                body = ["state": "reconnecting", "endpoint": knownEndpoint, "error": String(localized: "正在恢复连接…")]
             } else {
                 tailnetAccessError = String(localized: "连接未完成，请重试。")
                 body["error"] = tailnetAccessError

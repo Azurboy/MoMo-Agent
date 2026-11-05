@@ -17,6 +17,9 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         // WatchConnectivity can launch the process without creating a SwiftUI scene.
         bootstrap.launch()
         bootstrap.runtime?.remoteAgent.notifications.start()
+        if application.applicationState != .background {
+            bootstrap.runtime?.remoteAgent.prewarmForLaunch()
+        }
         return true
     }
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

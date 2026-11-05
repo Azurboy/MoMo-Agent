@@ -62,6 +62,8 @@ public final class RemoteTaskStore {
     @ObservationIgnored public var onConnectionRestored: (() -> Void)?
     @ObservationIgnored private var connectionFailures = 0
     @ObservationIgnored private var connectionConfirmation: UInt64 = 0
+    @ObservationIgnored private var absorbedInitialStreamSocketFailure = false
+    @ObservationIgnored private var confirmedInCurrentForeground = false
     @ObservationIgnored private var serverRetryNotBefore: Date?
     private var serverIsThrottling: Bool { serverRetryNotBefore.map { now() < $0 } ?? false }
     @ObservationIgnored private var lifetime = UUID()
@@ -367,8 +369,17 @@ public final class RemoteTaskStore {
 
     public func foreground() {
         guard observing == nil, canContactServer else { return }
-        if connectionState == .unavailable { connectionState = .retrying }
-        nextConnectionAttempt = nil
+        confirmedInCurrentForeground = false
+        absorbedInitialStreamSocketFailure = false
+        if !serverIsThrottling {
+            connectionFailures = 0
+            nextConnectionAttempt = nil
+            if connectionState == .retrying { connectionState = .ready }
+        }
+        if connectionState == .unavailable {
+            connectionState = .retrying
+            nextConnectionAttempt = nil
+        }
         let id = UUID(); observationID = id
         observing = Task { [weak self] in
             // Upgrade older journals on entry. The durable shared inbox contract is
@@ -395,6 +406,8 @@ public final class RemoteTaskStore {
 
     public func background() {
         flushPendingPersistence()
+        absorbedInitialStreamSocketFailure = false
+        confirmedInCurrentForeground = false
         subscription?.stop(); subscription = nil
         loadingOlderMessages?.cancel(); loadingOlderMessages = nil
         warming?.cancel(); warming = nil
@@ -425,6 +438,7 @@ public final class RemoteTaskStore {
     public func refresh(userInitiated: Bool = false) async {
         if serverIsThrottling { return }
         if userInitiated, canContactServer {
+            absorbedInitialStreamSocketFailure = true
             if connectionState == .unavailable {
                 connectionState = .retrying
                 nextConnectionAttempt = nil
@@ -969,6 +983,12 @@ public final class RemoteTaskStore {
             }, failed: { [weak self] error in
                 guard let self, self.observationID == owner else { return }
                 self.flushPendingPersistence()
+                if !self.confirmedInCurrentForeground, !self.absorbedInitialStreamSocketFailure,
+                   self.connectionState == .ready, AgentTransportFailure.isSocketOrLinkFailure(error) {
+                    self.absorbedInitialStreamSocketFailure = true
+                    self.failures[.synchronization] = self.connectionErrorDescription(error)
+                    return
+                }
                 self.recordConnectionFailure(error)
                 self.failures[.synchronization] = self.connectionErrorDescription(error)
                 if error is StoreError || error is DecodingError { self.connectionState = .unavailable }
@@ -1020,6 +1040,7 @@ public final class RemoteTaskStore {
     }
 
     private func markConnectionReady() {
+        confirmedInCurrentForeground = true
         connectionState = .ready; connectionFailures = 0; nextConnectionAttempt = nil
         onConnectionRestored?()
     }

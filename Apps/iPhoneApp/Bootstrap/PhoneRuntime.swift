@@ -483,11 +483,11 @@ final class PhoneRuntime {
     func foreground() async {
         isForeground = true
         syncSpeechExecutionMode()
+        remoteAgent.foreground()
         let selectedDay = library.timeline.selectedDay
         let selectedSession = library.focusedSessionID
         await transcription?.setFocusedDay(selectedDay)
         await transcription?.setFocusedSessionID(selectedSession)
-        remoteAgent.foreground()
         if foregrounding {
             await withCheckedContinuation { foregroundWaiters.append($0) }
             return

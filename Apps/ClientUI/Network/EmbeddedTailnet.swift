@@ -31,14 +31,18 @@ final class EmbeddedTailnet {
     @ObservationIgnored private var needsRestart = false
     @ObservationIgnored private var needsProxyCheck = false
     @ObservationIgnored private var proxyCheck: Task<Void, Never>?
+    @ObservationIgnored private var needsPeerWarmup = true
+    @ObservationIgnored private var lastPeerWarmupAt: ContinuousClock.Instant?
+    @ObservationIgnored private var peerWarmup: Task<Void, Never>?
     @ObservationIgnored private var signingOut = false
     @ObservationIgnored private var signedOut = false
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathSignature: String?
     @ObservationIgnored private var consecutiveTransportFailures = 0
     @ObservationIgnored private var consecutivePeerMapTimeouts = 0
-    @ObservationIgnored var startupTimeout: Duration = .seconds(10)
-    @ObservationIgnored var peerMapTimeout: Duration = .seconds(8)
+    @ObservationIgnored var startupTimeout: Duration = .seconds(15)
+    @ObservationIgnored var peerMapTimeout: Duration = .seconds(12)
+    @ObservationIgnored var peerWarmupTimeout: Duration = .seconds(4)
 
     private static let startupStates: Set<String> = ["starting", "Starting", "NoState", "Stopped", "stopped"]
 
@@ -246,8 +250,10 @@ final class EmbeddedTailnet {
                 guard attempt == generation else { throw CancellationError() }
             }
         }
-        if peer != nil {
+        if let peer {
             consecutivePeerMapTimeouts = 0
+            await warmPeerIfNeeded(peer, node: node)
+            guard attempt == generation else { throw CancellationError() }
         }
         func cached() -> URLSession? { media ? desktopMediaSession : desktopControl ? desktopControlSession : interactive ? interactiveSession : session }
         if let cached = cached() { return cached }
@@ -292,7 +298,11 @@ final class EmbeddedTailnet {
                 self.lastPathSignature = signature
                 guard previous != nil, previous != signature else { return }
                 self.invalidateCachedSessions(finishTasks: true)
-                if self.node != nil { self.needsProxyCheck = true }
+                if self.node != nil {
+                    self.needsProxyCheck = true
+                    self.needsPeerWarmup = true
+                    self.lastPeerWarmupAt = nil
+                }
             }
         }
         monitor.start(queue: DispatchQueue(label: "com.momoagent.tailnet.path"))
@@ -309,19 +319,43 @@ final class EmbeddedTailnet {
 
     func suspendSessions() {
         watch?.cancel(); watch = nil
+        peerWarmup?.cancel(); peerWarmup = nil
         invalidateCachedSessions(finishTasks: false)
-        if node != nil { needsProxyCheck = true }
+        if node != nil {
+            needsProxyCheck = true
+            needsPeerWarmup = true
+            lastPeerWarmupAt = nil
+        }
     }
 
-    func prepareForForeground() {
+    func prewarm(peer: String?) {
+        guard !signingOut, !signedOut, proxySettingsError == nil else { return }
+        Task { [weak self] in
+            _ = try? await self?.connectedSession(peer: peer, interactive: true)
+        }
+    }
+
+    func prepareForForeground(peer: String? = nil) {
         // iOS can reclaim the SOCKS listener while suspended even if LocalAPI says Running.
         // A brief inactive scene does not mean that listener was reclaimed.
         if let existing = node {
             needsProxyCheck = true
+            needsPeerWarmup = true
+            lastPeerWarmupAt = nil
             if Self.startupStates.contains(state) {
                 ensureNodeUp(existing, attempt: generation)
             }
             ensureWatchRunning(attempt: generation)
+            if let peer, TailnetEndpoint.isAddress(peer) {
+                let attempt = generation
+                Task { [weak self] in
+                    guard let self, self.generation == attempt else { return }
+                    await self.checkProxyIfNeeded()
+                    guard self.generation == attempt, self.state == "Running",
+                          let currentNode = self.node, self.mappedAddresses.contains(peer) else { return }
+                    await self.warmPeerIfNeeded(peer, node: currentNode)
+                }
+            }
         }
     }
 
@@ -352,11 +386,105 @@ final class EmbeddedTailnet {
         if failedSession === desktopMediaSession { desktopMediaSession = nil }
         failedSession.finishTasksAndInvalidate()
         needsProxyCheck = true
+        needsPeerWarmup = true
         consecutiveTransportFailures += 1
         if consecutiveTransportFailures >= 6 {
             consecutiveTransportFailures = 0
             needsRestart = true
         }
+    }
+
+    private enum PeerPingOutcome: Sendable {
+        case reachable
+        case retryableFailure
+        case unsupported
+    }
+
+    private func warmPeerIfNeeded(_ peer: String, node: TailscaleNode) async {
+        if let peerWarmup {
+            await peerWarmup.value
+            return
+        }
+        guard needsPeerWarmup, TailnetEndpoint.isAddress(peer) else { return }
+        if let last = lastPeerWarmupAt, last.duration(to: .now) < .seconds(5) {
+            needsPeerWarmup = false
+            return
+        }
+        needsPeerWarmup = false
+        lastPeerWarmupAt = .now
+        let timeout = peerWarmupTimeout
+        let attempt = generation
+        let task = Task { [weak self] in
+            do {
+                let (configuration, loopback) = try await URLSessionConfiguration.tailscaleSession(node)
+                var proxies = configuration.proxyConfigurations
+                for i in proxies.indices { proxies[i].allowFailover = false }
+                configuration.proxyConfigurations = proxies
+                configuration.urlCache = nil
+                let probe = URLSession(configuration: configuration, delegate: TailnetNoRedirects(), delegateQueue: nil)
+                defer { probe.invalidateAndCancel() }
+                let loopbackAddress = loopback.address
+                let auth = "Basic " + Data("tsnet:\(loopback.localAPIKey)".utf8).base64EncodedString()
+                let encodedPeer = peer.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? peer
+                @Sendable func ping(_ kind: String, limit: TimeInterval) async -> PeerPingOutcome {
+                    guard let url = URL(string: "http://\(loopbackAddress)/localapi/v0/ping?ip=\(encodedPeer)&type=\(kind)") else {
+                        return .unsupported
+                    }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = limit
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    request.setValue(auth, forHTTPHeaderField: "Authorization")
+                    request.setValue("localapi", forHTTPHeaderField: "Sec-Tailscale")
+                    guard let (data, response) = try? await probe.data(for: request),
+                          let http = response as? HTTPURLResponse else {
+                        return .unsupported
+                    }
+                    guard http.statusCode == 200,
+                          let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        return .unsupported
+                    }
+                    let err = payload["Err"] as? String ?? ""
+                    return err.isEmpty ? .reachable : .retryableFailure
+                }
+                let seconds = max(0.2, Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18)
+                // Wake magicsock DERP + direct UDP discovery and confirm WireGuard tunnel readiness
+                // via LocalAPI before dialing through tsnet's 5-second SOCKS5 connect cutoff.
+                await withTaskGroup(of: Bool.self) { group in
+                    group.addTask {
+                        _ = await ping("disco", limit: min(2.5, seconds))
+                        return false
+                    }
+                    group.addTask {
+                        switch await ping("TSMP", limit: max(0.2, seconds * 0.65)) {
+                        case .reachable, .unsupported:
+                            return true
+                        case .retryableFailure:
+                            guard !Task.isCancelled else { return true }
+                            try? await Task.sleep(for: .milliseconds(200))
+                            guard !Task.isCancelled else { return true }
+                            _ = await ping("TSMP", limit: max(0.2, seconds * 0.45))
+                            return true
+                        }
+                    }
+                    group.addTask {
+                        try? await Task.sleep(for: timeout)
+                        return true
+                    }
+                    while let finished = await group.next() {
+                        if finished {
+                            group.cancelAll()
+                            break
+                        }
+                    }
+                }
+            } catch {}
+            _ = self
+            _ = attempt
+        }
+        peerWarmup = task
+        await task.value
+        if generation == attempt { peerWarmup = nil }
     }
 
     private func checkProxyIfNeeded() async {
@@ -411,6 +539,7 @@ final class EmbeddedTailnet {
         generation = UUID(); watch?.cancel(); watch = nil; up?.cancel(); up = nil
         pathMonitor?.cancel(); pathMonitor = nil; lastPathSignature = nil
         needsRestart = false; needsProxyCheck = false; proxyCheck = nil
+        peerWarmup?.cancel(); peerWarmup = nil; needsPeerWarmup = true; lastPeerWarmupAt = nil
         consecutiveTransportFailures = 0; consecutivePeerMapTimeouts = 0
         invalidateCachedSessions(finishTasks: false)
         let pending = startup

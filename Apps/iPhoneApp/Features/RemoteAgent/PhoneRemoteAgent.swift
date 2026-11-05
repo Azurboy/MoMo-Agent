@@ -43,13 +43,17 @@ final class PhoneRemoteAgent {
     private(set) var setupStep = SetupStep.welcome
     @ObservationIgnored private let directory: URL
     @ObservationIgnored private var active = false
+    @ObservationIgnored private var ancillaryStartupTask: Task<Void, Never>?
+    @ObservationIgnored private var connectionReadyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathSignature: String?
     @ObservationIgnored private lazy var replyContinuation = PhoneReplyContinuation(
         pending: { [weak self] in
-            (self?.store.map { $0.hasActiveTask || $0.waitingForReply } ?? false) || (self?.context?.isSyncing == true)
+            self?.store.map { $0.hasActiveTask || $0.waitingForReply } ?? false
         },
         suspend: { [weak self] in
+            self?.ancillaryStartupTask?.cancel(); self?.ancillaryStartupTask = nil
+            self?.resumeConnectionReadyWaiters()
             self?.context?.background(); self?.store?.background(); self?.network?.suspend()
             self?.tailnet.suspendSessions()
         })
@@ -161,14 +165,14 @@ final class PhoneRemoteAgent {
         defer { connecting = false }
         do {
             if connection.network == "tailscale" {
-                tailnet.prepareForForeground()
+                tailnet.prepareForForeground(peer: connection.baseURL.host)
                 do {
-                    try await Self.probeCapabilities(client, timeout: .seconds(12))
+                    try await Self.probeCapabilities(client, timeout: .seconds(16))
                 } catch {
                     guard AgentTransportFailure.isSocketOrLinkFailure(error) else { throw error }
                     try Task.checkCancellation()
                     await tailnet.restartForRecovery()
-                    try await Self.probeCapabilities(client, timeout: .seconds(15))
+                    try await Self.probeCapabilities(client, timeout: .seconds(18))
                 }
             } else {
                 network?.resume()
@@ -198,25 +202,76 @@ final class PhoneRemoteAgent {
         }
     }
 
+    func prewarmForLaunch() {
+        guard connection?.network == "tailscale", store?.canContactServer != false else { return }
+        tailnet.prewarm(peer: connection?.baseURL.host)
+    }
+
     func foreground() {
         guard !active else { return }
         active = true
         replyContinuation.foreground()
         startPathMonitor()
-        if connection?.network == "tailscale" { tailnet.prepareForForeground() }
+        if connection?.network == "tailscale" { tailnet.prepareForForeground(peer: connection?.baseURL.host) }
         guard store?.canContactServer != false else { return }
-        network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); store?.foreground(); notifications.foreground()
-        lifeIllustrations.startPolling()
+        network?.resume()
+        store?.foreground()
         onSummariesChanged?()
+        ancillaryStartupTask?.cancel()
+        if connection?.network == "tailscale" {
+            // Give first-screen chat handshake exclusive tunnel priority before ancillary syncs compete.
+            ancillaryStartupTask = Task { @MainActor [weak self] in
+                await self?.waitForConnectionReady(timeout: .milliseconds(2500))
+                guard let self, self.active, !Task.isCancelled, self.store?.canContactServer != false else { return }
+                self.context?.foreground()
+                self.health?.foreground()
+                self.sources?.foreground()
+                self.notifications.foreground()
+                self.lifeIllustrations.startPolling()
+            }
+        } else {
+            context?.foreground(); health?.foreground(); sources?.foreground(); notifications.foreground()
+            lifeIllustrations.startPolling()
+        }
     }
     func leavingForeground() {
         active = false
+        ancillaryStartupTask?.cancel(); ancillaryStartupTask = nil
+        resumeConnectionReadyWaiters()
         stopPathMonitor()
         context?.stopPolling(); health?.background(); sources?.background(); notifications.background()
         lifeIllustrations.stopPolling()
         replyContinuation.leavingForeground()
     }
     func background() { replyContinuation.background() }
+
+    private func resumeConnectionReadyWaiters() {
+        let waiters = connectionReadyWaiters
+        connectionReadyWaiters.removeAll()
+        for waiter in waiters.values { waiter.resume() }
+    }
+
+    private func waitForConnectionReady(timeout: Duration) async {
+        let waiterID = UUID()
+        let timer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            self?.connectionReadyWaiters.removeValue(forKey: waiterID)?.resume()
+        }
+        defer { timer.cancel() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard active, !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                connectionReadyWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.connectionReadyWaiters.removeValue(forKey: waiterID)?.resume()
+            }
+        }
+    }
     func sourcesChanged() {
         guard active, store?.canContactServer != false, let context else { return }
         PhoneConnectivityTask.run { await context.refresh() }
@@ -236,7 +291,7 @@ final class PhoneRemoteAgent {
                 self.lastPathSignature = signature
                 guard path.status == .satisfied, previous != nil, previous != signature,
                       self.store?.canContactServer != false else { return }
-                if self.connection?.network == "tailscale" { self.tailnet.prepareForForeground() }
+                if self.connection?.network == "tailscale" { self.tailnet.prepareForForeground(peer: self.connection?.baseURL.host) }
                 else { self.network?.resume() }
                 await self.store?.retryConnection(ifNeeded: true)
                 await self.context?.refresh()
@@ -302,6 +357,7 @@ final class PhoneRemoteAgent {
         }
         tasks.onConnectionRestored = { [weak self] in
             self?.failure = nil
+            self?.resumeConnectionReadyWaiters()
             Task { @MainActor [weak self] in await self?.lifeIllustrations.refresh() }
         }
         sync.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }

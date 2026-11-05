@@ -1,6 +1,8 @@
 """Exercise the real EmbeddedTailnet lifecycle with a deterministic, offline SDK double."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+import json
 import os
 import subprocess
 import tempfile
@@ -27,6 +29,13 @@ public enum Probe {
     nonisolated(unsafe) private static var upCalls = 0
     nonisolated(unsafe) private static var resumeRunningOnUp = false
     nonisolated(unsafe) private static var mappedPeers: [String] = []
+    nonisolated(unsafe) private static var protocolOverride: AnyClass?
+    public static func setProtocolOverride(_ cls: AnyClass?) {
+        lock.withLock { protocolOverride = cls }
+    }
+    public static var currentProtocolOverride: AnyClass? {
+        lock.withLock { protocolOverride }
+    }
     public static func configureLogin(state: String = "NeedsLogin", delay: Duration? = nil) {
         lock.withLock { loginState = state; loginDelay = delay; loginStarted = nil; loginRequests = 0 }
     }
@@ -90,13 +99,18 @@ public struct Loopback: Sendable {
 public extension URLSessionConfiguration {
     static func tailscaleSession(_ node: TailscaleNode) async throws -> (URLSessionConfiguration, Loopback) {
         try await Task.sleep(for: .milliseconds(20))
-        return (.ephemeral, Loopback())
+        let config = URLSessionConfiguration.ephemeral
+        if let cls = Probe.currentProtocolOverride {
+            config.protocolClasses = [cls]
+        }
+        return (config, Loopback())
     }
 }
 '''
 HARNESS = r'''
 import Foundation
 import TailscaleKit
+import MoMoAgentClient
 @main struct RecoveryTests {
     @MainActor static func main() async throws {
         let peer: [String: Any] = ["Active": true, "Online": true, "TailscaleIPs": ["100.64.0.2"],
@@ -328,9 +342,85 @@ import TailscaleKit
             activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
         }
         precondition(Probe.counts.0 == beforeStreakNodes + 1, "6 consecutive socket failures must recycle wedged node")
+
+        // Regression 5: Peer warmup triggers disco + TSMP LocalAPI pings and retries cold TSMP once.
+        let proxyAddr = ProcessInfo.processInfo.environment["MOMO_TEST_PROXY"]!
+        _ = try await URLSession.shared.data(from: URL(string: "http://\(proxyAddr)/reset-pings?fail_first_tsmp=1")!)
+        zombieNet.suspendSessions()
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        let (pingRaw, _) = try await URLSession.shared.data(from: URL(string: "http://\(proxyAddr)/pings")!)
+        let pingPayload = try JSONSerialization.jsonObject(with: pingRaw) as! [String: Any]
+        let tsmpCount = pingPayload["tsmp"] as? Int ?? 0
+        let discoCount = pingPayload["disco"] as? Int ?? 0
+        precondition(tsmpCount == 2 && discoCount >= 1, "Cold peer warmup must run disco and retry TSMP once on initial error")
+        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        let (cachedPingRaw, _) = try await URLSession.shared.data(from: URL(string: "http://\(proxyAddr)/pings")!)
+        let cachedPingPayload = try JSONSerialization.jsonObject(with: cachedPingRaw) as! [String: Any]
+        precondition((cachedPingPayload["tsmp"] as? Int) == 2, "Steady-state session reuse must not re-ping")
+
+        // Regression 6: EmbeddedTailnetTransport transparently retries safe pre-header socket failures (-1000 badURL) once.
+        Probe.setProtocolOverride(TransientPeerProtocol.self)
+        defer { Probe.setProtocolOverride(nil) }
+        zombieNet.suspendSessions()
+        let endpoint = URL(string: "http://100.118.16.18:8767")!
+        let transport = EmbeddedTailnetTransport(network: zombieNet, endpoint: endpoint)
+        TransientPeerProtocol.reset(failures: 1)
+        var getReq = URLRequest(url: endpoint.appendingPathComponent("momo/v1/conversation"))
+        getReq.httpMethod = "GET"
+        let getStream = try await transport.open(getReq)!
+        var body = Data()
+        for try await chunk in getStream.chunks { body.append(chunk) }
+        precondition(getStream.status == 200 && TransientPeerProtocol.attempts == 2,
+                     "GET must transparently recover from one SOCKS5 -1000 cutoff")
+
+        TransientPeerProtocol.reset(failures: 1)
+        var unsafePost = URLRequest(url: endpoint.appendingPathComponent("momo/v1/custom"))
+        unsafePost.httpMethod = "POST"
+        unsafePost.httpBody = Data("{}".utf8)
+        do {
+            _ = try await transport.open(unsafePost)
+            preconditionFailure("Non-idempotent POST without Idempotency-Key must not auto-retry")
+        } catch let error as URLError where error.code == .badURL {}
+        precondition(TransientPeerProtocol.attempts == 1, "Non-idempotent POST attempted only once")
+
         await zombieNet.close()
-        print("PASS: zombie Stopped recovery, wedged node recycle, peer netmap refresh/recycle and streak self-healing")
+        print("PASS: zombie Stopped recovery, wedged node recycle, peer netmap refresh/recycle, streak self-healing, peer warmup and pre-header retry")
     }
+}
+
+final class TransientPeerProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var remainingFailures = 0
+    nonisolated(unsafe) private static var seenAttempts = 0
+    static func reset(failures: Int) {
+        lock.withLock { remainingFailures = failures; seenAttempts = 0 }
+    }
+    static var attempts: Int { lock.withLock { seenAttempts } }
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "100.118.16.18"
+    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let shouldFail = Self.lock.withLock { () -> Bool in
+            Self.seenAttempts += 1
+            if Self.remainingFailures > 0 {
+                Self.remainingFailures -= 1
+                return true
+            }
+            return false
+        }
+        if shouldFail {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let data = Data("{\"ok\":true}".utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 '''
 
@@ -340,8 +430,53 @@ def run(*args):
 
 
 class HealthyProxy(BaseHTTPRequestHandler):
+    lock = threading.Lock()
+    pings = {"disco": 0, "tsmp": 0}
+    fail_first_tsmp = False
+
+    def _reply(self, payload):
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_GET(self):
-        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+        parsed = urlparse(self.path)
+        if parsed.path == "/reset-pings":
+            qs = parse_qs(parsed.query)
+            with self.lock:
+                self.pings["disco"] = 0
+                self.pings["tsmp"] = 0
+                HealthyProxy.fail_first_tsmp = qs.get("fail_first_tsmp") == ["1"]
+            self._reply({"ok": True})
+            return
+        if parsed.path == "/pings":
+            with self.lock:
+                snapshot = dict(self.pings)
+            self._reply(snapshot)
+            return
+        self._reply({})
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/localapi/v0/ping":
+            qs = parse_qs(parsed.query)
+            kind = (qs.get("type") or [""])[0]
+            err = ""
+            with self.lock:
+                if kind == "disco":
+                    self.pings["disco"] += 1
+                elif kind == "TSMP":
+                    self.pings["tsmp"] += 1
+                    if HealthyProxy.fail_first_tsmp:
+                        HealthyProxy.fail_first_tsmp = False
+                        err = "derp waking"
+            self._reply({"Err": err})
+            return
+        self._reply({})
+
     def log_message(self, *_args): pass
 
 
@@ -358,7 +493,9 @@ with tempfile.TemporaryDirectory(prefix="momo-tailnet-recovery-") as temporary:
         "-lTailscaleKit", "-lMoMoAgentClient", "-Xlinker", "-rpath", "-Xlinker", str(root),
         str(ROOT / "Apps/ClientUI/Network/TailnetDiagnostics.swift"),
         str(ROOT / "Apps/ClientUI/Network/TailnetProxySettings.swift"),
-        str(ROOT / "Apps/ClientUI/Network/EmbeddedTailnet.swift"), str(root / "RecoveryTests.swift"), "-o", str(root / "test"))
+        str(ROOT / "Apps/ClientUI/Network/EmbeddedTailnet.swift"),
+        str(ROOT / "Apps/ClientUI/Network/EmbeddedTailnetTransport.swift"),
+        str(root / "RecoveryTests.swift"), "-o", str(root / "test"))
     with ThreadingHTTPServer(("127.0.0.1", 0), HealthyProxy) as server:
         worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
         try:

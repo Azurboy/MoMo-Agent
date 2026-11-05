@@ -362,6 +362,36 @@ import XCTest
         let journalBytes = try Data(contentsOf: file).count
         XCTAssertLessThan(journalBytes, 16_384)
     }
+
+    func testForegroundClearsStaleBackgroundRetryingAndAbsorbsSingleInitialSocketWarmupFailure() async throws {
+        let (wire, store, _, _) = try fixture()
+        store.foreground()
+        try await eventually { await wire.subscriptions.count == 1 && store.connectionState == .ready }
+        await wire.appendMessage("initial message")
+        try await eventually { store.messages.count == 1 }
+
+        // Simulate iOS dropping the SSE socket right as the app transitions to background.
+        store.recordConnectionFailure(URLError(.networkConnectionLost))
+        XCTAssertEqual(store.connectionState, .retrying)
+        XCTAssertNotNil(store.nextConnectionAttempt)
+        store.background()
+
+        // Reopen with one transient SOCKS5/DERP warmup socket error (-1000 badURL) on the first stream attempt.
+        await wire.failSocketOnceOnSubscribe(.badURL)
+        store.foreground()
+        XCTAssertEqual(store.connectionState, .ready, "Stale background retrying state must not flash on first-screen reopen")
+        XCTAssertNil(store.nextConnectionAttempt)
+        try await eventually { await wire.subscriptions.count == 3 && store.connectionState == .ready }
+        await wire.appendMessage("after smooth foreground reopen")
+        try await eventually { store.messages.count == 2 }
+        XCTAssertEqual(store.connectionState, .ready)
+        store.background()
+
+        // If the peer genuinely remains unreachable across consecutive attempts, recovery UI must surface.
+        await wire.setLinkDown(true)
+        store.foreground(); defer { store.background() }
+        try await eventually { store.connectionState == .retrying }
+    }
 }
 
 private actor LiveWire: AgentTransport {
@@ -380,10 +410,14 @@ private actor LiveWire: AgentTransport {
     var delayedHandshake = false
     func delaySubscriptionHandshake() { delayedHandshake = true }
     var failedSubscription = false
+    var socketSubscribeFailure: URLError.Code?
+    var linkDown = false
     var badSubscriptionContentType = false
     var holdCompletion = false
     enum InterruptedTransport: Error { case closed }
     func failSubscriptionOnce() { failedSubscription = true }
+    func failSocketOnceOnSubscribe(_ code: URLError.Code) { socketSubscribeFailure = code }
+    func setLinkDown(_ value: Bool) { linkDown = value }
     func sendBadSubscriptionContentTypeOnce() { badSubscriptionContentType = true }
     func keepPostStreaming() { holdCompletion = true }
     func pushRun(_ run: [String: Any]) {
@@ -429,6 +463,7 @@ private actor LiveWire: AgentTransport {
     }
     func open(_ request: URLRequest) async throws -> AgentByteStream? {
         requests.append(request)
+        if linkDown { throw URLError(.badURL) }
         let path = request.url!.path
         if path == "/momo/v1/conversation" {
             return try json(["conversation_id":conversationID,"session_id":root,"assistant_id":connection.assistantID.uuidString,"instance_id":connection.instanceID.uuidString,
@@ -447,6 +482,7 @@ private actor LiveWire: AgentTransport {
             let after = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value!)!
             subscriptions.append(after)
             if delayedHandshake { try await Task.sleep(for: .milliseconds(100)) }
+            if let code = socketSubscribeFailure { socketSubscribeFailure = nil; throw URLError(code) }
             if failedSubscription { failedSubscription = false; throw InterruptedTransport.closed }
             if badSubscriptionContentType {
                 badSubscriptionContentType = false

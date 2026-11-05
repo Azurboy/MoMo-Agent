@@ -12,6 +12,16 @@ struct EmbeddedTailnetTransport: AgentTransport {
         await network.diagnostics.observePeer(endpoint.host)
         let desktop = url.path.hasPrefix("/desktop/")
         let media = desktop && ["frame", "frames"].contains(url.lastPathComponent)
+        do {
+            return try await openOnce(request, url: url, desktop: desktop, media: media)
+        } catch {
+            guard Self.canRetryBeforeResponse(request, after: error) else { throw error }
+            try await Task.sleep(for: .milliseconds(250))
+            return try await openOnce(request, url: url, desktop: desktop, media: media)
+        }
+    }
+
+    private func openOnce(_ request: URLRequest, url: URL, desktop: Bool, media: Bool) async throws -> AgentByteStream {
         let session = try await network.connectedSession(peer: endpoint.host, interactive: request.networkServiceType == .responsiveData,
                                                           desktopControl: desktop && !media, media: media)
         do {
@@ -45,6 +55,19 @@ struct EmbeddedTailnetTransport: AgentTransport {
             }
             throw error
         }
+    }
+
+    private static func canRetryBeforeResponse(_ request: URLRequest, after error: Error) -> Bool {
+        guard !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) else { return false }
+        let method = (request.httpMethod ?? "GET").uppercased()
+        let idempotent = ["GET", "HEAD"].contains(method) || request.value(forHTTPHeaderField: "Idempotency-Key") != nil
+        guard idempotent, request.httpBodyStream == nil else { return false }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            let code = URLError.Code(rawValue: nsError.code)
+            return [.badURL, .timedOut, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet].contains(code)
+        }
+        return AgentTransportFailure.isSocketOrLinkFailure(error)
     }
 }
 
