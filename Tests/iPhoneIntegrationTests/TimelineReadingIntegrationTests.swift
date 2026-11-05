@@ -512,6 +512,40 @@ final class TimelineReadingIntegrationTests: XCTestCase {
         if !passed { throw ReadingFailure.unsettled(stage) }
     }
 
+    func testTimelineHydratesCachedSummarySynchronouslyBeforeFirstListPresentation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoCachedSummaryFirstFrame-\(UUID())")
+        let lifetime = trackLifetime(at: root)
+        let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
+        lifetime.archive = archive
+        let (document, _) = try await fixture(archive: archive, root: root, at: Date())
+        let foundWindow = try await archive.timelineWindow(containing: document.source(for: document.spans[0]))
+        let seededWindow = try XCTUnwrap(foundWindow)
+        XCTAssertTrue(seededWindow.canSummarize)
+        let expectedSummary = "会议核心结论：确定下周上线端侧语音方案。"
+        let revision = seededWindow.summaryRevision
+
+        let model = TimelineModel(
+            archive: archive,
+            configurationFingerprint: nil,
+            cachedSummaries: { revisions in
+                revisions.contains(revision) ? [revision: expectedSummary] : [:]
+            },
+            summarize: { _ in
+                try await Task.sleep(for: .seconds(5))
+                return [revision: expectedSummary]
+            }
+        )
+        lifetime.timeline = model
+
+        await model.load(seededWindow.id.day)
+        let listed = try XCTUnwrap(model.listWindows[seededWindow.id.day]?.first { $0.id == seededWindow.id })
+        XCTAssertEqual(model.summary(for: listed), expectedSummary)
+        XCTAssertEqual(
+            TimelinePresentation.preview(listed, summary: model.summary(for: listed)),
+            expectedSummary
+        )
+    }
+
     private enum ReadingFailure: Error { case unsettled(String) }
 
     private func trackLifetime(at root: URL) -> ReadingLifetime {

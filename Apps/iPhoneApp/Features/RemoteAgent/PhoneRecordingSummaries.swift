@@ -36,6 +36,18 @@ final class PhoneRecordingSummaries {
         } else { saved = State(libraryID: archive.libraryInstanceID, connection: connection) }
     }
 
+    func cachedSummaries(for revisions: [String]) -> [String: String] {
+        var result: [String: String] = [:]
+        for revision in revisions {
+            if let receipt = saved.items[revision]?.receipt,
+               receipt.state == "done",
+               let text = receipt.text, !text.isEmpty {
+                result[revision] = text
+            }
+        }
+        return result
+    }
+
     func summaries(for windows: [TimelineWindow]) async throws -> [String: String] {
         let eligible = windows.filter(\.canSummarize)
         let valid = try await archive.validTimelineSummaryRevisions(eligible)

@@ -15,6 +15,10 @@ final class PhoneRemoteAgent {
     }
     @ObservationIgnored var onSummariesChanged: (() -> Void)?
 
+    func cachedRecordingSummaries(_ revisions: [String]) -> [String: String] {
+        context?.recordingSummaries?.cachedSummaries(for: revisions) ?? [:]
+    }
+
     func summarizeRecordings(_ windows: [TimelineWindow]) async throws -> [String: String] {
         guard let summaries = context?.recordingSummaries else { return [:] }
         return try await summaries.summaries(for: windows)

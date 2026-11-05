@@ -18,6 +18,7 @@ final class TimelineModel {
     private(set) var summaries: [TimelineWindowID: Summary] = [:]
     @ObservationIgnored let archive: ArchiveStore
     @ObservationIgnored let configurationFingerprint: String?
+    @ObservationIgnored private let cachedSummaries: (@MainActor ([String]) -> [String: String])?
     @ObservationIgnored private let summarize: (@Sendable ([TimelineWindow]) async throws -> [String: String])?
     @ObservationIgnored private var loadCounts: [TimelineDay: Int] = [:]
     @ObservationIgnored private var readRevision: UInt64 = 0
@@ -103,6 +104,7 @@ final class TimelineModel {
         detailRequests[value.id] = request
         if let preservingLayout, readingLayouts[value.id]?.token == preservingLayout,
            readingLayouts[value.id]?.window == value {
+            hydrateCachedSummaries(for: [value])
             queueSummaries([value])
             return (value, preservingLayout)
         }
@@ -133,6 +135,7 @@ final class TimelineModel {
         }
         let token = TimelineReadingLayoutToken(windowID: value.id, revision: value.revision, identity: UUID())
         readingLayouts[value.id] = ReadingLayout(token: token, window: value, anchors: anchors, sources: sources)
+        hydrateCachedSummaries(for: [value])
         if let index = snapshots[value.id.day]?.firstIndex(where: { $0.id == value.id }),
            snapshots[value.id.day]?[index] != value {
             snapshots[value.id.day]?[index] = value
@@ -221,8 +224,10 @@ final class TimelineModel {
     }
 
     init(archive: ArchiveStore, configurationFingerprint: String?,
+         cachedSummaries: (@MainActor ([String]) -> [String: String])? = nil,
          summarize: (@Sendable ([TimelineWindow]) async throws -> [String: String])? = nil) {
         self.archive = archive; self.configurationFingerprint = configurationFingerprint
+        self.cachedSummaries = cachedSummaries
         self.summarize = summarize
     }
 
@@ -230,7 +235,14 @@ final class TimelineModel {
         guard day <= TimelineDay(Date()) else { return }
         let changed = selectedDay != day
         selectedDay = day
-        if changed { onSelectedDayChanged?(day) }
+        if changed {
+            if let windows = snapshots[day] {
+                hydrateCachedSummaries(for: windows)
+                queueSummaries(windows)
+                requestSummaries?(day)
+            }
+            onSelectedDayChanged?(day)
+        }
     }
 
     func handleDayBoundaryChanged() {
@@ -263,8 +275,39 @@ final class TimelineModel {
     }
 
     func summary(for window: TimelineWindow) -> String? {
-        guard window.canSummarize, let value = summaries[window.id], value.revision == summaryRevision(for: window) else { return nil }
-        return value.text
+        guard window.canSummarize else { return nil }
+        let revision = summaryRevision(for: window)
+        if let value = summaries[window.id], value.revision == revision { return value.text }
+        if let text = cachedSummaries?([revision])[revision], !text.isEmpty { return text }
+        return nil
+    }
+
+    private func hydrateCachedSummaries(for windows: [TimelineWindow], pruneDay: TimelineDay? = nil) {
+        if let pruneDay {
+            let validIDs = Set(windows.map(\.id))
+            for existingID in summaries.keys where existingID.day == pruneDay && !validIDs.contains(existingID) {
+                summaries.removeValue(forKey: existingID)
+            }
+        }
+        var missingRevisions: [(id: TimelineWindowID, revision: String)] = []
+        for window in windows {
+            guard window.canSummarize else {
+                summaries.removeValue(forKey: window.id)
+                continue
+            }
+            let revision = summaryRevision(for: window)
+            if summaries[window.id]?.revision != revision {
+                summaries.removeValue(forKey: window.id)
+                missingRevisions.append((window.id, revision))
+            }
+        }
+        guard let cachedSummaries, !missingRevisions.isEmpty else { return }
+        let resolved = cachedSummaries(missingRevisions.map(\.revision))
+        for item in missingRevisions {
+            if let text = resolved[item.revision], !text.isEmpty {
+                summaries[item.id] = Summary(revision: item.revision, text: text)
+            }
+        }
     }
 
     func refresh() async {
@@ -281,7 +324,9 @@ final class TimelineModel {
            snapshots[day] != nil, failures[day] == nil, days.last == TimelineDay(Date()),
            let revision = try? await archive.timelineReadRevision(), loaded.archive == revision {
             guard !Task.isCancelled, selectedDay == day else { return }
-            queueSummaries(snapshots[day, default: []])
+            let currentWindows = snapshots[day, default: []]
+            hydrateCachedSummaries(for: currentWindows)
+            queueSummaries(currentWindows)
             requestSummaries?(day)
             return
         }
@@ -295,7 +340,7 @@ final class TimelineModel {
         loading.insert(day)
         defer {
             loadCounts[day, default: 0] -= 1
-            if loadCounts[day] == 0 { loadCounts.removeValue(forKey: day); loading.remove(day) }
+            if loadCounts[day, default: 0] == 0 { loadCounts.removeValue(forKey: day); loading.remove(day) }
         }
         while !Task.isCancelled {
             let expected = readRevision
@@ -305,6 +350,9 @@ final class TimelineModel {
                 try Task.checkCancellation()
                 guard expected == readRevision else { continue }
                 loadedRevisions[day] = (loaded.revision, expected)
+                // Hydrate already-completed summaries synchronously on MainActor BEFORE publishing
+                // `listWindows[day]` so SwiftUI never flashes raw transcript text on the first frame.
+                hydrateCachedSummaries(for: windows, pruneDay: day)
                 if snapshots[day] != windows {
                     let ids = Set(windows.map(\.id))
                     for previous in snapshots[day, default: []] where !ids.contains(previous.id) {
@@ -325,9 +373,6 @@ final class TimelineModel {
                 var cursor = min(earliestDay ?? today, day)
                 while cursor <= today { dates.append(cursor); cursor = cursor.adding(days: 1) }
                 if days != dates { days = dates }
-                for window in windows {
-                    if summaries[window.id]?.revision != summaryRevision(for: window) { summaries.removeValue(forKey: window.id) }
-                }
                 if snapshots.count > 7 {
                     let oldest = snapshots.keys.filter { $0 != selectedDay && $0 != day }
                         .max { abs($0.date().timeIntervalSince(selectedDay.date())) < abs($1.date().timeIntervalSince(selectedDay.date())) }
@@ -336,6 +381,9 @@ final class TimelineModel {
                         listWindows.removeValue(forKey: oldest); repeatedClockRanges.removeValue(forKey: oldest)
                         loadedRevisions.removeValue(forKey: oldest)
                         summaryFingerprints = summaryFingerprints.filter { $0.key.day != oldest }
+                        for staleID in summaries.keys where staleID.day == oldest {
+                            summaries.removeValue(forKey: staleID)
+                        }
                     }
                 }
                 if day == selectedDay { queueSummaries(windows); requestSummaries?(day) }
@@ -393,7 +441,9 @@ final class TimelineModel {
 
     func refreshCachedSummaries(day: TimelineDay? = nil) {
         let windows = snapshots.values.flatMap { $0 } + readingLayouts.values.map(\.window)
-        queueSummaries(windows.filter { day == nil || $0.id.day == day }, reload: true)
+        let filtered = windows.filter { day == nil || $0.id.day == day }
+        hydrateCachedSummaries(for: filtered)
+        queueSummaries(filtered, reload: true)
     }
 
     private func queueSummaries(_ windows: [TimelineWindow], reload: Bool = false) {

@@ -97,9 +97,16 @@ final class PhoneRuntime {
             modelDirectory: archive.rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/SpeechModels"),
             archive: archive)
         modelStatus = speech == nil ? .unavailable(speechFailure ?? String(localized: "本地转写模型未配置")) : .awaitingValidation
-        library = LibraryModel(archive: archive, configurationFingerprint: speech?.configurationFingerprint) { [weak remoteAgent] windows in
-            try await remoteAgent?.summarizeRecordings(windows) ?? [:]
-        }
+        library = LibraryModel(
+            archive: archive,
+            configurationFingerprint: speech?.configurationFingerprint,
+            cachedSummaries: { [weak remoteAgent] revisions in
+                remoteAgent?.cachedRecordingSummaries(revisions) ?? [:]
+            },
+            summarize: { [weak remoteAgent] windows in
+                try await remoteAgent?.summarizeRecordings(windows) ?? [:]
+            }
+        )
         self.speechFailure = speechFailure
         speechFingerprint = speech?.configurationFingerprint
         remoteAgent.transcriptionFingerprint = speech?.configurationFingerprint
@@ -239,7 +246,9 @@ final class PhoneRuntime {
         }
         backgroundTasks?.onFailure = { [weak self] message in self?.speechFailure = message }
         backgroundTasks?.onMemoryWarning = { [weak self] in
-            self?.speech?.releaseIdleResources(dropRecognizer: false)
+            guard let self else { return }
+            let dropIdleRecognizer = !self.isForeground && self.transcriptionSnapshot?.nativeInFlight != true
+            self.speech?.releaseIdleResources(dropRecognizer: dropIdleRecognizer)
         }
         backgroundTasks?.onSystemTaskStarting = { [weak self] in
             guard let self else { return }

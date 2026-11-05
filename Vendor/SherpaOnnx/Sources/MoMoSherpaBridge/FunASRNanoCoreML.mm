@@ -349,6 +349,10 @@ MLModel *LoadModelWithFallback(NSURL *compiledURL, NSString *functionName,
   NSArray<NSNumber *> *candidates =
 #if TARGET_OS_SIMULATOR
       @[ @(MLComputeUnitsCPUOnly) ];
+#elif TARGET_OS_IOS
+      // Never include MLComputeUnitsAll (Metal GPU) on iOS so background
+      // Watch-sync wakeups never trigger kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted.
+      @[ @(MLComputeUnitsCPUAndNeuralEngine), @(MLComputeUnitsCPUOnly) ];
 #else
       @[ @(MLComputeUnitsCPUAndNeuralEngine), @(MLComputeUnitsAll), @(MLComputeUnitsCPUOnly) ];
 #endif
@@ -518,6 +522,42 @@ std::unique_ptr<CoreMLBackend> CoreMLBackend::Create(
       __block bool prefill_ane = false;
       __block bool decode_ane = false;
       std::string errEnc, errPrefill, errDecode;
+#if TARGET_OS_IOS
+      // Load sequentially inside separate autoreleasepools on iOS so CoreML
+      // MIL/E5 load scratch buffers do not stack 3-way (+848 MB peak spike)
+      // against XNU background Jetsam limits during Watch-sync cold wakeups.
+      @autoreleasepool {
+        try {
+          bool ane = false;
+          loadedEnc = LoadModelWithFallback(encURL, nil, &ane);
+          enc_ane = ane;
+        } catch (const std::exception &e) {
+          errEnc = e.what();
+        }
+      }
+      if (errEnc.empty()) {
+        @autoreleasepool {
+          try {
+            bool ane = false;
+            loadedPrefill = LoadModelWithFallback(llmURL, @"prefill", &ane);
+            prefill_ane = ane;
+          } catch (const std::exception &e) {
+            errPrefill = e.what();
+          }
+        }
+      }
+      if (errEnc.empty() && errPrefill.empty()) {
+        @autoreleasepool {
+          try {
+            bool ane = false;
+            loadedDecode = LoadModelWithFallback(llmURL, @"decode", &ane);
+            decode_ane = ane;
+          } catch (const std::exception &e) {
+            errDecode = e.what();
+          }
+        }
+      }
+#else
       std::string *pErrEnc = &errEnc;
       std::string *pErrPrefill = &errPrefill;
       std::string *pErrDecode = &errDecode;
@@ -560,6 +600,7 @@ std::unique_ptr<CoreMLBackend> CoreMLBackend::Create(
         }
       });
       dispatch_group_wait(loadGroup, DISPATCH_TIME_FOREVER);
+#endif
 
       if (!errEnc.empty()) throw std::runtime_error(errEnc);
       if (!errPrefill.empty()) throw std::runtime_error(errPrefill);

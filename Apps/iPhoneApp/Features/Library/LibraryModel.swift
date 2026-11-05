@@ -242,10 +242,12 @@ final class LibraryModel {
     }
 
     init(archive: ArchiveStore, configurationFingerprint: String? = nil,
+         cachedSummaries: (@MainActor ([String]) -> [String: String])? = nil,
          summarize: (@Sendable ([TimelineWindow]) async throws -> [String: String])? = nil) {
         self.archive = archive
         self.configurationFingerprint = configurationFingerprint
-        timeline = TimelineModel(archive: archive, configurationFingerprint: configurationFingerprint, summarize: summarize)
+        timeline = TimelineModel(archive: archive, configurationFingerprint: configurationFingerprint,
+                                 cachedSummaries: cachedSummaries, summarize: summarize)
     }
 
     func updateCurrentWatchStatus(_ observation: WatchStatusObservation?) {
