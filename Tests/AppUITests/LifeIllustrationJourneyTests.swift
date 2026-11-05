@@ -7,24 +7,8 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         continueAfterFailure = false
         let app = launch(appearance: .light)
         defer { app.terminate() }
-        let picture = app.buttons["lifeIllustration.inline.sample-night"]
-        XCTAssertTrue(picture.waitForExistence(timeout: 30))
-        XCTAssertTrue(picture.isHittable)
-        XCTAssertGreaterThanOrEqual(picture.frame.height, 44)
-        XCTAssertLessThanOrEqual(picture.frame.height, 52)
-        XCTAssertLessThanOrEqual(picture.frame.width, 260)
-        XCTAssertLessThan(picture.frame.width, app.frame.width * 0.75)
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
-        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
-        let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
-        XCTAssertEqual(picture.frame.minX, preceding.frame.minX + 26, accuracy: 1)
-        XCTAssertEqual(picture.frame.minY, preceding.frame.maxY, accuracy: 1)
-        XCTAssertEqual(picture.frame.maxY, following.frame.minY, accuracy: 1)
-        XCTAssertFalse(app.buttons["timeline.journal"].exists)
-        XCTAssertTrue(app.staticTexts["明天再继续，今晚先休息。"].exists)
-        XCTAssertTrue(preceding.isHittable)
-        XCTAssertTrue(following.isHittable)
-        try assertConnectedSpine(app, beside: picture)
+        let picture = app.buttons["lifeIllustration.stamp.sample-night"]
+        try assertJournalStrip(app)
         attach(app, name: "01_iphone_timeline_inline")
         picture.tap()
         let caption = app.staticTexts["lifeIllustration.viewer.caption"]
@@ -49,6 +33,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
     }
 
     private func assertViewerInteractions(_ app: XCUIApplication, picture: XCUIElement) {
+        XCTAssertEqual(app.staticTexts["lifeIllustration.viewer.page"].label, "03 / 03")
         let caption = app.staticTexts["lifeIllustration.viewer.caption"]
         let viewer = app.descendants(matching: .any)["lifeIllustration.viewer.image"]
         XCTAssertGreaterThanOrEqual(viewer.frame.width, 300)
@@ -80,20 +65,24 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertTrue(app.buttons["lifeIllustration.viewer.close"].waitForExistence(timeout: 5))
         app.buttons["lifeIllustration.viewer.close"].tap()
         XCTAssertTrue(picture.isHittable)
+        picture.tap()
+        app.buttons["lifeIllustration.viewer.source"].tap()
+        XCTAssertTrue(app.navigationBars["转录详情"].waitForExistence(timeout: 5))
+        app.navigationBars["转录详情"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(picture.waitForExistence(timeout: 5))
+        app.buttons["timeline.search.toggle"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch.exists)
+        app.buttons["timeline.search.toggle"].tap()
+        XCTAssertTrue(picture.waitForExistence(timeout: 5))
     }
 
     func testDarkTimelineAndViewer() throws {
         continueAfterFailure = false
         let app = launch(appearance: .dark)
         defer { app.terminate() }
-        let picture = app.buttons["lifeIllustration.inline.sample-night"]
-        XCTAssertTrue(picture.waitForExistence(timeout: 30))
-        XCTAssertTrue(picture.isHittable)
-        XCTAssertGreaterThanOrEqual(picture.frame.height, 44)
-        XCTAssertLessThanOrEqual(picture.frame.height, 52)
-        XCTAssertLessThanOrEqual(picture.frame.width, 260)
+        let picture = app.buttons["lifeIllustration.stamp.sample-night"]
+        try assertJournalStrip(app)
         try assertDarkCanvas(app)
-        try assertConnectedSpine(app, beside: picture)
         attach(app, name: "01b_iphone_timeline_inline_dark")
         picture.tap()
         XCTAssertTrue(app.staticTexts["lifeIllustration.viewer.caption"].waitForExistence(timeout: 5))
@@ -129,14 +118,41 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertLessThan(rgba[2], 64)
     }
 
-    private func assertConnectedSpine(_ app: XCUIApplication, beside picture: XCUIElement) throws {
+    private func assertJournalStrip(_ app: XCUIApplication) throws {
+        let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
+        XCTAssertTrue(strip.waitForExistence(timeout: 30))
+        XCTAssertEqual(strip.frame.width, app.frame.width, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(strip.frame.height, 68)
+        XCTAssertLessThanOrEqual(strip.frame.height, 80)
+        XCTAssertGreaterThan(strip.frame.minY, app.frame.height * 0.65)
+        let cards = ["sample-code", "sample-outdoor", "sample-night"].map {
+            app.buttons["lifeIllustration.stamp.\($0)"]
+        }
+        for (index, card) in cards.enumerated() {
+            XCTAssertTrue(card.isHittable)
+            XCTAssertEqual(card.frame.width, 104, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(card.frame.height, 44)
+            XCTAssertLessThanOrEqual(card.frame.height, 60)
+            XCTAssertEqual(card.frame.minY, cards[0].frame.minY, accuracy: 1)
+            XCTAssertEqual(card.frame.minX, 24 + CGFloat(index) * 116, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(card.frame.minY, strip.frame.minY)
+            XCTAssertLessThanOrEqual(card.frame.maxY, strip.frame.maxY)
+        }
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
+        let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
+        XCTAssertTrue(preceding.isHittable)
+        XCTAssertTrue(following.isHittable)
+        XCTAssertEqual(preceding.frame.maxY, following.frame.minY, accuracy: 1)
+        XCTAssertLessThanOrEqual(following.frame.maxY, strip.frame.minY)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
         let image = try XCTUnwrap(app.screenshot().image.cgImage)
         let scale = CGFloat(image.width) / app.frame.width
-        let x = Int((picture.frame.minX - 20) * scale)
-        for y in stride(from: picture.frame.minY + 2, to: picture.frame.maxY - 2, by: 8) {
+        let x = Int((preceding.frame.minX + 6) * scale)
+        for y in stride(from: preceding.frame.maxY - 12, through: following.frame.minY + 6, by: 3) {
             let line = try pixel(image, x: x, y: Int(y * scale))
             let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
-            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8, "The timeline spine must pass through the entire illustration row.")
+            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
         }
     }
 

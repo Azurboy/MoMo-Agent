@@ -34,7 +34,7 @@ def png():
     out = io.BytesIO()
     image = Image.new('RGBA', (1024, 1024))
     image.paste((255, 255, 255, 255), (312, 212, 712, 812))
-    # Legacy transparent art keeps every stroke at its original position and scale.
+    # Semi-transparent ink survives while near-invisible stray alpha is removed.
     image.paste((30, 29, 27, 128), (292, 192, 300, 200))
     image.paste((30, 29, 27, 1), (1, 1, 5, 5))
     image.save(out, format='PNG')
@@ -132,18 +132,38 @@ class IllustrationTests(unittest.TestCase):
             self.assertEqual(1, len(self.generator.generated))
         finally: other.close()
 
-    def test_legacy_rgba_preserves_full_canvas_and_detached_ink(self):
-        from PIL import Image
-        self.generate()
-        row = self.row()
-        self.assertEqual((1024, 1024), (row['width'], row['height']))
-        original = Image.open(io.BytesIO(png()))
+    def test_transparent_png_builds_kiss_cut_sticker_with_transparent_corners(self):
+        from PIL import Image, ImageDraw
+        self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
+        artwork = Image.new('RGBA', (1024, 1024))
+        ImageDraw.Draw(artwork).ellipse((350, 350, 674, 674), fill='#161514')
+        artwork.putpixel((2, 2), (0, 0, 0, 10))
+        raw = io.BytesIO(); artwork.save(raw, format='PNG')
+        self.queue.save_image(self.row()['id'], raw.getvalue())
         for key, side in [('asset_sha256', 1024), ('thumbnail_sha256', 512)]:
-            with Image.open(io.BytesIO(self.queue.asset(row[key]))) as image:
+            with Image.open(io.BytesIO(self.queue.asset(self.row()[key]))) as image:
                 self.assertEqual('RGBA', image.mode)
                 self.assertEqual((side, side), image.size)
-                expected = original.resize((side, side), Image.Resampling.LANCZOS)
-                self.assertEqual(expected.tobytes(), image.tobytes())
+                for point in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)]:
+                    self.assertEqual(0, image.getpixel(point)[3])
+                self.assertEqual((22, 21, 20, 255), image.getpixel((side // 2, side // 2)))
+                self.assertIn((250, 248, 242, 255), image.getdata())
+                alpha = image.getchannel('A')
+                self.assertTrue(any(0 < value < 255 for value in alpha.getdata()))
+                bounds = alpha.getbbox()
+                if side == 512:
+                    self.assertGreaterEqual(max(bounds[2] - bounds[0], bounds[3] - bounds[1]), 464)
+                    self.assertLessEqual(max(bounds[2] - bounds[0], bounds[3] - bounds[1]), 468)
+                else:
+                    self.assertLess(max(bounds[2] - bounds[0], bounds[3] - bounds[1]), 800)
+
+    def test_transparent_processing_is_deterministic(self):
+        from PIL import Image
+        from life_illustration_sticker import kiss_cut_sticker
+        artwork = Image.open(io.BytesIO(png()))
+        first = kiss_cut_sticker(artwork)
+        second = kiss_cut_sticker(artwork)
+        self.assertEqual([image.tobytes() for image in first], [image.tobytes() for image in second])
 
     def test_editorial_rgb_preserves_negative_space_and_full_bleed_ground(self):
         from PIL import Image
@@ -381,7 +401,7 @@ class NativeImageStreamTests(unittest.TestCase):
         self.assertEqual(False, client.kwargs['store']); self.assertEqual(True, client.kwargs['stream'])
         self.assertEqual('1024x1024', client.kwargs['tools'][0]['size'])
         self.assertEqual('medium', client.kwargs['tools'][0]['quality'])
-        self.assertNotIn('background', client.kwargs['tools'][0])
+        self.assertEqual('transparent', client.kwargs['tools'][0]['background'])
         self.assertEqual('png', client.kwargs['tools'][0]['output_format'])
         content = client.kwargs['input'][0]['content']
         self.assertEqual('input_image', content[0]['type'])

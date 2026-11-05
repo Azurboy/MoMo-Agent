@@ -316,6 +316,8 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         let app = launch()
         XCTAssertFalse(app.buttons["timeline.journal"].exists)
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch.exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.stamp.")).firstMatch.exists)
     }
 
     private func launch(timelineFixture: String = "1") -> XCUIApplication {

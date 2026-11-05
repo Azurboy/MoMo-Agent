@@ -79,16 +79,10 @@ struct DesktopSources: View {
         illustrations.first { $0.id == selectedIllustrationID }
     }
 
-    private func illustrationsByWindow(_ windows: [DesktopTranscriptWindow]) -> [String: [LifeIllustration]] {
-        guard query.isEmpty else { return [:] }
+    private var dayIllustrations: [LifeIllustration] {
         let components = calendar.dateComponents([.year, .month, .day], from: day)
         let dayKey = String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
-        var result: [String: [LifeIllustration]] = [:]
-        for illustration in illustrations where illustration.logicalDay == dayKey {
-            guard let last = windows.last(where: { overlaps($0, illustration: illustration) }) else { continue }
-            result[last.id, default: []].append(illustration)
-        }
-        return result
+        return illustrations.filter { $0.logicalDay == dayKey }
     }
 
     private func overlaps(_ window: DesktopTranscriptWindow, illustration: LifeIllustration) -> Bool {
@@ -218,7 +212,6 @@ struct DesktopSources: View {
             }
             ScrollView {
                 let windows = visible
-                let insertedIllustrations = illustrationsByWindow(windows)
                 LazyVStack(spacing: 0) {
                     ForEach(windows) { item in
                         VStack(alignment: .leading, spacing: 0) {
@@ -230,7 +223,7 @@ struct DesktopSources: View {
                                     time: timeLabel(item),
                                     preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
                                     status: nil,
-                                    connected: item.id != windows.last?.id || !(insertedIllustrations[item.id] ?? []).isEmpty,
+                                    connected: item.id != windows.last?.id,
                                     isFinal: true,
                                     continuesFromPrevious: item.id != windows.first?.id
                                 ) {
@@ -242,19 +235,6 @@ struct DesktopSources: View {
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("desktop.source.\(item.id)")
                             .accessibilityAddTraits(selectedID == item.id && selectedIllustrationID == nil ? [.isSelected] : [])
-                            ForEach(insertedIllustrations[item.id] ?? []) { illustration in
-                                if let url = model.lifeIllustrations.imageURL(for: illustration) {
-                                    LifeIllustrationInlineView(
-                                        illustration: illustration,
-                                        thumbnailURL: url,
-                                        connected: item.id != windows.last?.id || illustration.id != insertedIllustrations[item.id]?.last?.id,
-                                        open: { selectedIllustrationID = illustration.id },
-                                        showSource: { showSource(for: illustration) },
-                                        delete: { deleteIllustration(illustration) }
-                                    )
-                                    .padding(.horizontal, 12)
-                                }
-                            }
                         }
                         .id(item.id)
                     }
@@ -275,6 +255,11 @@ struct DesktopSources: View {
                 .padding(.horizontal, 12).padding(.bottom, 24)
             }
             .scrollPosition(id: $timelineAnchor, anchor: .top)
+            if query.isEmpty, !dayIllustrations.isEmpty {
+                LifeIllustrationStripView(items: dayIllustrations, store: model.lifeIllustrations,
+                    open: { selectedIllustrationID = $0.id }, showSource: { showSource(for: $0) },
+                    failure: { illustrationError = $0 })
+            }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -407,7 +392,7 @@ private struct DesktopLifeIllustrationReader: View {
             .frame(minHeight: 44)
 
             GeometryReader { geometry in
-                let side = max(0, min(geometry.size.width, geometry.size.height - 48))
+                let side = max(0, min(geometry.size.width, geometry.size.height - 108))
                 VStack(spacing: 16) {
                     LifeIllustrationMetadata(illustration: illustration, position: position, count: count)
                         .frame(width: side)
@@ -425,6 +410,10 @@ private struct DesktopLifeIllustrationReader: View {
                         Button("查看依据", action: showSource)
                         Button("删除", role: .destructive, action: delete)
                     }
+                    Button("查看这段转录", action: showSource)
+                        .font(.caption).foregroundStyle(MoMoPalette.muted)
+                        .frame(minHeight: 44).buttonStyle(.plain)
+                        .accessibilityIdentifier("lifeIllustration.viewer.source")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

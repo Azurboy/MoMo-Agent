@@ -78,10 +78,17 @@ struct LibraryView: View {
         .watchStatusRefresh(requestWatchStatus)
         .navigationTitle("转录")
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if playback.activeTarget != nil {
-                AudioMiniPlayer(playback: playback, openRecording: { id in openRecording(id) },
-                    openWindow: { recordingID = nil; selectedWindow = TimelineDestination(windowID: $0) })
-                    .padding(.horizontal, 12).padding(.vertical, 8).background(MoMoPalette.canvas)
+            VStack(spacing: 0) {
+                if !searching, let illustrations, !selectedDayIllustrations.isEmpty {
+                    LifeIllustrationStripView(items: selectedDayIllustrations, store: illustrations,
+                        open: { selectedIllustration = $0 }, showSource: showIllustrationSource,
+                        failure: { navigationFailure = $0 })
+                }
+                if playback.activeTarget != nil {
+                    AudioMiniPlayer(playback: playback, openRecording: { id in openRecording(id) },
+                        openWindow: { recordingID = nil; selectedWindow = TimelineDestination(windowID: $0) })
+                        .padding(.horizontal, 12).padding(.vertical, 8).background(MoMoPalette.canvas)
+                }
             }
         }
         .navigationDestination(item: $selectedWindow) { destination in
@@ -122,20 +129,7 @@ struct LibraryView: View {
         }
         .fullScreenCover(item: $selectedIllustration) { item in
             if let illustrations {
-                LifeIllustrationViewer(store: illustrations, initialID: item.id) { source in
-                    Task {
-                        var calendar = Calendar(identifier: .gregorian)
-                        calendar.timeZone = TimeZone(identifier: source.timezone) ?? .current
-                        let sourceDay = TimelineDay(Date(timeIntervalSince1970: source.windowStart), calendar: calendar)
-                        await timeline.load(sourceDay)
-                        select(sourceDay)
-                        let windows = timeline.listWindows[sourceDay] ?? []
-                        if let window = windows.first(where: {
-                            $0.id.start.timeIntervalSince1970 < source.windowEnd && $0.end.timeIntervalSince1970 > source.windowStart
-                        }) { selectedWindow = TimelineDestination(windowID: window.id) }
-                        else { navigationFailure = String(localized: "这段转录已不可用，请刷新后重试。") }
-                    }
-                }
+                LifeIllustrationViewer(store: illustrations, initialID: item.id, showSource: showIllustrationSource)
             }
         }
         .alert("资料暂不可用", isPresented: Binding(get: { navigationFailure != nil }, set: { if !$0 { navigationFailure = nil } })) {
@@ -155,6 +149,32 @@ struct LibraryView: View {
             do { if !query.isEmpty { try await Task.sleep(for: .milliseconds(250)) } }
             catch { return }
             await model.search(query)
+        }
+    }
+
+    private var selectedDayIllustrations: [LifeIllustration] {
+        let day = timeline.selectedDay
+        let key = String(format: "%04d-%02d-%02d", day.year, day.month, day.day)
+        return (illustrations?.items ?? []).filter {
+            $0.logicalDay == key && illustrations?.imageURL(for: $0) != nil
+        }.sorted { $0.windowStart < $1.windowStart }
+    }
+
+    private func showIllustrationSource(_ source: LifeIllustration) {
+        Task {
+            let parts = source.logicalDay.split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3 else { return }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: source.timezone) ?? .current
+            guard let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) else { return }
+            let sourceDay = TimelineDay(calendarDate: date, calendar: calendar)
+            await timeline.load(sourceDay)
+            select(sourceDay)
+            let windows = timeline.listWindows[sourceDay] ?? []
+            if let window = windows.first(where: {
+                $0.id.start.timeIntervalSince1970 < source.windowEnd && $0.end.timeIntervalSince1970 > source.windowStart
+            }) { selectedWindow = TimelineDestination(windowID: window.id) }
+            else { navigationFailure = String(localized: "这段转录已不可用，请刷新后重试。") }
         }
     }
 
@@ -328,9 +348,6 @@ struct LibraryView: View {
                     ForEach(timeline.days) { day in
                         TimelineDayPage(day: day, timeline: timeline, reading: readingStates.state(for: day),
                             transcription: transcription, speechFailure: speechFailure, dateRange: dateRange,
-                            illustrations: illustrations,
-                            openIllustration: { selectedIllustration = $0 },
-                            illustrationFailure: { navigationFailure = $0 },
                             refresh: refresh, open: { selectedWindow = $0 })
                             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                             .id(day)
@@ -632,9 +649,6 @@ private struct TimelinePagerSnapshot: Equatable {
 @MainActor @Observable private final class TimelineDayReadingState {
     var position = ScrollPosition(idType: TimelineWindowID.self)
     var positioned = false
-    @ObservationIgnored var rowOffsets: [TimelineWindowID: CGFloat] = [:]
-    @ObservationIgnored var contentOffset: CGFloat = 0
-    @ObservationIgnored var insertionAnchor: (id: TimelineWindowID, y: CGFloat)?
 }
 
 private struct TimelineDayPage: View {
@@ -644,10 +658,6 @@ private struct TimelineDayPage: View {
     let transcription: TranscriptionSnapshot?
     let speechFailure: String?
     let dateRange: TimelineDateRange
-    let illustrations: LifeIllustrationStore?
-    let openIllustration: (LifeIllustration) -> Void
-    let illustrationFailure: (String) -> Void
-    @State private var displayedIllustrations: [LifeIllustration] = []
     let refresh: () async -> Void
     let open: (TimelineDestination) -> Void
 
@@ -657,12 +667,11 @@ private struct TimelineDayPage: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
                 ForEach(windows) { window in
-                    let inserted = illustrationsAfter(window.id, windows: windows)
                     VStack(alignment: .leading, spacing: 0) {
                         Button { open(TimelineDestination(windowID: window.id)) } label: {
                             TimelineRow(window: window, summary: timeline.summary(for: window),
                                 status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
-                                connected: window.id != windows.last?.id || !inserted.isEmpty,
+                                connected: window.id != windows.last?.id,
                                 continuesFromPrevious: window.id != windows.first?.id,
                                 includeUTCOffset: repeatedClockRanges.contains(window.id))
                         }
@@ -685,39 +694,14 @@ private struct TimelineDayPage: View {
                                 }
                             }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
                                 .overlay(alignment: .leading) {
-                                    if window.id != windows.last?.id || !inserted.isEmpty {
+                                    if window.id != windows.last?.id {
                                         Rectangle().fill(MoMoPalette.line).frame(width: 1)
                                             .frame(width: 12).accessibilityHidden(true)
                                     }
                                 }
                         }
-                        ForEach(inserted) { item in
-                            if let illustrations, let url = illustrations.imageURL(for: item) {
-                                LifeIllustrationInlineView(illustration: item, thumbnailURL: url,
-                                    connected: window.id != windows.last?.id || item.id != inserted.last?.id,
-                                    open: { openIllustration(item) },
-                                    showSource: { open(TimelineDestination(windowID: window.id)) },
-                                    delete: {
-                                        Task {
-                                            do { try await illustrations.delete(item) }
-                                            catch { illustrationFailure(error.localizedDescription) }
-                                        }
-                                    })
-                            }
-                        }
                     }
                     .id(window.id)
-                    .onGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.frame(in: .named(day)).minY
-                    } action: { y in
-                        reading.rowOffsets[window.id] = y
-                        if let anchor = reading.insertionAnchor, anchor.id == window.id, abs(y - anchor.y) > 0.5 {
-                            reading.insertionAnchor = nil
-                            var transaction = Transaction(); transaction.disablesAnimations = true
-                            withTransaction(transaction) { reading.position.scrollTo(y: max(0, reading.contentOffset + y - anchor.y)) }
-                        }
-                    }
-                    .onDisappear { reading.rowOffsets.removeValue(forKey: window.id) }
                 }
                 if let failure = timeline.failures[day] {
                     Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
@@ -743,25 +727,6 @@ private struct TimelineDayPage: View {
                     .allowsHitTesting(false)
             }
         }
-        .coordinateSpace(name: day)
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, offset in
-            reading.contentOffset = offset
-        }
-        .onChange(of: illustrations?.items ?? [], initial: true) { _, items in
-            let available = items.filter { illustrations?.imageURL(for: $0) != nil }
-            guard displayedIllustrations != available else { return }
-            // Preserve the first visible transcript and its exact offset when a new picture arrives above it.
-            if !displayedIllustrations.isEmpty || reading.positioned {
-                let offsets = reading.rowOffsets
-                if let id = reading.position.viewID(type: TimelineWindowID.self), let y = offsets[id] {
-                    reading.insertionAnchor = (id, y)
-                } else if let anchor = offsets.filter({ $0.value <= 0 }).max(by: { $0.value < $1.value })
-                    ?? offsets.filter({ $0.value > 0 }).min(by: { $0.value < $1.value }) {
-                    reading.insertionAnchor = (anchor.key, anchor.value)
-                }
-            }
-            displayedIllustrations = available
-        }
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(.top, for: .alignment)
         .scrollPosition(Binding(get: {
@@ -773,7 +738,6 @@ private struct TimelineDayPage: View {
         }))
         .onScrollPhaseChange { _, phase in
             guard day == timeline.selectedDay, phase == .tracking || phase == .interacting else { return }
-            reading.insertionAnchor = nil
             // A delayed first load must not take control back after the reader starts scrolling.
             reading.positioned = true
         }
@@ -797,15 +761,6 @@ private struct TimelineDayPage: View {
         // inset target horizontally and consume the 24pt page margin.
         .padding(.horizontal, 24)
     }
-
-    private func illustrationsAfter(_ id: TimelineWindowID, windows: [TimelineWindow]) -> [LifeIllustration] {
-        displayedIllustrations.filter { item in
-            windows.last(where: {
-                $0.id.start.timeIntervalSince1970 < item.windowEnd && $0.end.timeIntervalSince1970 > item.windowStart
-            })?.id == id
-        }
-    }
-
 }
 
 // The date controls stay outside the two-axis pager so changing days preserves
