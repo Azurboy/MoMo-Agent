@@ -144,13 +144,38 @@ import MoMoAgentClient
         do {
             let places = try await geocoder.reverseGeocodeLocation(CLLocation(latitude: latitude, longitude: longitude))
             guard enabled, let index = visits.firstIndex(where: { $0.id == record.id }), let place = places.first else { return }
-            let name = [place.locality, place.subLocality, place.name].compactMap { $0 }.joined(separator: " ")
+            let name = Self.formatVisitPlace(place)
             guard !name.isEmpty else { return }
             visits[index].title = name
             try saveVisits(); onChange?()
         } catch {
             // The visit's coordinates and times remain available when address lookup is offline.
         }
+    }
+    private nonisolated static func formatVisitPlace(_ place: CLPlacemark) -> String {
+        let aoi = place.areasOfInterest?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subLocality = place.subLocality?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let locality = place.locality?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let admin = place.administrativeArea?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let aoi, !aoi.isEmpty {
+            if let subLocality, !subLocality.isEmpty, !aoi.contains(subLocality) {
+                return "\(subLocality) · \(aoi)"
+            }
+            return aoi
+        }
+        if var rawName = place.name?.trimmingCharacters(in: .whitespacesAndNewlines), !rawName.isEmpty {
+            for prefix in [admin, locality].compactMap({ $0 }) where !prefix.isEmpty && rawName.count > prefix.count {
+                if rawName.hasPrefix(prefix) { rawName.removeFirst(prefix.count) }
+            }
+            rawName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawName.isEmpty {
+                if let subLocality, !subLocality.isEmpty, !rawName.contains(subLocality) {
+                    return "\(subLocality) · \(rawName)"
+                }
+                return rawName
+            }
+        }
+        return [locality, subLocality, place.thoroughfare].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
     }
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor [weak self] in

@@ -46,6 +46,72 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
         XCTAssertNotNil(legs[0].timeCaption)
     }
 
+    func testConsecutiveMomentsAtSamePlaceGroupIntoMultiImageStop() {
+        let morning = LifeIllustration(
+            id: "studio-morning", windowStart: 100, windowEnd: 200, logicalDay: "2026-11-05",
+            timezone: "Asia/Shanghai", place: "望京工作室",
+            assetSha256: String(repeating: "a", count: 64), thumbnailSha256: String(repeating: "b", count: 64),
+            width: 1024, height: 1024, sourceIds: ["s1"], createdAt: 1, updatedAt: 1,
+            summary: "上午讨论架构边界", latitude: 39.9960, longitude: 116.4740, placeStart: 100, placeEnd: 195
+        )
+        let afternoon = LifeIllustration(
+            id: "studio-afternoon", windowStart: 200, windowEnd: 300, logicalDay: "2026-11-05",
+            timezone: "Asia/Shanghai", place: "望京工作室",
+            assetSha256: String(repeating: "c", count: 64), thumbnailSha256: String(repeating: "d", count: 64),
+            width: 1024, height: 1024, sourceIds: ["s2"], createdAt: 2, updatedAt: 2,
+            summary: "下午继续整理接口", latitude: 39.9962, longitude: 116.4741, placeStart: 195, placeEnd: 295
+        )
+        let riverside = LifeIllustration(
+            id: "river-walk", windowStart: 320, windowEnd: 420, logicalDay: "2026-11-05",
+            timezone: "Asia/Shanghai", place: "亮马河畔步道",
+            assetSha256: String(repeating: "e", count: 64), thumbnailSha256: String(repeating: "f", count: 64),
+            width: 1024, height: 1024, sourceIds: ["s3"], createdAt: 3, updatedAt: 3,
+            summary: "傍晚沿河散步看落叶", latitude: 39.9502, longitude: 116.4628, placeStart: 325, placeEnd: 410
+        )
+
+        let stops = IllustrationJourneyStop.group(items: [morning, afternoon, riverside])
+        XCTAssertEqual(stops.count, 2)
+        XCTAssertEqual(stops[0].id, "studio-morning")
+        XCTAssertEqual(stops[0].illustrations.map(\.id), ["studio-morning", "studio-afternoon"])
+        XCTAssertEqual(stops[0].place, "望京工作室")
+        XCTAssertEqual(stops[0].startTime, 100)
+        XCTAssertEqual(stops[0].endTime, 295)
+        XCTAssertEqual(stops[1].illustrations.map(\.id), ["river-walk"])
+
+        let legs = IllustrationJourneyLeg.make(stops: stops, allItems: [morning, afternoon, riverside])
+        XCTAssertEqual(legs.count, 1)
+        XCTAssertEqual(legs[0].origin.id, "studio-morning")
+        XCTAssertEqual(legs[0].destination.id, "river-walk")
+
+        let pins = ["studio-morning": CGPoint(x: 260, y: 180), "river-walk": CGPoint(x: 190, y: 360)]
+        let cards = JourneyCallout.layout(stops: stops, allStops: stops, pins: pins, size: CGSize(width: 402, height: 677))
+        XCTAssertEqual(cards.count, 2)
+        XCTAssertEqual(cards[0].frame.height, 124)
+        XCTAssertEqual(cards[1].frame.height, 98)
+        XCTAssertFalse(cards[0].frame.intersects(cards[1].frame))
+    }
+
+    func testSinglePageLayoutFitsManyStopsWithoutPagination() {
+        let items = (0..<6).map { item(index: $0) }
+        let stops = IllustrationJourneyStop.group(items: items)
+        XCTAssertEqual(stops.count, 6)
+        let size = CGSize(width: 402, height: 677)
+        let pins = Dictionary(uniqueKeysWithValues: stops.enumerated().map { idx, stop in
+            (stop.id, CGPoint(x: 196 + CGFloat((idx % 3) - 1) * 28, y: 95 + CGFloat(idx) * 92))
+        })
+        let fitted = JourneyCallout.selectFittingStops(from: stops, focusedID: stops[0].id, size: size)
+        XCTAssertEqual(fitted.count, 6)
+        let cards = JourneyCallout.layout(stops: fitted, allStops: stops, pins: pins, size: size)
+        XCTAssertEqual(cards.count, 6)
+        for card in cards {
+            XCTAssertTrue(card.compact)
+            XCTAssertTrue(CGRect(origin: .zero, size: size).contains(card.frame))
+        }
+        for (first, second) in zip(cards, cards.dropFirst()) {
+            XCTAssertFalse(first.frame.intersects(second.frame))
+        }
+    }
+
     private func item(index: Int, points: [LifeIllustrationRoutePoint] = []) -> LifeIllustration {
         LifeIllustration(id: "stop-\(index)", windowStart: Double(index * 200 + 100),
             windowEnd: Double(index * 200 + 200), logicalDay: "2026-11-05", timezone: "Asia/Shanghai",

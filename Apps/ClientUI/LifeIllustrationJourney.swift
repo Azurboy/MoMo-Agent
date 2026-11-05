@@ -16,29 +16,114 @@ extension LifeIllustration {
     }
 
     var stayCaption: String {
-        guard let placeStart, let placeEnd else { return caption }
+        guard let placeStart, let placeEnd else { return clock(windowStart) + "–" + clock(windowEnd) }
         return clock(placeStart) + "–" + clock(placeEnd)
     }
 }
 
+struct IllustrationJourneyStop: Identifiable, Equatable {
+    let id: String
+    let illustrations: [LifeIllustration]
+
+    var primary: LifeIllustration { illustrations[0] }
+
+    var coordinate: CLLocationCoordinate2D? {
+        illustrations.lazy.compactMap(\.coordinate).first
+    }
+
+    var place: String? {
+        illustrations.lazy
+            .compactMap { $0.place?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    var startTime: Double {
+        illustrations.compactMap(\.placeStart).min() ?? illustrations.map(\.windowStart).min() ?? 0
+    }
+
+    var endTime: Double {
+        illustrations.compactMap(\.placeEnd).max() ?? illustrations.map(\.windowEnd).max() ?? 0
+    }
+
+    var stayCaption: String {
+        primary.clock(startTime) + "–" + primary.clock(endTime)
+    }
+
+    func contains(id itemID: String) -> Bool {
+        illustrations.contains { $0.id == itemID }
+    }
+
+    static func group(items: [LifeIllustration]) -> [Self] {
+        let sorted = items.sorted { $0.windowStart < $1.windowStart }
+        let allWaypoints = sorted.flatMap(\.routePoints).filter { $0.kind == "waypoint" }.sorted { $0.timestamp < $1.timestamp }
+        var groups: [[LifeIllustration]] = []
+
+        for item in sorted {
+            guard var current = groups.last, let previous = current.last else {
+                groups.append([item])
+                continue
+            }
+            if shouldMerge(current: current, previous: previous, next: item, waypoints: allWaypoints) {
+                current.append(item)
+                groups[groups.count - 1] = current
+            } else {
+                groups.append([item])
+            }
+        }
+        return groups.map { Self(id: $0[0].id, illustrations: $0) }
+    }
+
+    private static func shouldMerge(
+        current: [LifeIllustration],
+        previous: LifeIllustration,
+        next: LifeIllustration,
+        waypoints: [LifeIllustrationRoutePoint]
+    ) -> Bool {
+        if let anchor = current.lazy.compactMap(\.coordinate).first, let candidate = next.coordinate {
+            let anchorPoint = MKMapPoint(anchor)
+            guard anchorPoint.distance(to: MKMapPoint(candidate)) <= 160 else { return false }
+            let gapStart = previous.placeEnd ?? previous.windowEnd
+            let gapEnd = next.placeStart ?? next.windowStart
+            let wanderedAway = waypoints.contains { point in
+                guard point.timestamp >= gapStart, point.timestamp <= gapEnd else { return false }
+                let coord = CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
+                return CLLocationCoordinate2DIsValid(coord) && anchorPoint.distance(to: MKMapPoint(coord)) > 400
+            }
+            return !wanderedAway
+        }
+        if current.allSatisfy({ $0.coordinate == nil }), next.coordinate == nil {
+            let lhs = previous.place?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rhs = next.place?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return !lhs.isEmpty && lhs == rhs
+        }
+        return false
+    }
+}
+
 struct IllustrationJourneyLeg: Identifiable {
-    let origin: LifeIllustration
-    let destination: LifeIllustration
+    let origin: IllustrationJourneyStop
+    let destination: IllustrationJourneyStop
     let coordinates: [CLLocationCoordinate2D]
     var id: String { origin.id + "/" + destination.id }
     var timeCaption: String? {
-        guard let departure = origin.placeEnd, let arrival = destination.placeStart, arrival >= departure else { return nil }
-        return origin.clock(departure) + " → " + destination.clock(arrival)
+        guard let departure = origin.illustrations.last?.placeEnd,
+              let arrival = destination.illustrations.first?.placeStart,
+              arrival >= departure else { return nil }
+        return origin.primary.clock(departure) + " → " + destination.primary.clock(arrival)
     }
 
     static func make(items: [LifeIllustration]) -> [Self] {
-        let stops = items.filter { $0.coordinate != nil }
-        let points = items.flatMap(\.routePoints).sorted { $0.timestamp < $1.timestamp }
-        return zip(stops, stops.dropFirst()).compactMap { origin, destination in
+        make(stops: IllustrationJourneyStop.group(items: items), allItems: items)
+    }
+
+    static func make(stops: [IllustrationJourneyStop], allItems: [LifeIllustration]) -> [Self] {
+        let located = stops.filter { $0.coordinate != nil }
+        let points = allItems.flatMap(\.routePoints).sorted { $0.timestamp < $1.timestamp }
+        return zip(located, located.dropFirst()).compactMap { origin, destination in
             guard let from = origin.coordinate, let to = destination.coordinate,
                   MKMapPoint(from).distance(to: MKMapPoint(to)) > 30 else { return nil }
-            let start = origin.placeEnd ?? origin.windowEnd
-            let end = destination.placeStart ?? destination.windowStart
+            let start = origin.illustrations.last?.placeEnd ?? origin.endTime
+            let end = destination.illustrations.first?.placeStart ?? destination.startTime
             let waypoints = points.filter { $0.kind == "waypoint" && $0.timestamp >= start && $0.timestamp <= end }
             var coordinates = [from]
             for point in waypoints {
@@ -53,58 +138,138 @@ struct IllustrationJourneyLeg: Identifiable {
     }
 }
 
+struct JourneyMapCommand: Equatable {
+    enum Action: Equatable {
+        case zoomIn
+        case zoomOut
+        case fitAll
+    }
+    let id: Int
+    let action: Action
+}
+
 struct JourneyProjection: Equatable {
     var pins: [String: CGPoint] = [:]
     var routes: [String: [CGPoint]] = [:]
     var fitted: Set<String> = []
     var mapLoaded = false
     var mapFailed = false
+    var cameraCustomized = false
 }
 
 struct JourneyCallout: Identifiable {
-    let item: LifeIllustration
+    let stop: IllustrationJourneyStop
     let number: Int
     let pin: CGPoint
     let frame: CGRect
     let right: Bool
-    var id: String { item.id }
+    let compact: Bool
+    var id: String { stop.id }
+    var item: LifeIllustration { stop.primary }
 
-    static func layout(items: [LifeIllustration], allItems: [LifeIllustration], pins: [String: CGPoint], size: CGSize) -> [Self] {
-        let width = min(220, size.width * 0.55)
-        let height: CGFloat = 112
-        let bottom = max(12, size.height - height - 22)
-        let ordered = items.sorted { (pins[$0.id]?.y ?? 0) < (pins[$1.id]?.y ?? 0) }
-        var positions = ordered.map { item in min(bottom, max(12, (pins[item.id]?.y ?? 0) + 38)) }
-        for index in positions.indices.dropFirst() {
-            positions[index] = max(positions[index], positions[index - 1] + height + 14)
+    static func cardHeight(for stop: IllustrationJourneyStop, compact: Bool = false) -> CGFloat {
+        if compact {
+            return stop.illustrations.count > 1 ? 66 : 56
         }
-        if let last = positions.last, last > bottom {
-            positions[positions.count - 1] = bottom
-            for index in positions.indices.dropLast().reversed() {
-                positions[index] = min(positions[index], positions[index + 1] - height - 14)
+        return stop.illustrations.count > 1 ? 124 : 98
+    }
+
+    static func selectFittingStops(
+        from stops: [IllustrationJourneyStop],
+        focusedID: String,
+        size: CGSize
+    ) -> [IllustrationJourneyStop] {
+        guard stops.count > 3 else { return stops }
+        let available = max(120, size.height - 34)
+        let avgHeight: CGFloat = 62
+        let maxCount = max(3, Int((available + 6) / (avgHeight + 6)))
+        guard stops.count > maxCount else { return stops }
+
+        var chosenIndices = Set<Int>([0, stops.count - 1])
+        if let focusIdx = stops.firstIndex(where: { $0.contains(id: focusedID) }) {
+            chosenIndices.insert(focusIdx)
+        }
+        let slotsNeeded = max(0, maxCount - chosenIndices.count)
+        if slotsNeeded > 0 {
+            for step in 1...slotsNeeded {
+                let idx = Int(round(Double(step) * Double(stops.count - 1) / Double(slotsNeeded + 1)))
+                chosenIndices.insert(min(stops.count - 1, max(0, idx)))
             }
         }
+        return chosenIndices.sorted().map { stops[$0] }
+    }
+
+    static func layout(items: [LifeIllustration], allItems: [LifeIllustration], pins: [String: CGPoint], size: CGSize) -> [Self] {
+        let stops = IllustrationJourneyStop.group(items: items)
+        let allStops = IllustrationJourneyStop.group(items: allItems)
+        return layout(stops: stops, allStops: allStops, pins: pins, size: size)
+    }
+
+    static func layout(
+        stops: [IllustrationJourneyStop],
+        allStops: [IllustrationJourneyStop],
+        pins: [String: CGPoint],
+        size: CGSize
+    ) -> [Self] {
+        guard !stops.isEmpty else { return [] }
+        let ordered = stops.sorted { (pins[$0.id]?.y ?? 0) < (pins[$1.id]?.y ?? 0) }
+        let fullHeights = ordered.map { Self.cardHeight(for: $0, compact: false) }
+        let available = max(120, size.height - 34)
+        let compact = ordered.count >= 4 || (fullHeights.reduce(0, +) + CGFloat(max(0, ordered.count - 1)) * 12 > available)
+        let width = compact ? min(182, size.width * 0.46) : min(202, size.width * 0.51)
+        let heights = ordered.map { Self.cardHeight(for: $0, compact: compact) }
+        let rawSpacing: CGFloat = compact ? 8 : 12
+        let maxFittableSpacing = ordered.count > 1
+            ? max(4, floor((available - heights.reduce(0, +)) / CGFloat(ordered.count - 1)))
+            : rawSpacing
+        let spacing = min(rawSpacing, maxFittableSpacing)
+
+        var positions: [CGFloat] = []
+        for (idx, stop) in ordered.enumerated() {
+            let h = heights[idx]
+            let bottom = max(12, size.height - h - 22)
+            var y = min(bottom, max(12, (pins[stop.id]?.y ?? 0) + (compact ? 22 : 30)))
+            if idx > 0 {
+                y = max(y, positions[idx - 1] + heights[idx - 1] + spacing)
+            }
+            positions.append(y)
+        }
+        if let lastIdx = positions.indices.last {
+            let lastBottom = max(12, size.height - heights[lastIdx] - 22)
+            if positions[lastIdx] > lastBottom {
+                positions[lastIdx] = lastBottom
+                for index in positions.indices.dropLast().reversed() {
+                    positions[index] = max(12, min(positions[index], positions[index + 1] - heights[index] - spacing))
+                }
+            }
+        }
+
         struct Candidate {
             let y: CGFloat
             let cost: CGFloat
             let previous: Int?
         }
+        let pinClearanceX: CGFloat = compact ? -14 : -18
+        let pinClearanceY: CGFloat = compact ? -10 : -15
         var rows: [[Candidate]] = []
-        for item in ordered {
-            let index = allItems.firstIndex(where: { $0.id == item.id }) ?? 0
-            let x: CGFloat = index.isMultiple(of: 2) ? size.width - width - 14 : 14
+        for (rowIdx, stop) in ordered.enumerated() {
+            let height = heights[rowIdx]
+            let bottom = max(12, size.height - height - 22)
+            let globalIndex = allStops.firstIndex(where: { $0.id == stop.id }) ?? rowIdx
+            let x: CGFloat = globalIndex.isMultiple(of: 2) ? size.width - width - 14 : 14
             let previous = rows.last ?? []
+            let prevHeight: CGFloat = rowIdx > 0 ? heights[rowIdx - 1] : 0
             var candidates: [Candidate] = []
             var previousIndex = 0
             var best: Int?
             for y in stride(from: CGFloat(12), through: bottom, by: 4) {
-                while previousIndex < previous.count && previous[previousIndex].y + height + 14 <= y {
+                while previousIndex < previous.count && previous[previousIndex].y + prevHeight + spacing <= y {
                     if best == nil || previous[previousIndex].cost < previous[best!].cost { best = previousIndex }
                     previousIndex += 1
                 }
-                let frame = CGRect(x: x, y: y, width: width, height: height).insetBy(dx: -26, dy: -24)
+                let frame = CGRect(x: x, y: y, width: width, height: height).insetBy(dx: pinClearanceX, dy: pinClearanceY)
                 guard !pins.values.contains(where: { frame.contains($0) }), rows.isEmpty || best != nil else { continue }
-                let pinY = pins[item.id]?.y ?? size.height / 2
+                let pinY = pins[stop.id]?.y ?? size.height / 2
                 let distance = abs(y + height / 2 - pinY)
                 candidates.append(Candidate(y: y, cost: distance + (best.map { previous[$0].cost } ?? 0), previous: best))
             }
@@ -116,11 +281,18 @@ struct JourneyCallout: Identifiable {
                 if let previous = rows[index][cursor].previous { cursor = previous }
             }
         }
-        return zip(ordered, positions).map { item, y in
-            let index = allItems.firstIndex(where: { $0.id == item.id }) ?? 0
-            let right = index.isMultiple(of: 2)
-            return Self(item: item, number: index + 1, pin: pins[item.id] ?? .zero,
-                frame: CGRect(x: right ? size.width - width - 14 : 14, y: max(12, y), width: width, height: height), right: right)
+        return ordered.enumerated().map { rowIdx, stop in
+            let height = heights[rowIdx]
+            let globalIndex = allStops.firstIndex(where: { $0.id == stop.id }) ?? rowIdx
+            let right = globalIndex.isMultiple(of: 2)
+            return Self(
+                stop: stop,
+                number: globalIndex + 1,
+                pin: pins[stop.id] ?? .zero,
+                frame: CGRect(x: right ? size.width - width - 14 : 14, y: max(12, positions[rowIdx]), width: width, height: height),
+                right: right,
+                compact: compact
+            )
         }
     }
 }
@@ -148,7 +320,6 @@ func journeySmoothedPoints(_ raw: [CGPoint], seed: Int = 0) -> [CGPoint] {
     }
     guard deduped.count >= 2 else { return deduped }
 
-    // Subdivide overly long straight chords with a subtle hand-drawn wave so routes never look ruler-straight.
     var waved: [CGPoint] = [deduped[0]]
     for index in 1..<deduped.count {
         let start = deduped[index - 1], end = deduped[index]
@@ -246,7 +417,6 @@ func journeyCardConnector(pin: CGPoint, frame: CGRect, right: Bool) -> (path: Pa
     } else if verticalGap > 0 {
         let topEdge = pin.y < frame.midY
         anchor = CGPoint(x: clampedX, y: topEdge ? frame.minY : frame.maxY)
-        let spanX = anchor.x - pin.x
         let spanY = anchor.y - pin.y
         let bowX: CGFloat = right ? -24 : 24
         control1 = CGPoint(x: pin.x + bowX, y: pin.y + spanY * 0.38)

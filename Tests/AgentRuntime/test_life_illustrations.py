@@ -21,12 +21,16 @@ sys.path[:0] = [str(ROOT / 'Apps/MacApp/Context'), str(ROOT / 'Apps/MacApp/Runti
                 str(ROOT / 'Apps/MacApp/Access'), str(ROOT / 'Vendor/HermesAgent')]
 from context_store import ContextStore, digest
 from context_server import ContextService
-from life_illustrations import LifeIllustrations, evidence_for, visit_evidence, trajectory_evidence, window_at
+from life_illustrations import LifeIllustrations, evidence_for, is_dense_conversation, visit_evidence, trajectory_evidence, window_at
 from life_illustration_generator import CodexIllustrationGenerator, ImageRejected, parse_scene_output
 from rtc_transport import permitted_route
 
 READY = dict(provider='openai-codex', supported=True, service_status='ready')
-TEXT = '两个人在桌边讨论新的模块边界，还没有确定最终方案。他们用不同形状的积木摆出数据流，正在尝试重新连接两个模块。'
+TEXT = (
+    '两个人在桌边讨论新的模块边界，还没有确定最终方案。'
+    '他们用不同形状的积木摆出数据流，正在尝试重新连接两个模块，'
+    '并逐一核对接口字段与超时重试逻辑，看看高并发下哪里还会出现阻塞，最后决定先写一版最小原型验证。'
+)
 
 
 def png():
@@ -226,7 +230,11 @@ class IllustrationTests(unittest.TestCase):
         changed['text_sha256'] = digest(changed['spans'][0]['text'])
         self.context.sync_source(changed); self.queue.reconcile(self.context)
         self.assertEqual('ready', self.row()['state'])
-        changed['version'] += 1; changed['spans'][0]['text'] = '实际上是在公园讨论种植，不是在室内讨论代码。'
+        changed['version'] += 1
+        changed['spans'][0]['text'] = (
+            '两个人在公园长椅旁讨论阳台种植计划，还没有确定最终土壤配比。'
+            '他们翻看笔记本里的日照记录，正在对比几种耐阴植物在秋季的浇水频率与通风条件。'
+        )
         changed['text_sha256'] = digest(changed['spans'][0]['text'])
         self.context.sync_source(changed); self.queue.reconcile(self.context)
         self.assertEqual('invalid', self.row()['state']); self.assertTrue(self.queue.manifest()['items'][-1]['deleted'])
@@ -434,6 +442,89 @@ class IllustrationTests(unittest.TestCase):
         self.assertTrue(first['items'][0]['deleted'])  # The old ready event no longer references pruned pixels.
         second = self.queue.manifest(first['next_cursor'], 1)
         self.assertTrue(second['items'][0]['deleted']); self.assertFalse(second['has_more'])
+
+    def test_short_remarks_and_filler_words_are_excluded(self):
+        short_text = '今天中午吃什么？去楼下吃碗牛肉面吧，顺便买杯咖啡。'
+        filler_text = '嗯，啊，好的好的，对对对，哈哈哈哈，那个，就是说，行吧，没问题，OK，明白明白！' * 6
+        self.assertFalse(is_dense_conversation(short_text))
+        self.assertFalse(is_dense_conversation(filler_text))
+        self.assertTrue(is_dense_conversation(TEXT))
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        ctx = ContextStore(data / 'context'); self.addCleanup(ctx.close)
+        queue = LifeIllustrations(data); self.addCleanup(queue.close)
+        queue.update_settings({'enabled': True}, READY, self.start)
+        spans = [
+            dict(id=str(uuid.uuid4()), recorded_at=self.start + 120, text=short_text),
+            dict(id=str(uuid.uuid4()), recorded_at=self.start + 1200, text=filler_text),
+        ]
+        body = '\n'.join(s['text'] for s in spans)
+        ctx.sync_source(dict(
+            library_id=str(uuid.uuid4()), session_id=str(uuid.uuid4()), device_id=str(uuid.uuid4()),
+            generation=0, version=1, deleted=False, recorded_at=self.start + 120,
+            spans=spans, text_sha256=digest(body),
+        ))
+        queue.scan(ctx, self.start + 4 * 3600)
+        self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+
+    def test_batch_interval_admits_multiple_dense_conversations_beyond_eight_per_day(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        ctx = ContextStore(data / 'context'); self.addCleanup(ctx.close)
+        queue = LifeIllustrations(data); self.addCleanup(queue.close)
+        queue.update_settings({'enabled': True, 'interval_hours': 3}, READY, self.start)
+        # 10 distinct dense conversations across one logical day (3 inside the first 08:00-11:00 batch alone)
+        offsets = [600, 2400, 4800, 11400, 14400, 22200, 25200, 33000, 36600, 45000]
+        spans = [
+            dict(id=str(uuid.uuid4()), recorded_at=self.start + offset, text=f'第{idx + 1}场讨论：{TEXT}')
+            for idx, offset in enumerate(offsets)
+        ]
+        body = '\n'.join(s['text'] for s in spans)
+        ctx.sync_source(dict(
+            library_id=str(uuid.uuid4()), session_id=str(uuid.uuid4()), device_id=str(uuid.uuid4()),
+            generation=0, version=1, deleted=False, recorded_at=self.start + 600,
+            spans=spans, text_sha256=digest(body),
+        ))
+        # Before the first 3h batch (08:00-11:00) settles, nothing is queued even though episodes 1-3 finished >1h ago.
+        queue.scan(ctx, self.start + 3 * 3600 + 599)
+        self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        # Once the first 3h batch settles at 11:10, all 3 morning episodes enter together as a batch.
+        queue.scan(ctx, self.start + 3 * 3600 + 600)
+        self.assertEqual(3, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        # After all batches of the day settle, all 10 dense conversations (> 24/3 = 8) become individual illustrations.
+        now = self.start + 16 * 3600
+        queue.scan(ctx, now)
+        self.assertEqual(10, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        while queue.advance(self.generator, ctx, now):
+            pass
+        items = [item for item in queue.manifest()['items'] if not item['deleted']]
+        self.assertEqual(10, len(items))
+        self.assertEqual([self.start + offset for offset in offsets], [item['window_start'] for item in items])
+
+    def test_conversation_crossing_batch_boundary_stays_uncut(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        ctx = ContextStore(data / 'context'); self.addCleanup(ctx.close)
+        queue = LifeIllustrations(data); self.addCleanup(queue.close)
+        queue.update_settings({'enabled': True, 'interval_hours': 3}, READY, self.start)
+        # Conversation runs across 11:00 (10:54 -> 11:02 -> 11:09 -> 11:16) with <10min gaps
+        times = [3 * 3600 - 360, 3 * 3600 + 120, 3 * 3600 + 540, 3 * 3600 + 960]
+        spans = [dict(id=str(uuid.uuid4()), recorded_at=self.start + t, text=TEXT) for t in times]
+        body = '\n'.join(s['text'] for s in spans)
+        ctx.sync_source(dict(
+            library_id=str(uuid.uuid4()), session_id=str(uuid.uuid4()), device_id=str(uuid.uuid4()),
+            generation=0, version=1, deleted=False, recorded_at=self.start + times[0],
+            spans=spans, text_sha256=digest(body),
+        ))
+        # At 11:10 (first batch settle), the ongoing conversation is NOT cut at 11:00.
+        queue.scan(ctx, self.start + 3 * 3600 + 600)
+        self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        # At 14:10 (second batch settle), the entire cross-boundary conversation enters as a single uncut episode.
+        queue.scan(ctx, self.start + 6 * 3600 + 600)
+        rows = queue.db.execute('SELECT * FROM slots').fetchall()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(self.start + times[0], rows[0]['window_start'])
+        self.assertGreater(rows[0]['window_end'], self.start + times[-1])
 
     def test_access_route_allowlist(self):
         base = '/context/v1/life-illustrations/'

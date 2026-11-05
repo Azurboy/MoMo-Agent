@@ -10,15 +10,22 @@ enum LifeIllustrationPaper {
 }
 
 extension LifeIllustration {
-    var shortClockCaption: String {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: timezone) ?? .current
-        let start = calendar.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: windowStart))
-        let end = calendar.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: windowEnd))
-        if start.minute == 0, end.minute == 0 {
-            return String(format: "%02d–%02d", start.hour ?? 0, end.hour ?? 0)
+    var stampExcerpt: String {
+        if let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            return summary
         }
-        return String(format: "%02d:%02d", start.hour ?? 0, start.minute ?? 0)
+        if let place = place?.trimmingCharacters(in: .whitespacesAndNewlines), !place.isEmpty {
+            return place
+        }
+        return caption
+    }
+
+    var stampPlaceEyebrow: String? {
+        guard let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty,
+              let place = place?.trimmingCharacters(in: .whitespacesAndNewlines), !place.isEmpty else {
+            return nil
+        }
+        return place
     }
 
     var stickerAngle: Double {
@@ -30,15 +37,17 @@ extension LifeIllustration {
 struct LifeIllustrationStripView: View {
     let items: [LifeIllustration]
     let store: LifeIllustrationStore
+    var horizontalMargin: CGFloat? = nil
     let open: (LifeIllustration) -> Void
     let showSource: (LifeIllustration) -> Void
     let failure: (String) -> Void
 
     private var margin: CGFloat {
+        if let horizontalMargin { return horizontalMargin }
         #if os(macOS)
-        16
+        return 16
         #else
-        24
+        return 24
         #endif
     }
 
@@ -55,7 +64,7 @@ struct LifeIllustrationStripView: View {
             .padding(.horizontal, margin)
             .accessibilityHidden(true)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         if let url = store.imageURL(for: item) {
                             LifeIllustrationStampCard(illustration: item, thumbnailURL: url, index: index,
@@ -68,9 +77,9 @@ struct LifeIllustrationStripView: View {
                         }
                     }
                 }
-                .padding(.horizontal, margin).padding(.vertical, 8)
+                .padding(.horizontal, margin).padding(.vertical, 9)
             }
-            .frame(height: 68)
+            .frame(height: 75)
         }
         .frame(maxWidth: .infinity)
         .background(MoMoPalette.canvas, ignoresSafeAreaEdges: [])
@@ -91,32 +100,34 @@ struct LifeIllustrationStampCard: View {
     var body: some View {
         Button(action: open) {
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(illustration.shortClockCaption)
-                        .font(.system(size: 9.5, weight: .regular, design: .monospaced))
-                    Spacer(minLength: 8)
-                    if let place = illustration.place, !place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(place).font(.system(size: 8.5)).opacity(0.85)
-                    } else {
-                        Text(String(format: "№%02d", index + 1))
-                            .font(.system(size: 8, design: .monospaced)).opacity(0.50)
+                VStack(alignment: .leading, spacing: 3) {
+                    if let place = illustration.stampPlaceEyebrow {
+                        Text(place)
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundStyle(MoMoPalette.muted)
+                            .lineLimit(1)
                     }
+                    Text(illustration.stampExcerpt)
+                        .font(.system(size: 10.5, weight: .regular))
+                        .foregroundStyle(MoMoPalette.ink.opacity(0.88))
+                        .lineSpacing(1.3)
+                        .lineLimit(illustration.stampPlaceEyebrow == nil ? 3 : 2)
+                        .multilineTextAlignment(.leading)
                 }
-                .lineLimit(1).foregroundStyle(MoMoPalette.muted)
-                .padding(.leading, 9).padding(.vertical, 7)
-                .frame(width: 50, alignment: .leading)
+                .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 6)
+                .frame(width: 92, height: 56, alignment: .leading)
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: 6))
-                    path.addLine(to: CGPoint(x: 0, y: 46))
+                    path.addLine(to: CGPoint(x: 0, y: 50))
                 }
                 .stroke(MoMoPalette.line.opacity(0.85), style: StrokeStyle(lineWidth: 0.5, dash: [1.8, 2.4]))
                 .frame(width: 0.5)
                 LifeIllustrationImageView(url: thumbnailURL)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 44, height: 44)
                     .rotationEffect(.degrees(illustration.stickerAngle))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(width: 104, height: 52)
+            .frame(width: 144, height: 56)
             .background {
                 PostageStampTicketShape().fill(LifeIllustrationPaper.fill(for: colorScheme))
                     .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.045), radius: 2.5, x: 0, y: 1)
@@ -125,7 +136,7 @@ struct LifeIllustrationStampCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.dateCaption)
+        .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.stampExcerpt)
         .accessibilityIdentifier("lifeIllustration.stamp.\(illustration.id)")
         .contextMenu {
             Button("查看依据", systemImage: "text.alignleft", action: showSource)
