@@ -11,6 +11,7 @@ import MoMoSpeech
 final class PhoneRuntime {
     let archive: ArchiveStore
     let remoteAgent: PhoneRemoteAgent
+    var lifeIllustrations: LifeIllustrationStore { remoteAgent.lifeIllustrations }
     let playback: AudioPlaybackController
     let speechSettings: PhoneSpeechSettings
     let library: LibraryModel
@@ -99,6 +100,7 @@ final class PhoneRuntime {
         }
         self.speechFailure = speechFailure
         speechFingerprint = speech?.configurationFingerprint
+        remoteAgent.transcriptionFingerprint = speech?.configurationFingerprint
         speechSettings.onVADThresholdChanged = { [weak self] in
             guard let self else { return }
             Task { await self.transcription?.invalidateAnalysisPrefetch() }
@@ -386,6 +388,7 @@ final class PhoneRuntime {
                 try await test.stageTimeline(in: archive, fingerprint: speechFingerprint)
 #if targetEnvironment(simulator)
                 try await test.connectRemoteFixture(remoteAgent)
+                try await test.configureLifeIllustrations(lifeIllustrations)
 #endif
                 try await test.stageWatchStatus(in: archive, receiver: receiver)
                 if test.showStatusFailure { statusFailure = String(localized: "手表状态暂时无法更新，请稍后重试。") }

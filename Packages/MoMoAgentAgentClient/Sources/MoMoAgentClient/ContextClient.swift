@@ -2,6 +2,11 @@ import Foundation
 import CryptoKit
 
 public struct SourceEnvelope: Codable, Sendable, Equatable {
+    public struct PendingTranscriptionRange: Codable, Sendable, Equatable {
+        public let start: Double
+        public let end: Double
+        public init(start: Double, end: Double) { self.start = start; self.end = end }
+    }
     public struct Span: Codable, Sendable, Equatable {
         public let id: String
         public let text: String
@@ -23,18 +28,20 @@ public struct SourceEnvelope: Codable, Sendable, Equatable {
     public let recordedAt: Double
     public let spans: [Span]
     public let textSha256: String
+    public var pendingTranscriptionRanges: [PendingTranscriptionRange]?
     public var sourceID: String { libraryId + "/" + sessionId }
     public init(library: UUID, session: UUID, device: UUID, generation: Int64, version: Int64,
-                deleted: Bool = false, recordedAt: Date, spans: [Span]) {
+                deleted: Bool = false, recordedAt: Date, spans: [Span], pendingTranscriptionRanges: [PendingTranscriptionRange]? = nil) {
         libraryId = library.uuidString.lowercased(); sessionId = session.uuidString.lowercased()
         deviceId = device.uuidString.lowercased(); self.generation = generation; self.version = version
         self.deleted = deleted; self.recordedAt = recordedAt.timeIntervalSince1970; self.spans = spans
         textSha256 = SHA256.hash(data: Data(spans.map(\.text).joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        self.pendingTranscriptionRanges = pendingTranscriptionRanges
     }
     public func tombstone() -> SourceEnvelope {
         SourceEnvelope(library: UUID(uuidString: libraryId)!, session: UUID(uuidString: sessionId)!,
                        device: UUID(uuidString: deviceId)!, generation: generation + 1, version: 0, deleted: true,
-                       recordedAt: Date(timeIntervalSince1970: recordedAt), spans: [])
+                       recordedAt: Date(timeIntervalSince1970: recordedAt), spans: [], pendingTranscriptionRanges: [])
     }
 }
 

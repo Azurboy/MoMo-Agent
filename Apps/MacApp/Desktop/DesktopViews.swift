@@ -429,7 +429,7 @@ struct DesktopSettings: View {
         [Page.advanced, .model, .memory, .pairing].filter { destination in
             let terms: [String]
             switch destination {
-            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), "Hermes", "SuperAgent", "Proactive"]
+            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), String(localized: "生活插画"), "Hermes", "SuperAgent", "Proactive"]
             case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude"]
             case .memory: terms = [String(localized: "记忆")]
             case .pairing: terms = [String(localized: "设备"), String(localized: "配对手机"), String(localized: "远程访问")]
@@ -577,6 +577,10 @@ struct DesktopSettings: View {
                         .frame(width: 112)
                         .accessibilityIdentifier("settings.dayStartHour")
                     }.desktopSettingsRow()
+                }
+                DesktopSettingsGroup("生活插画") {
+                    LifeIllustrationSettingsControls(store: model.lifeIllustrations)
+                        .desktopSettingsRow()
                 }
                 DesktopSettingsGroup("运行环境") {
                     if model.hasBundledRuntime {

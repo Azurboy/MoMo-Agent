@@ -84,6 +84,8 @@ final class RemoteContextSyncTests: XCTestCase {
     }
     func testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery() async throws {
         let (sync, root, archive, _) = try fixture()
+        let fingerprint = ContentHash.sha256(Data("pending-sync-test".utf8))
+        sync.configurationFingerprint = fingerprint
         let audio = Self.makeWAVFixture()
         func deliver(sessionID: UUID, anchor: Date) async throws {
             let envelope = try ManifestEnvelope(manifest: ChunkManifest(
@@ -97,7 +99,7 @@ final class RemoteContextSyncTests: XCTestCase {
         }
         let transcribedSession = UUID()
         try await deliver(sessionID: transcribedSession, anchor: Date(timeIntervalSince1970: 1_790_000_000))
-        let claimed = try await archive.claimAnalysisJob(configurationHash: "model-v1")
+        let claimed = try await archive.claimAnalysisJob(configurationHash: fingerprint)
         let ticket = try XCTUnwrap(claimed)
         _ = try await archive.commitTranscript(ticket: ticket, spans: [
             TranscriptSpan(chunkID: ticket.chunkID, frames: ticket.manifest.frames, text: "已经转写完成的录音")
@@ -105,23 +107,42 @@ final class RemoteContextSyncTests: XCTestCase {
         // Newer recording whose only recognition result was punctuation (version == 1, spans == []).
         let punctuationSession = UUID()
         try await deliver(sessionID: punctuationSession, anchor: Date(timeIntervalSince1970: 1_790_000_050))
-        let claimedPunctuation = try await archive.claimAnalysisJob(configurationHash: "model-v1")
+        let claimedPunctuation = try await archive.claimAnalysisJob(configurationHash: fingerprint)
         let punctuationTicket = try XCTUnwrap(claimedPunctuation)
         _ = try await archive.commitTranscript(ticket: punctuationTicket, spans: [
             TranscriptSpan(chunkID: punctuationTicket.chunkID, frames: punctuationTicket.manifest.frames, text: "，。")
         ])
         // Newest recording without any transcript version yet (appears first on recordingsPage).
-        try await deliver(sessionID: UUID(), anchor: Date(timeIntervalSince1970: 1_790_000_100))
+        let pendingSession = UUID()
+        try await deliver(sessionID: pendingSession, anchor: Date(timeIntervalSince1970: 1_790_000_100))
         await sync.refresh()
         XCTAssertNil(sync.failure)
         XCTAssertEqual(sync.pendingSources, 0)
-        XCTAssertEqual(MemoryResponse.state.syncedSourceIDs, ["\(archive.libraryInstanceID.uuidString.lowercased())/\(transcribedSession.uuidString.lowercased())"])
+        let sourcePrefix = archive.libraryInstanceID.uuidString.lowercased() + "/"
+        XCTAssertEqual(MemoryResponse.state.syncedSourceIDs, [sourcePrefix + pendingSession.uuidString.lowercased(), sourcePrefix + transcribedSession.uuidString.lowercased()])
+        let pending = try XCTUnwrap(MemoryResponse.state.sourcePayloads.first)
+        XCTAssertTrue(pending.spans.isEmpty)
+        XCTAssertEqual(pending.pendingTranscriptionRanges, [.init(start: 1_790_000_100, end: 1_790_000_100.1)])
+        let claimedAnalysis = try await archive.claimEpochAnalysis(configurationFingerprint: fingerprint,
+            sessionID: pendingSession, expectedGeneration: pending.generation)
+        let analysis = try XCTUnwrap(claimedAnalysis)
+        let frames = try XCTUnwrap(analysis.inputs.first?.envelope.manifest.frames)
+        try await archive.commitAnalysisBatch(ticket: analysis, windows: [], analyzedCoverage: [frames],
+            noSpeechCoverage: [frames], checkpoint: nil, waitingForMoreAudio: true)
+        await sync.refresh()
+        XCTAssertNil(sync.failure)
+        let finished = try XCTUnwrap(MemoryResponse.state.sourcePayloads.last)
+        XCTAssertEqual(finished.sourceID, pending.sourceID)
+        XCTAssertEqual(finished.version, pending.version)
+        XCTAssertEqual(finished.textSha256, pending.textSha256)
+        XCTAssertEqual(finished.pendingTranscriptionRanges, [])
     }
     private func configuration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [MemoryResponse.self]; return config
     }
     private func fixture() throws -> (PhoneContextSync, URL, ArchiveStore, AgentConnection) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MoMoNativeMemory-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
         let url = URL(string: "http://127.0.0.1:8765")!
         let connection = AgentConnection(workspaceID: UUID(), assistantID: UUID(), instanceID: UUID(), baseURL: url, dataURL: url)
@@ -153,9 +174,11 @@ private final class MemoryResponses: @unchecked Sendable {
     private let lock = NSLock()
     private var workspace = UUID(), count = 0, synced: [String] = []
     private var summaryRevision: String?
+    private var payloads: [SourceEnvelope] = []
     var requests: Int { lock.withLock { count } }
     var syncedSourceIDs: [String] { lock.withLock { synced } }
-    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; summaryRevision = nil } }
+    var sourcePayloads: [SourceEnvelope] { lock.withLock { payloads } }
+    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; payloads = []; summaryRevision = nil } }
     func receive(_ request: URLRequest) -> (Int, String) {
         lock.withLock {
             count += 1
@@ -180,6 +203,8 @@ private final class MemoryResponses: @unchecked Sendable {
                let sha = json["text_sha256"] as? String, let del = json["deleted"] as? Bool {
                 let sourceID = "\(lib)/\(sess)"
                 synced.append(sourceID)
+                let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+                if let envelope = try? decoder.decode(SourceEnvelope.self, from: body) { payloads.append(envelope) }
                 let rev = "\(gen):\(ver):\(sha):\(del ? 1 : 0)"
                 return (200, "{\"source_id\":\"\(sourceID)\",\"source_revision\":\"\(rev)\",\"revision\":1}")
             }

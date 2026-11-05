@@ -20,7 +20,10 @@ struct DesktopSources: View {
     @State private var query = ""
     @State private var searching = false
     @State private var choosingDate = false
-    @State private var showingJournal = false
+    @State private var selectedIllustrationID: String?
+    @State private var illustrationExpanded = false
+    @State private var illustrationError: String?
+    @State private var timelineAnchor: String?
     private let calendar = Calendar.current
     private static let clockFormat = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
 
@@ -67,6 +70,33 @@ struct DesktopSources: View {
         ordered.first { $0.id == selectedID }
     }
 
+    private var illustrations: [LifeIllustration] {
+        model.lifeIllustrations.items.filter { model.lifeIllustrations.imageURL(for: $0) != nil }
+            .sorted { $0.windowStart < $1.windowStart }
+    }
+
+    private var selectedIllustration: LifeIllustration? {
+        illustrations.first { $0.id == selectedIllustrationID }
+    }
+
+    private func illustrationsByWindow(_ windows: [DesktopTranscriptWindow]) -> [String: [LifeIllustration]] {
+        guard query.isEmpty else { return [:] }
+        let components = calendar.dateComponents([.year, .month, .day], from: day)
+        let dayKey = String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
+        var result: [String: [LifeIllustration]] = [:]
+        for illustration in illustrations where illustration.logicalDay == dayKey {
+            guard let last = windows.last(where: { overlaps($0, illustration: illustration) }) else { continue }
+            result[last.id, default: []].append(illustration)
+        }
+        return result
+    }
+
+    private func overlaps(_ window: DesktopTranscriptWindow, illustration: LifeIllustration) -> Bool {
+        guard let start = window.recordedAt else { return false }
+        let end = window.endAt ?? start
+        return start < illustration.windowEnd && (end > illustration.windowStart || start >= illustration.windowStart)
+    }
+
     private var earliest: Date {
         min(
             ordered.compactMap(\.recordedAt).min().map { logicalDay(for: Date(timeIntervalSince1970: $0)) } ?? calendar.startOfDay(for: day),
@@ -82,11 +112,33 @@ struct DesktopSources: View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 720
             HStack(spacing: 0) {
-                if wide || selected == nil {
-                    timeline.frame(maxWidth: wide ? 340 : .infinity)
+                if wide || (selected == nil && selectedIllustration == nil) {
+                    timeline
+                        .frame(width: wide ? 340 : nil)
+                        .frame(maxWidth: wide ? nil : .infinity)
+                        .frame(width: illustrationExpanded ? 0 : nil, alignment: .leading)
+                        .clipped()
+                        .accessibilityHidden(illustrationExpanded)
                 }
-                if wide { Divider() }
-                if let selected {
+                if wide && !illustrationExpanded { Divider() }
+                if let illustration = selectedIllustration,
+                   let url = model.lifeIllustrations.imageURL(for: illustration, thumbnail: false) {
+                    DesktopLifeIllustrationReader(
+                        illustration: illustration,
+                        url: url,
+                        expanded: $illustrationExpanded,
+                        close: closeIllustration,
+                        previous: adjacentIllustration(to: illustration, offset: -1).map { item in
+                            { selectedIllustrationID = item.id }
+                        },
+                        next: adjacentIllustration(to: illustration, offset: 1).map { item in
+                            { selectedIllustrationID = item.id }
+                        },
+                        showSource: { showSource(for: illustration) },
+                        delete: { deleteIllustration(illustration) }
+                    )
+                    .frame(maxWidth: .infinity)
+                } else if let selected {
                     DesktopSourceReader(
                         model: model,
                         source: selected.source,
@@ -129,42 +181,17 @@ struct DesktopSources: View {
         .onChange(of: ordered.map { $0.id + $0.source.revision }) {
             if selectedID != nil && selected == nil { selectedID = nil }
         }
-        .sheet(isPresented: $showingJournal) {
-            if let journalInput = currentDayJournalInput {
-                DailyMemoryJournalSheet(input: journalInput, macDataDirectory: model.dataDirectory)
-                    .frame(minWidth: 480, idealWidth: 520, minHeight: 640, idealHeight: 720)
-            }
+        .onChange(of: illustrations.map(\.id)) {
+            if selectedIllustrationID != nil && selectedIllustration == nil { closeIllustration() }
         }
-    }
-
-    private var currentDayJournalInput: DailyJournalInput? {
-        guard query.isEmpty, !visible.isEmpty else { return nil }
-        let segments: [DailyJournalSegment] = visible.compactMap { item in
-            let raw = item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? ""
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            let start = item.recordedAt.map { Date(timeIntervalSince1970: $0) } ?? day
-            let end = item.endAt.map { Date(timeIntervalSince1970: $0) } ?? start
-            let hour = calendar.component(.hour, from: start)
-            let duration = max(0, end.timeIntervalSince(start))
-            return DailyJournalSegment(
-                hour: hour,
-                duration: duration,
-                text: trimmed,
-                isSummary: item.summary != nil,
-                timestamp: item.recordedAt
-            )
+        .alert("生活插画", isPresented: Binding(
+            get: { illustrationError != nil },
+            set: { if !$0 { illustrationError = nil } }
+        )) {
+            Button("好", role: .cancel) { illustrationError = nil }
+        } message: {
+            Text(illustrationError ?? "")
         }
-        guard !segments.isEmpty else { return nil }
-        let parts = calendar.dateComponents([.year, .month, .day], from: day)
-        let key = String(format: "%04d-%02d-%02d", parts.year ?? 2026, parts.month ?? 1, parts.day ?? 1)
-        let input = DailyJournalInput(
-            dayKey: key,
-            dateLabel: dayTitle(day),
-            dayStartHour: model.dayStartHour,
-            segments: segments
-        )
-        return input.hasReadableContent ? input : nil
     }
 
     private var timeline: some View {
@@ -172,12 +199,6 @@ struct DesktopSources: View {
             HStack(spacing: 12) {
                 Text("转录").font(.system(size: 22, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 Spacer()
-                if currentDayJournalInput != nil {
-                    Button("每日记忆手账", systemImage: "photo.artframe") { showingJournal = true }
-                        .labelStyle(.iconOnly).buttonStyle(.plain)
-                        .help("每日记忆手账")
-                        .accessibilityIdentifier("desktop.transcripts.journal")
-                }
                 Button("刷新", systemImage: "arrow.clockwise") { Task { await model.loadContext() } }
                     .labelStyle(.iconOnly).buttonStyle(.plain).disabled(model.contextLoading)
                     .help("刷新转录").accessibilityIdentifier("desktop.transcripts.refresh")
@@ -194,33 +215,46 @@ struct DesktopSources: View {
                 }.padding(.horizontal, 24)
             }
             ScrollView {
+                let windows = visible
+                let insertedIllustrations = illustrationsByWindow(windows)
                 LazyVStack(spacing: 0) {
-                    if let journalInput = currentDayJournalInput {
-                        DailyMemoryJournalBanner(
-                            input: journalInput,
-                            openSheet: { showingJournal = true },
-                            macDataDirectory: model.dataDirectory
-                        )
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
-                    }
-                    ForEach(visible) { item in
-                        Button { selectedID = item.id } label: {
-                            ClientTranscriptRow(
-                                time: timeLabel(item),
-                                preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
-                                status: nil,
-                                connected: item.id != visible.last?.id,
-                                isFinal: true
-                            ) {
-                                EmptyView()
+                    ForEach(windows) { item in
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button {
+                                closeIllustration()
+                                selectedID = item.id
+                            } label: {
+                                ClientTranscriptRow(
+                                    time: timeLabel(item),
+                                    preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
+                                    status: nil,
+                                    connected: item.id != windows.last?.id && insertedIllustrations[item.id] == nil,
+                                    isFinal: true
+                                ) {
+                                    EmptyView()
+                                }
+                                .padding(.horizontal, 12)
+                                .background(selectedID == item.id && selectedIllustrationID == nil ? MoMoPalette.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
                             }
-                            .padding(.horizontal, 12)
-                            .background(selectedID == item.id ? MoMoPalette.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("desktop.source.\(item.id)")
+                            .accessibilityAddTraits(selectedID == item.id && selectedIllustrationID == nil ? [.isSelected] : [])
+                            ForEach(insertedIllustrations[item.id] ?? []) { illustration in
+                                if let url = model.lifeIllustrations.imageURL(for: illustration) {
+                                    LifeIllustrationInlineView(
+                                        illustration: illustration,
+                                        url: url,
+                                        open: { selectedIllustrationID = illustration.id },
+                                        showSource: { showSource(for: illustration) },
+                                        delete: { deleteIllustration(illustration) }
+                                    )
+                                    .padding(.leading, 38)
+                                    .padding(.trailing, 12)
+                                    .padding(.bottom, 26)
+                                }
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("desktop.source.\(item.id)")
-                        .accessibilityAddTraits(selectedID == item.id ? [.isSelected] : [])
+                        .id(item.id)
                     }
                     if visible.isEmpty && !model.contextLoading && model.memoryError == nil {
                         ContentUnavailableView(
@@ -234,9 +268,50 @@ struct DesktopSources: View {
                         }
                     }
                     if model.contextLoading { ProgressView("正在读取记录").padding(24) }
-                }.padding(.horizontal, 12).padding(.bottom, 24)
+                }
+                .scrollTargetLayout()
+                .padding(.horizontal, 12).padding(.bottom, 24)
             }
+            .scrollPosition(id: $timelineAnchor, anchor: .top)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func adjacentIllustration(to illustration: LifeIllustration, offset: Int) -> LifeIllustration? {
+        guard let index = illustrations.firstIndex(where: { $0.id == illustration.id }),
+              illustrations.indices.contains(index + offset) else { return nil }
+        return illustrations[index + offset]
+    }
+
+    private func closeIllustration() {
+        selectedIllustrationID = nil
+        illustrationExpanded = false
+    }
+
+    private func showSource(for illustration: LifeIllustration) {
+        guard let source = ordered.first(where: {
+            illustration.sourceIds.contains($0.source.id) && overlaps($0, illustration: illustration)
+        }) else {
+            illustrationError = String(localized: "原始转录尚未同步。")
+            return
+        }
+        closeIllustration()
+        query = ""
+        if let recordedAt = source.recordedAt {
+            day = logicalDay(for: Date(timeIntervalSince1970: recordedAt))
+        }
+        selectedID = source.id
+        timelineAnchor = source.id
+    }
+
+    private func deleteIllustration(_ illustration: LifeIllustration) {
+        Task {
+            do {
+                try await model.lifeIllustrations.delete(illustration)
+                if selectedIllustrationID == illustration.id { closeIllustration() }
+            } catch {
+                illustrationError = error.localizedDescription
+            }
+        }
     }
 
     private var dateBar: some View {
@@ -292,6 +367,79 @@ struct DesktopSources: View {
         if query.isEmpty { return range }
         let dayPrefix = start.formatted(.dateTime.locale(AppLanguage.current.locale).month().day())
         return "\(dayPrefix) \(range)"
+    }
+}
+
+private struct DesktopLifeIllustrationReader: View {
+    let illustration: LifeIllustration
+    let url: URL
+    @Binding var expanded: Bool
+    let close: () -> Void
+    let previous: (() -> Void)?
+    let next: (() -> Void)?
+    let showSource: () -> Void
+    let delete: () -> Void
+    @FocusState private var hasKeyboardFocus: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 16) {
+                Text(illustration.dateCaption)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Spacer(minLength: 8)
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .help("分享插画")
+                .accessibilityLabel("分享插画")
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                }
+                .help("返回转录")
+                .accessibilityLabel("返回转录")
+                .accessibilityIdentifier("desktop.illustration.close")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 24)
+            .frame(minHeight: 44)
+
+            GeometryReader { geometry in
+                Button { expanded.toggle() } label: {
+                    LifeIllustrationImageView(url: url)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "空格还原" : "空格放大")
+                .accessibilityLabel(expanded ? "还原插画" : "放大插画")
+                .accessibilityIdentifier("desktop.illustration.image")
+                .contextMenu {
+                    Button("查看依据", action: showSource)
+                    Button("删除", role: .destructive, action: delete)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($hasKeyboardFocus)
+        .defaultFocus($hasKeyboardFocus, true)
+        .onKeyPress(.leftArrow) { previous?(); return .handled }
+        .onKeyPress(.upArrow) { previous?(); return .handled }
+        .onKeyPress(.rightArrow) { next?(); return .handled }
+        .onKeyPress(.downArrow) { next?(); return .handled }
+        .onKeyPress(.space) { expanded.toggle(); return .handled }
+        .onKeyPress(.escape) {
+            if expanded { expanded = false } else { close() }
+            return .handled
+        }
+        .accessibilityAction(named: "上一幅") { previous?() }
+        .accessibilityAction(named: "下一幅") { next?() }
+        .task(id: illustration.id) {
+            if !hasKeyboardFocus { hasKeyboardFocus = true }
+        }
     }
 }
 

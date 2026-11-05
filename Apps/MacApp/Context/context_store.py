@@ -131,6 +131,16 @@ class ContextStore:
             raise ValueError("Invalid source generation/version")
         if type(payload["deleted"]) is not bool:
             raise ValueError("deleted must be boolean")
+        pending_ranges = payload.get('pending_transcription_ranges', [])
+        if not isinstance(pending_ranges, list) or len(pending_ranges) > 50_000:
+            raise ValueError('Invalid pending transcription ranges')
+        for pending in pending_ranges:
+            if (not isinstance(pending, dict) or set(pending) != {'start', 'end'}
+                    or any(type(pending[key]) not in (int, float) or not math.isfinite(pending[key]) for key in ('start', 'end'))
+                    or pending['end'] <= pending['start']):
+                raise ValueError('Invalid pending transcription interval')
+        if payload['deleted'] and pending_ranges:
+            raise ValueError('Deleted sources cannot have pending transcription')
         deleted = payload["deleted"]
         spans = payload["spans"]
         if not isinstance(spans, list) or len(spans) > 50_000:
@@ -153,6 +163,7 @@ class ContextStore:
         revision = f"{generation}:{version}:{digest(text)}:{int(deleted)}"
         def _core_payload(doc: dict) -> dict:
             out = dict(doc)
+            out.pop('pending_transcription_ranges', None)
             if isinstance(out.get("spans"), list):
                 out["spans"] = [
                     {k: v for k, v in s.items() if k != "is_owner"} if isinstance(s, dict) else s
@@ -170,6 +181,7 @@ class ContextStore:
                         if _core_payload(prev_payload) != _core_payload(payload):
                             raise Conflict("Source metadata differs at the same revision")
                         self.db.execute("UPDATE sources SET payload=? WHERE id=?", (canonical(payload), source_id))
+                        self.advance()
                     return {"source_id": source_id, "source_revision": revision, "revision": self.revision}
                 if previous["deleted"] or (generation, version) <= (previous["generation"], previous["version"]):
                     raise Conflict("Source revision is stale or deleted")

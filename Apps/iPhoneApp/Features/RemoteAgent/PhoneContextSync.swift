@@ -6,6 +6,7 @@ import MoMoArchive
 /// Phone delivers original transcripts. Hermes owns memory; the phone only caches its current view.
 @MainActor @Observable
 final class PhoneContextSync {
+    var configurationFingerprint: String?
     let recordingSummaries: PhoneRecordingSummaries?
     private(set) var summaryStorageFailure: String?
     private(set) var memories: [ContextMemory] = []
@@ -31,6 +32,13 @@ final class PhoneContextSync {
     private struct Source: Codable {
         var envelope: SourceEnvelope
         var receipt: SourceReceipt?
+        var coverage: CoverageStamp?
+    }
+    private struct CoverageStamp: Codable, Equatable {
+        let chunks: Int
+        let transcriptionState: String
+        let audioState: String
+        let fingerprint: String?
     }
     private struct State: Codable {
         let libraryID: UUID
@@ -138,11 +146,33 @@ final class PhoneContextSync {
     }
     private func stage(_ recording: RecordingSummary, allowEmptyInitial: Bool = true) async throws -> Source {
         let id = recording.sessionID.uuidString.lowercased()
-        if let saved = state.sources[id], !saved.envelope.deleted,
-           saved.envelope.generation == recording.generation, saved.envelope.version == recording.transcriptVersion { return saved }
+        let coverage = CoverageStamp(chunks: recording.chunkCount, transcriptionState: recording.transcriptionState.rawValue,
+            audioState: recording.audioState.rawValue, fingerprint: configurationFingerprint)
+        if let saved = state.sources[id], !saved.envelope.deleted, saved.coverage == coverage,
+           saved.envelope.generation == recording.generation, saved.envelope.version == recording.transcriptVersion,
+           saved.envelope.pendingTranscriptionRanges?.isEmpty == true { return saved }
+        let pending = try await archive.pendingTranscriptionIntervals(sessionID: recording.sessionID, configurationFingerprint: configurationFingerprint)
+            .map { SourceEnvelope.PendingTranscriptionRange(start: $0.start.timeIntervalSince1970, end: $0.end.timeIntervalSince1970) }
+        if var saved = state.sources[id], !saved.envelope.deleted,
+           saved.envelope.generation == recording.generation, saved.envelope.version == recording.transcriptVersion {
+            if saved.envelope.pendingTranscriptionRanges != pending || saved.coverage != coverage {
+                if saved.envelope.pendingTranscriptionRanges != pending { saved.receipt = nil }
+                saved.envelope.pendingTranscriptionRanges = pending
+                saved.coverage = coverage
+                var updated = state; updated.sources[id] = saved; try commit(updated)
+            }
+            return saved
+        }
+        if recording.transcriptVersion == 0, !pending.isEmpty {
+            let source = Source(envelope: SourceEnvelope(library: archive.libraryInstanceID, session: recording.sessionID,
+                device: deviceID, generation: recording.generation, version: 0, recordedAt: recording.recordedAt,
+                spans: [], pendingTranscriptionRanges: pending), coverage: coverage)
+            var updated = state; updated.sources[id] = source; try commit(updated)
+            return source
+        }
         let snapshot = try await archive.transcriptSnapshot(sessionID: recording.sessionID)
         let document = snapshot.document
-        if !allowEmptyInitial, state.sources[id] == nil, document.spans.isEmpty {
+        if !allowEmptyInitial, state.sources[id] == nil, document.spans.isEmpty, pending.isEmpty {
             throw ArchiveError.missingTranscript(recording.sessionID)
         }
         let spans = try document.spans.map { span -> SourceEnvelope.Span in
@@ -151,7 +181,8 @@ final class PhoneContextSync {
             return .init(id: span.id, text: text, recordedAt: location.recordedAt, isOwner: span.attribution?.isUser)
         }
         let source = Source(envelope: SourceEnvelope(library: archive.libraryInstanceID, session: recording.sessionID, device: deviceID,
-            generation: document.generation, version: document.version, recordedAt: recording.recordedAt, spans: spans))
+            generation: document.generation, version: document.version, recordedAt: recording.recordedAt, spans: spans,
+            pendingTranscriptionRanges: pending), coverage: coverage)
         if let newer = state.sources[id], newer.envelope.generation > document.generation ||
             (newer.envelope.generation == document.generation && newer.envelope.version > document.version) { return newer }
         var updated = state; updated.sources[id] = source; try commit(updated)
@@ -185,7 +216,7 @@ final class PhoneContextSync {
         repeat {
             try Task.checkCancellation()
             let page = try await archive.recordingsPage(limit: 100, cursor: cursor)
-            for recording in page.items where recording.transcriptVersion > 0 {
+            for recording in page.items {
                 do { _ = try await stage(recording, allowEmptyInitial: false) }
                 catch ArchiveError.missingTranscript, ArchiveError.sessionDeleted { continue }
                 catch ArchiveError.projectionConflict { hadDeferredProjection = true; continue }

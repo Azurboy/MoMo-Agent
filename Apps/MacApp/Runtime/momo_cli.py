@@ -78,6 +78,17 @@ def _cmd_recordings(data: Path, args: argparse.Namespace) -> dict:
         store.close()
 
 
+def _cmd_life_illustrations(data: Path, args: argparse.Namespace) -> dict:
+    from life_illustrations import LifeIllustrations
+    from life_illustration_generator import CodexIllustrationGenerator
+    queue = LifeIllustrations(data)
+    try:
+        return dict(settings=queue.settings(CodexIllustrationGenerator(data).availability()),
+                    **queue.status(args.after, args.limit))
+    finally:
+        queue.close()
+
+
 def _cmd_recording(data: Path, args: argparse.Namespace) -> dict:
     store = _open_context(data)
     try:
@@ -450,6 +461,9 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     rec_list = sub.add_parser("recordings", help="List synchronized voice recordings")
+    illustrations = sub.add_parser('life-illustrations', help='Read actual background illustration states; never triggers generation')
+    illustrations.add_argument('--after', type=int, default=0)
+    illustrations.add_argument('--limit', type=int, default=50)
     rec_list.add_argument("--after", default="")
     rec_list.add_argument("--limit", type=int, default=25)
 
@@ -508,6 +522,7 @@ def main() -> int:
     data = args.data_dir.expanduser().resolve()
     handlers = {
         "recordings": _cmd_recordings,
+        "life-illustrations": _cmd_life_illustrations,
         "recording": _cmd_recording,
         "search": _cmd_search,
         "save-result": _cmd_save_recording_result,

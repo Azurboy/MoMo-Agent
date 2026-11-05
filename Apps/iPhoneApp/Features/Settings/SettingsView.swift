@@ -9,6 +9,7 @@ struct SettingsView: View {
     let modelDirectory: URL?
     let modelStatus: LocalSpeechModelStatus
     let speechSettings: PhoneSpeechSettings
+    var illustrations: LifeIllustrationStore? = nil
     var earphone: EarphoneCaptureRuntime? = nil
     var speakerRematch: SpeakerRematchController = SpeakerRematchController()
     var onSpeakersChanged: (() async -> Void)? = nil
@@ -62,6 +63,14 @@ struct SettingsView: View {
                 }
                 PhoneSettingsSection(title: "转录与储存") {
                     PhoneSettingsSurface {
+                        if let illustrations {
+                            NavigationLink { LifeIllustrationSettingsView(store: illustrations) } label: {
+                                PhoneSettingsLinkRow(title: "生活插画", value: illustrations.settings.supported
+                                    ? String(localized: "Codex 订阅可用")
+                                    : illustrations.settings.provider == "anthropic" ? String(localized: "Claude 订阅暂不支持") : String(localized: "需要 Codex 订阅"))
+                            }.accessibilityIdentifier("settings.lifeIllustrations")
+                            rowDivider
+                        }
                         if let earphone {
                             NavigationLink { CaptureDeviceSettingsView(runtime: earphone) } label: {
                                 PhoneSettingsLinkRow(title: "录音设备", value: earphone.settings.device.title)

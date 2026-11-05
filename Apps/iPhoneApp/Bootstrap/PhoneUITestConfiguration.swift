@@ -4,6 +4,7 @@ import Foundation
 import MoMoArchive
 import MoMoContracts
 import MoMoLink
+import MoMoAgentClient
 
 struct PhoneUITestConfiguration {
     let runID: UUID
@@ -13,6 +14,7 @@ struct PhoneUITestConfiguration {
     var timelineFixture = false
     var timelineScrollFixture = false
     var timelineTurnsFixture = false
+    var lifeIllustrationsFixture = false
     var documentChange: DocumentChange? = nil
     var useSilentAudio = false
     var padSpeechForPlayback = false
@@ -38,10 +40,11 @@ struct PhoneUITestConfiguration {
         let fixture = environment["MOMO_UI_TEST_IMPORT_FIXTURE"]
         var result = Self(runID: runID, rootURL: root, importFixture: fixture.map { ["1", "silence", "speech-playback"].contains($0) } ?? false)
         let timelineFixture = environment["MOMO_UI_TEST_TIMELINE_FIXTURE"]
+        result.lifeIllustrationsFixture = timelineFixture == "life-illustrations"
         result.timelineScrollFixture = timelineFixture == "scroll"
         result.timelineTurnsFixture = timelineFixture == "turns"
         result.remoteFixture = timelineFixture == "remote" || timelineFixture == "chat"
-        result.timelineFixture = timelineFixture == "1" || result.timelineScrollFixture || result.timelineTurnsFixture || timelineFixture == "remote"
+        result.timelineFixture = result.lifeIllustrationsFixture || timelineFixture == "1" || result.timelineScrollFixture || result.timelineTurnsFixture || timelineFixture == "remote"
         result.useSilentAudio = fixture == "silence"
         result.padSpeechForPlayback = fixture == "speech-playback"
         result.showStatusFailure = environment["MOMO_UI_TEST_STATUS_FAILURE"] == "1"
@@ -57,6 +60,18 @@ struct PhoneUITestConfiguration {
     }
 
 #if targetEnvironment(simulator)
+    @MainActor func configureLifeIllustrations(_ store: LifeIllustrationStore) async throws {
+        guard lifeIllustrationsFixture else { return }
+        let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+        struct Fixture: Decodable { let baseURL: URL; let credential: String }
+        let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: documents.appendingPathComponent("life-illustrations-fixture.json")))
+        guard ["127.0.0.1", "localhost"].contains(fixture.baseURL.host), fixture.baseURL.scheme == "http" else { throw FixtureError.invalidRunID }
+        let client = try AgentClient(baseURL: fixture.baseURL, credential: fixture.credential, assistantID: runID)
+        store.configure(client: client, scope: "life-illustrations-fixture-" + runID.uuidString)
+        await store.refresh()
+        store.startPolling()
+    }
+
     @MainActor func connectRemoteFixture(_ agent: PhoneRemoteAgent) async throws {
         guard remoteFixture, agent.connection == nil else { return }
         let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
@@ -82,7 +97,17 @@ struct PhoneUITestConfiguration {
         let todayDay = TimelineDay(Date())
         let earliestBase = todayDay.startDate().timeIntervalSince1970 + 3_600
         let base = max(earliestBase, floor((now + Double(offset)) / 1_800) * 1_800 - Double(offset) - 1_800)
-        let inputs: [(Double, String)] = remoteFixture ? [(base, "下周五给小林发方案。方案需要包含手机采集和 Mac 执行的分工。聚餐还没有定，先不要安排。")] : timelineScrollFixture ? (8...19).map {
+        let illustrationBase = todayDay.startDate().timeIntervalSince1970
+        let illustrationInputs: [(Double, String)] = [
+            (illustrationBase + 6.25 * 3600, "讨论手机与 Mac 的代码架构：手机负责收集上下文，Mac 负责执行。桌上铺开几张模块草图，逐一梳理依赖关系。"),
+            (illustrationBase + 8.5 * 3600, "继续核对数据同步的边界，先把可复用的模块拆清楚，暂时还没有决定最后的实现。"),
+            (illustrationBase + 9.3 * 3600, "两位朋友沿着河边小路散步，聊起周末可能去旅行。一个人拿着折叠伞，另一个人抱着装面包的纸袋。"),
+            (illustrationBase + 11.2 * 3600, "走到石桥旁停下来看看鸭子，微风吹动小草。目的地和车票还没有确定，沿着河边继续走。"),
+            (illustrationBase + 12.3 * 3600, "夜晚慢慢收拾房间，把围巾叠好放在椅背上，再给窗边的小盆栽浇一点水。"),
+            (illustrationBase + 14.3 * 3600, "坐在台灯旁喝茶，翻看画册。"),
+            (illustrationBase + 15.2 * 3600, "明天再继续，今晚先休息。")
+        ]
+        let inputs: [(Double, String)] = lifeIllustrationsFixture ? illustrationInputs : remoteFixture ? [(base, "下周五给小林发方案。方案需要包含手机采集和 Mac 执行的分工。聚餐还没有定，先不要安排。")] : timelineScrollFixture ? (8...19).map {
             (todayDay.date().timeIntervalSince1970 + Double($0) * 3_600,
              "第 \($0) 时的测试录音，用于验证时间轴顺序和阅读位置。")
         } + [(todayDay.adding(days: -1).date().timeIntervalSince1970 + 23 * 3_600,

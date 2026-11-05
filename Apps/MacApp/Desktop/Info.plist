@@ -4,13 +4,6 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>en</string>
-		<string>zh-Hans</string>
-		<string>ja</string>
-		<string>ko</string>
-	</array>
 	<key>CFBundleDisplayName</key>
 	<string>$(MOMO_APP_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
@@ -19,6 +12,13 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>ja</string>
+		<string>ko</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>$(MOMO_APP_DISPLAY_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -27,6 +27,12 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>MoMoDataFolder</key>
+	<string>$(MOMO_MAC_DATA_FOLDER)</string>
+	<key>MoMoLocalPort</key>
+	<string>$(MOMO_MAC_LOCAL_PORT)</string>
+	<key>MoMoRepositoryRoot</key>
+	<string>$(SRCROOT)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -40,27 +46,17 @@
 			</dict>
 		</dict>
 	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>允许 MoMo 与「备忘录」「提醒事项」「日历」协作，帮你读取、记录和整理备忘与待办。</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>允许通过加密连接直接与附近的 iPhone 通信，减少连接延迟。</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>允许 MoMo 读取和整理你的提醒事项，帮你在对话与录音后创建、编辑、完成或删除待办。</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>允许 MoMo 读取和整理你的提醒事项，帮你在对话与录音后创建、编辑、完成或删除待办。</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。</string>
-	<key>NSCalendarsUsageDescription</key>
-	<string>允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>允许 MoMo 与「备忘录」「提醒事项」「日历」协作，帮你读取、记录和整理备忘与待办。</string>
-	<key>NSLocationUsageDescription</key>
-	<string>允许 MoMo 在生成分时段记忆手账插画时关联所在街区或地点名称，仅保存在本机。</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>允许 MoMo 在生成分时段记忆手账插画时关联所在街区或地点名称，仅保存在本机。</string>
-	<key>MoMoDataFolder</key>
-	<string>$(MOMO_MAC_DATA_FOLDER)</string>
-	<key>MoMoLocalPort</key>
-	<string>$(MOMO_MAC_LOCAL_PORT)</string>
-	<key>MoMoRepositoryRoot</key>
-	<string>$(SRCROOT)</string>
 </dict>
 </plist>

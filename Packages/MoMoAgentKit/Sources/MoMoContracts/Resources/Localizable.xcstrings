@@ -1717,64 +1717,6 @@
         }
       }
     },
-    "Apple 图乐园定制": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground Custom"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground カスタム"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground 맞춤"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Apple 图乐园定制"
-          }
-        }
-      }
-    },
-    "Apple 图乐园插画": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Apple 图乐园插画"
-          }
-        }
-      }
-    },
     "Claude 订阅": {
       "localizations": {
         "en": {
@@ -1791,6 +1733,64 @@
         }
       }
     },
+    "Claude 订阅暂不支持": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude 订阅暂不支持"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not supported with Claude"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude サブスクリプションは未対応"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude 구독은 지원되지 않음"
+          }
+        }
+      }
+    },
+    "Claude 订阅暂不支持，切换为 Codex 订阅后可用。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude 订阅暂不支持，切换为 Codex 订阅后可用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude subscriptions do not support this feature. Switch to a Codex subscription to use it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude サブスクリプションは未対応です。Codex に切り替えると利用できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude 구독은 이 기능을 지원하지 않습니다. Codex 구독으로 전환하면 사용할 수 있습니다."
+          }
+        }
+      }
+    },
     "Codex 订阅": {
       "localizations": {
         "en": {
@@ -1803,6 +1803,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "Codex 订阅"
+          }
+        }
+      }
+    },
+    "Codex 订阅可用": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 订阅可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Available with a Codex subscription"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex サブスクリプションで利用可能"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 구독으로 사용 가능"
           }
         }
       }
@@ -2759,35 +2788,6 @@
         }
       }
     },
-    "Momo 吉伊手绘": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo Chiikawa Doodle"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo ちいかわ風手描き"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo 치이카와풍 손그림"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo 吉伊手绘"
-          }
-        }
-      }
-    },
     "Momo 根据今日真实话题与说话时段为你绘制的专属手账插画，所有数据均留在本地。": {
       "extractionState": "manual",
       "localizations": {
@@ -2813,35 +2813,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Momo 根据今日真实话题与说话时段为你绘制的专属手账插画，所有数据均留在本地。"
-          }
-        }
-      }
-    },
-    "Momo 水彩手绘": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo Watercolor"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo 水彩スケッチ"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo 수채화"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Momo 水彩手绘"
           }
         }
       }
@@ -3436,6 +3407,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "一次最多添加 4 个附件，文件文字总量不能超过 48 KB。请减少附件后重试。"
+          }
+        }
+      }
+    },
+    "上一幅": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一幅"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previous illustration"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前のイラスト"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 일러스트"
           }
         }
       }
@@ -4292,6 +4292,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "上海出发，选晚班。"
+          }
+        }
+      }
+    },
+    "下一幅": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一幅"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next illustration"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次のイラスト"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 일러스트"
           }
         }
       }
@@ -7823,64 +7852,6 @@
         }
       }
     },
-    "全天单幅": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Full Day"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "終日1枚"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "하루 한 장"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全天单幅"
-          }
-        }
-      }
-    },
-    "全天手账": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Full-Day Journal"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "1日の手帳"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "하루 다이어리"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全天手账"
-          }
-        }
-      }
-    },
     "全部日期": {
       "localizations": {
         "en": {
@@ -8015,35 +7986,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "关系与长期偏好"
-          }
-        }
-      }
-    },
-    "关联所在位置": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Link Location"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在地を連携"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 위치 연동"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "关联所在位置"
           }
         }
       }
@@ -8824,31 +8766,31 @@
         }
       }
     },
-    "分享手账": {
+    "分享插画": {
       "extractionState": "manual",
       "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分享插画"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Share Journal"
+            "value": "Share illustration"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "手帳を共有"
+            "value": "イラストを共有"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "다이어리 공유"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "分享手账"
+            "value": "일러스트 공유"
           }
         }
       }
@@ -9059,6 +9001,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "刚才的会议"
+          }
+        }
+      }
+    },
+    "删除": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "삭제"
           }
         }
       }
@@ -9491,35 +9462,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "刷新二维码"
-          }
-        }
-      }
-    },
-    "刷新所在位置": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Refresh Location"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在地を更新"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 위치 새로고침"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "刷新所在位置"
           }
         }
       }
@@ -11654,64 +11596,6 @@
         }
       }
     },
-    "吉伊记忆手账": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Chiikawa Journal"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ちいかわ記憶手帳"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "치이카와 기억 다이어리"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "吉伊记忆手账"
-          }
-        }
-      }
-    },
-    "吉伊软萌": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Chiikawa Cute"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ちいかわ風"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "치이카와풍"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "吉伊软萌"
-          }
-        }
-      }
-    },
     "同步与转写进度暂时无法读取，请重试。": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -12953,35 +12837,6 @@
         }
       }
     },
-    "回到前台后可生成 Apple 图乐园插画。": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Return to the app in the foreground to generate Image Playground artwork."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "フォアグラウンドに戻ると Image Playground のイラストを生成できます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "앱으로 돌아오면 Image Playground 일러스트를 생성할 수 있습니다."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回到前台后可生成 Apple 图乐园插画。"
-          }
-        }
-      }
-    },
     "回到最新消息": {
       "comment": "Chat renderer UI. Keep {0}, {1} and other numbered arguments unchanged.",
       "extractionState": "manual",
@@ -13420,35 +13275,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "固定 MoMo"
-          }
-        }
-      }
-    },
-    "图乐园微调": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "图乐园微调"
           }
         }
       }
@@ -15269,64 +15095,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "定位暂不可用"
-          }
-        }
-      }
-    },
-    "定位权限未开启，可在系统设置中允许位置访问后自动关联手账地点。": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Location access is off. Enable it in System Settings to automatically tag journal places."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "位置情報がオフです。システム設定で許可すると手帳に場所が自動連携されます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "위치 권한이 꺼져 있습니다. 시스템 설정에서 허용하면 다이어리 장소가 자동 연동됩니다."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "定位权限未开启，可在系统设置中允许位置访问后自动关联手账地点。"
-          }
-        }
-      }
-    },
-    "定位权限未开启，手账会继续从对话场景中推断地点。": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Location access is off; the journal will infer places from conversation context."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "位置情報がオフのため、会話の文脈から場所を推測します。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "위치 권한이 꺼져 있어 대화 맥락에서 장소를 추론합니다."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "定位权限未开启，手账会继续从对话场景中推断地点。"
           }
         }
       }
@@ -25523,35 +25291,6 @@
         }
       }
     },
-    "换一幅软萌构图": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "New Cute Scene"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "別の構図にする"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다른 귀여운 구도"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "换一幅软萌构图"
-          }
-        }
-      }
-    },
     "授权期限": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -26052,35 +25791,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "提醒时间"
-          }
-        }
-      }
-    },
-    "插画由你在 Apple Intelligence「图乐园」微调定制，仅保存在本机。": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Customized in Apple Intelligence Image Playground and stored only on this device."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Apple Intelligence の Image Playground で調整され、このデバイス内にのみ保存されます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Apple Intelligence Image Playground에서 맞춤 제작되었으며 이 기기에만 저장됩니다."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "插画由你在 Apple Intelligence「图乐园」微调定制，仅保存在本机。"
           }
         }
       }
@@ -27279,6 +26989,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "改聊别的"
+          }
+        }
+      }
+    },
+    "放大插画": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "放大插画"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enlarge illustration"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "イラストを拡大"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일러스트 확대"
           }
         }
       }
@@ -32478,35 +32217,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "未能整理"
-          }
-        }
-      }
-    },
-    "未能读取图乐园生成的插画，请重试。": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Couldn't read the Image Playground artwork. Please try again."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground のイラストを読み込めませんでした。もう一度お試しください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Image Playground 일러스트를 읽지 못했습니다. 다시 시도해 주세요."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未能读取图乐园生成的插画，请重试。"
           }
         }
       }
@@ -38062,64 +37772,6 @@
         }
       }
     },
-    "正在绘制…": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Drawing…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "描画中…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "그리는 중…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在绘制…"
-          }
-        }
-      }
-    },
-    "正在绘制手账…": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Drawing journal…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "手帳を描画中…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다이어리 그리는 중…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在绘制手账…"
-          }
-        }
-      }
-    },
     "正在统计文件…": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -39099,118 +38751,31 @@
         }
       }
     },
-    "每 2 小时": {
+    "每 %lld 小时": {
       "extractionState": "manual",
       "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每 %lld 小时"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Every 2 Hours"
+            "value": "Every %lld hours"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "2時間ごと"
+            "value": "%lld 時間ごと"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "2시간마다"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每 2 小时"
-          }
-        }
-      }
-    },
-    "每 3 小时": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Every 3 Hours"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "3時間ごと"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "3시간마다"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每 3 小时"
-          }
-        }
-      }
-    },
-    "每 4 小时": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Every 4 Hours"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "4時間ごと"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "4시간마다"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每 4 小时"
-          }
-        }
-      }
-    },
-    "每 6 小时": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Every 6 Hours"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "6時間ごと"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "6시간마다"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每 6 小时"
+            "value": "%lld시간마다"
           }
         }
       }
@@ -39305,36 +38870,6 @@
         }
       }
     },
-    "每日记忆": {
-      "extractionState": "manual",
-      "generatesSymbol": false,
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Daily Memory"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "日々の記憶"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "일일 메모리"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每日记忆"
-          }
-        }
-      }
-    },
     "每日记忆与档案": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -39365,35 +38900,6 @@
         }
       }
     },
-    "每日记忆手账": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Daily Memory Journal"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "毎日の記憶手帳"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "데일리 기억 다이어리"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每日记忆手账"
-          }
-        }
-      }
-    },
     "比较%@": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -39420,35 +38926,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "比较%@"
-          }
-        }
-      }
-    },
-    "水彩绘本": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Watercolor"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "水彩絵本"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "수채화 그림책"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "水彩绘本"
           }
         }
       }
@@ -40322,35 +39799,6 @@
         }
       }
     },
-    "灵动立体": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Animation"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "アニメーション"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "애니메이션"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "灵动立体"
-          }
-        }
-      }
-    },
     "点击次数无效。": {
       "localizations": {
         "en": {
@@ -40725,13 +40173,19 @@
         }
       }
     },
-    "生图间隔": {
+    "生成间隔": {
       "extractionState": "manual",
       "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成间隔"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Interval"
+            "value": "Generation interval"
           }
         },
         "ja": {
@@ -40745,11 +40199,150 @@
             "state": "translated",
             "value": "생성 간격"
           }
-        },
+        }
+      }
+    },
+    "生活插画": {
+      "extractionState": "manual",
+      "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "生图间隔"
+            "value": "生活插画"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Life illustrations"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暮らしのイラスト"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일상 일러스트"
+          }
+        }
+      }
+    },
+    "生活插画下载校验失败，请稍后重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生活插画下载校验失败，请稍后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Illustration download verification failed. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "イラストのダウンロード検証に失敗しました。後でもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일러스트 다운로드 확인에 실패했습니다. 나중에 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "生活插画同步进度无效，请稍后重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生活插画同步进度无效，请稍后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Illustration sync progress is invalid. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "イラストの同期状態が無効です。後でもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일러스트 동기화 진행 상태가 유효하지 않습니다. 나중에 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "生活插画暂不可用。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生活插画暂不可用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Life illustrations are currently unavailable."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暮らしのイラストは現在利用できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일상 일러스트를 현재 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "生活插画资料不完整，请稍后重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生活插画资料不完整，请稍后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Illustration data is incomplete. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "イラストのデータが不完全です。後でもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일러스트 정보가 불완전합니다. 나중에 다시 시도하세요."
           }
         }
       }
@@ -41125,35 +40718,6 @@
         }
       }
     },
-    "画风": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Style"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "スタイル"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "스타일"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画风"
-          }
-        }
-      }
-    },
     "界面语言": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -41274,6 +40838,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "登录 ChatGPT 账号，让 MoMo 使用你的 Codex 订阅。"
+          }
+        }
+      }
+    },
+    "登录 Codex 订阅后可用。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 Codex 订阅后可用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with a Codex subscription to use this feature."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex サブスクリプションでログインすると利用できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 구독으로 로그인하면 사용할 수 있습니다."
           }
         }
       }
@@ -42215,6 +41808,64 @@
           "stringUnit": {
             "state": "translated",
             "value": "空"
+          }
+        }
+      }
+    },
+    "空格放大": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空格放大"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space to enlarge"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スペースで拡大"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스페이스바로 확대"
+          }
+        }
+      }
+    },
+    "空格还原": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空格还原"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space to restore"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スペースで戻す"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스페이스바로 복원"
           }
         }
       }
@@ -43622,35 +43273,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "系统限制了相机访问，可以从照片图库添加图片。"
-          }
-        }
-      }
-    },
-    "素描手稿": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sketch"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "スケッチ"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "스케치"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "素描手稿"
           }
         }
       }
@@ -47856,6 +47478,35 @@
         }
       }
     },
+    "请选择 2、3、4 或 6 小时。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择 2、3、4 或 6 小时。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose 2, 3, 4, or 6 hours."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2、3、4、6 時間から選んでください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2, 3, 4, 6시간 중에서 선택하세요."
+          }
+        }
+      }
+    },
     "请选择一段清晰的单人片段": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -49830,6 +49481,35 @@
         }
       }
     },
+    "返回转录": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返回转录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to transcripts"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文字起こしに戻る"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사로 돌아가기"
+          }
+        }
+      }
+    },
     "返回连接方式": {
       "localizations": {
         "en": {
@@ -49842,6 +49522,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "返回连接方式"
+          }
+        }
+      }
+    },
+    "还原插画": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还原插画"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore illustration size"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "イラストを元のサイズに戻す"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일러스트 크기 복원"
           }
         }
       }
@@ -51768,6 +51477,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "这段聊天使用的资料已修改或删除，请新建聊天。"
+          }
+        }
+      }
+    },
+    "这段转录已不可用，请刷新后重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这段转录已不可用，请刷新后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This transcript is no longer available. Refresh and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この文字起こしは利用できません。更新してもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 전사를 사용할 수 없습니다. 새로 고친 후 다시 시도하세요."
           }
         }
       }
@@ -55044,35 +54782,6 @@
         }
       }
     },
-    "重新生成插画": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Regenerate Artwork"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "イラストを再生成"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "일러스트 다시 생성"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "重新生成插画"
-          }
-        }
-      }
-    },
     "重新登录": {
       "localizations": {
         "en": {
@@ -56073,6 +55782,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "隐藏密钥"
+          }
+        }
+      }
+    },
+    "需要 Codex 订阅": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要 Codex 订阅"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex subscription required"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex サブスクリプションが必要"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 구독 필요"
           }
         }
       }

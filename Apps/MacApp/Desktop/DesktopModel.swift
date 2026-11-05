@@ -86,6 +86,7 @@ final class DesktopModel {
             modelName = modelDrafts[modelProvider] ?? ""
             modelAccount = nil
             modelAccountCheckedAt = nil
+            lifeIllustrations.invalidateSupport()
             failure = nil
         }
     }
@@ -112,6 +113,7 @@ final class DesktopModel {
     var memoryReviewStatus: MemoryReviewStatus?
     var transcriptMemoryNeedsReview = 0
     var contextLoading = false
+    let lifeIllustrations: LifeIllustrationStore
     @ObservationIgnored private var fetchingContext = false
     @ObservationIgnored private var contextRefreshRequested = false
     @ObservationIgnored private var contextRefreshNonSilent = false
@@ -149,6 +151,7 @@ final class DesktopModel {
             ?? URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "MoMoRepositoryRoot") as? String ?? "")
         let dataFolder = Bundle.main.object(forInfoDictionaryKey: "MoMoDataFolder") as? String ?? "MoMoAgent"
         dataDirectory = URL(fileURLWithPath: argument("--data-dir") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/\(dataFolder)/Agent").path)
+        lifeIllustrations = LifeIllustrationStore(directory: dataDirectory.appendingPathComponent("life-illustrations-cache"))
         tailnet = EmbeddedTailnet(directory: dataDirectory.appendingPathComponent("tailscale"), device: "mac")
         setupStep = SetupStep(rawValue: UserDefaults.standard.string(forKey: "setup." + dataDirectory.path) ?? "welcome") ?? .welcome
         loadDayBoundaryConfiguration()
@@ -347,6 +350,9 @@ final class DesktopModel {
     private func loadConnection() throws {
         connection = try JSONDecoder().decode(AgentConnection.self, from: Data(contentsOf: dataDirectory.appendingPathComponent("connection.json")))
         key = try String(contentsOf: dataDirectory.appendingPathComponent("api-key"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let connection, let url = connection.dataURL {
+            lifeIllustrations.configure(client: try dataClient(for: connection, url: url), scope: connection.workspaceID.uuidString)
+        }
         prepareDesktop()
         loadEngineConfiguration()
         loadDayBoundaryConfiguration()
@@ -647,6 +653,9 @@ final class DesktopModel {
             }
             if status?.agentOnline == true, !fetchingContext, Date().timeIntervalSince(lastContextRefreshAt) >= 15 {
                 Task { [weak self] in await self?.loadContext(silent: true) }
+            }
+            if status?.agentOnline == true {
+                Task { [weak self] in await self?.lifeIllustrations.refresh(minimumInterval: 15) }
             }
             if runtimeEngine == .superagent, status?.agentOnline == true {
                 await refreshProactiveSnapshot()

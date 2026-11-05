@@ -2,6 +2,7 @@ import SwiftUI
 import Observation
 import MoMoArchive
 import MoMoContracts
+import MoMoAgentClient
 
 private struct TimelineDestination: Hashable {
     let windowID: TimelineWindowID
@@ -18,6 +19,7 @@ struct LibraryView: View {
     let refresh: () async -> Void
     let canDiscuss: Bool
     let discuss: (SourceReference) -> Void
+    var illustrations: LifeIllustrationStore? = nil
     var openSettings: (() -> Void)? = nil
     var retryTranscription: ((UUID, Int64) async throws -> Void)? = nil
     var discussSources: (([SourceReference]) -> Void)? = nil
@@ -35,7 +37,7 @@ struct LibraryView: View {
     @State private var searching = false
     @State private var choosingDate = false
     @State private var sharingDay: TimelineDay?
-    @State private var journalDay: TimelineDay?
+    @State private var selectedIllustration: LifeIllustration?
     @State private var dateDraft = Date()
     @State private var pendingDay: TimelineDay?
     @State private var page = ScrollPosition(idType: TimelineDay.self)
@@ -100,15 +102,6 @@ struct LibraryView: View {
                 requestWatchStatus: requestWatchStatus)
         }
         .toolbar {
-            if Self.makeJournalInput(for: timeline.selectedDay, timeline: timeline) != nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { journalDay = timeline.selectedDay } label: {
-                        Image(systemName: "photo.artframe")
-                    }
-                    .accessibilityLabel("每日记忆手账")
-                    .accessibilityIdentifier("timeline.journal")
-                }
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { sharingDay = timeline.selectedDay } label: {
                     Label("分享", systemImage: "square.and.arrow.up").labelStyle(.titleAndIcon)
@@ -127,9 +120,22 @@ struct LibraryView: View {
         .sheet(item: $sharingDay) { day in
             TimelineShareView(day: day, archive: model.archive, configurationFingerprint: timeline.configurationFingerprint)
         }
-        .sheet(item: $journalDay) { day in
-            if let input = Self.makeJournalInput(for: day, timeline: timeline) {
-                DailyMemoryJournalSheet(input: input)
+        .fullScreenCover(item: $selectedIllustration) { item in
+            if let illustrations {
+                LifeIllustrationViewer(store: illustrations, initialID: item.id) { source in
+                    Task {
+                        var calendar = Calendar(identifier: .gregorian)
+                        calendar.timeZone = TimeZone(identifier: source.timezone) ?? .current
+                        let sourceDay = TimelineDay(Date(timeIntervalSince1970: source.windowStart), calendar: calendar)
+                        await timeline.load(sourceDay)
+                        select(sourceDay)
+                        let windows = timeline.listWindows[sourceDay] ?? []
+                        if let window = windows.first(where: {
+                            $0.id.start.timeIntervalSince1970 < source.windowEnd && $0.end.timeIntervalSince1970 > source.windowStart
+                        }) { selectedWindow = TimelineDestination(windowID: window.id) }
+                        else { navigationFailure = String(localized: "这段转录已不可用，请刷新后重试。") }
+                    }
+                }
             }
         }
         .alert("资料暂不可用", isPresented: Binding(get: { navigationFailure != nil }, set: { if !$0 { navigationFailure = nil } })) {
@@ -322,8 +328,9 @@ struct LibraryView: View {
                     ForEach(timeline.days) { day in
                         TimelineDayPage(day: day, timeline: timeline, reading: readingStates.state(for: day),
                             transcription: transcription, speechFailure: speechFailure, dateRange: dateRange,
-                            journalInput: Self.makeJournalInput(for: day, timeline: timeline),
-                            openJournal: { journalDay = day },
+                            illustrations: illustrations,
+                            openIllustration: { selectedIllustration = $0 },
+                            illustrationFailure: { navigationFailure = $0 },
                             refresh: refresh, open: { selectedWindow = $0 })
                             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                             .id(day)
@@ -552,38 +559,7 @@ struct LibraryView: View {
         }
     }
 
-    fileprivate static func makeJournalInput(for day: TimelineDay, timeline: TimelineModel) -> DailyJournalInput? {
-        let windows = timeline.listWindows[day] ?? []
-        guard !windows.isEmpty else { return nil }
-        var segments: [DailyJournalSegment] = []
-        for window in windows {
-            guard window.paragraphs.contains(where: \.hasReadableText) else { continue }
-            var cal = Calendar(identifier: .gregorian)
-            cal.timeZone = TimeZone(secondsFromGMT: window.id.timezoneOffset) ?? .current
-            let hour = cal.component(.hour, from: window.id.start)
-            let ts = window.id.start.timeIntervalSince1970
-            if let summary = timeline.summary(for: window) {
-                let clean = MarkdownDocument.plainTextPreview(summary)
-                if !clean.isEmpty {
-                    segments.append(DailyJournalSegment(hour: hour, duration: window.speechDuration, text: clean, isSummary: true, timestamp: ts))
-                    continue
-                }
-            }
-            let preview = TimelinePresentation.preview(window, summary: nil)
-            if !preview.isEmpty {
-                segments.append(DailyJournalSegment(hour: hour, duration: window.speechDuration, text: preview, isSummary: false, timestamp: ts))
-            }
-        }
-        guard !segments.isEmpty else { return nil }
-        let key = String(format: "%04d-%02d-%02d", day.year, day.month, day.day)
-        let input = DailyJournalInput(
-            dayKey: key,
-            dateLabel: TimelineDate.day(day),
-            dayStartHour: TimelineDay.currentStartHour,
-            segments: segments
-        )
-        return input.hasReadableContent ? input : nil
-    }
+
 }
 
 private struct LibraryTimelineSearch: Equatable { let query: String; let revision: UInt64 }
@@ -656,6 +632,9 @@ private struct TimelinePagerSnapshot: Equatable {
 @MainActor @Observable private final class TimelineDayReadingState {
     var position = ScrollPosition(idType: TimelineWindowID.self)
     var positioned = false
+    @ObservationIgnored var rowOffsets: [TimelineWindowID: CGFloat] = [:]
+    @ObservationIgnored var contentOffset: CGFloat = 0
+    @ObservationIgnored var insertionAnchor: (id: TimelineWindowID, y: CGFloat)?
 }
 
 private struct TimelineDayPage: View {
@@ -665,8 +644,10 @@ private struct TimelineDayPage: View {
     let transcription: TranscriptionSnapshot?
     let speechFailure: String?
     let dateRange: TimelineDateRange
-    let journalInput: DailyJournalInput?
-    let openJournal: () -> Void
+    let illustrations: LifeIllustrationStore?
+    let openIllustration: (LifeIllustration) -> Void
+    let illustrationFailure: (String) -> Void
+    @State private var displayedIllustrations: [LifeIllustration] = []
     let refresh: () async -> Void
     let open: (TimelineDestination) -> Void
 
@@ -702,12 +683,33 @@ private struct TimelineDayPage: View {
                                 }
                             }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
                         }
+                        ForEach(illustrationsAfter(window.id, windows: windows)) { item in
+                            if let illustrations, let url = illustrations.imageURL(for: item) {
+                                LifeIllustrationInlineView(illustration: item, url: url,
+                                    open: { openIllustration(item) },
+                                    showSource: { open(TimelineDestination(windowID: window.id)) },
+                                    delete: {
+                                        Task {
+                                            do { try await illustrations.delete(item) }
+                                            catch { illustrationFailure(error.localizedDescription) }
+                                        }
+                                    })
+                                    .padding(.leading, 26).padding(.bottom, 28)
+                            }
+                        }
                     }
                     .id(window.id)
-                }
-                if let journalInput, !windows.isEmpty {
-                    DailyMemoryJournalBanner(input: journalInput, openSheet: openJournal)
-                        .padding(.top, 8)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.frame(in: .named(day)).minY
+                    } action: { y in
+                        reading.rowOffsets[window.id] = y
+                        if let anchor = reading.insertionAnchor, anchor.id == window.id, abs(y - anchor.y) > 0.5 {
+                            reading.insertionAnchor = nil
+                            var transaction = Transaction(); transaction.disablesAnimations = true
+                            withTransaction(transaction) { reading.position.scrollTo(y: max(0, reading.contentOffset + y - anchor.y)) }
+                        }
+                    }
+                    .onDisappear { reading.rowOffsets.removeValue(forKey: window.id) }
                 }
                 if let failure = timeline.failures[day] {
                     Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
@@ -733,6 +735,25 @@ private struct TimelineDayPage: View {
                     .allowsHitTesting(false)
             }
         }
+        .coordinateSpace(name: day)
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, offset in
+            reading.contentOffset = offset
+        }
+        .onChange(of: illustrations?.items ?? [], initial: true) { _, items in
+            let available = items.filter { illustrations?.imageURL(for: $0) != nil }
+            guard displayedIllustrations != available else { return }
+            // Preserve the first visible transcript and its exact offset when a new picture arrives above it.
+            if !displayedIllustrations.isEmpty || reading.positioned {
+                let offsets = reading.rowOffsets
+                if let id = reading.position.viewID(type: TimelineWindowID.self), let y = offsets[id] {
+                    reading.insertionAnchor = (id, y)
+                } else if let anchor = offsets.filter({ $0.value <= 0 }).max(by: { $0.value < $1.value })
+                    ?? offsets.filter({ $0.value > 0 }).min(by: { $0.value < $1.value }) {
+                    reading.insertionAnchor = (anchor.key, anchor.value)
+                }
+            }
+            displayedIllustrations = available
+        }
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(.top, for: .alignment)
         .scrollPosition(Binding(get: {
@@ -744,6 +765,7 @@ private struct TimelineDayPage: View {
         }))
         .onScrollPhaseChange { _, phase in
             guard day == timeline.selectedDay, phase == .tracking || phase == .interacting else { return }
+            reading.insertionAnchor = nil
             // A delayed first load must not take control back after the reader starts scrolling.
             reading.positioned = true
         }
@@ -766,6 +788,14 @@ private struct TimelineDayPage: View {
         // regrouping replaces a row ID, scrollTo(id:) can otherwise align that
         // inset target horizontally and consume the 24pt page margin.
         .padding(.horizontal, 24)
+    }
+
+    private func illustrationsAfter(_ id: TimelineWindowID, windows: [TimelineWindow]) -> [LifeIllustration] {
+        displayedIllustrations.filter { item in
+            windows.last(where: {
+                $0.id.start.timeIntervalSince1970 < item.windowEnd && $0.end.timeIntervalSince1970 > item.windowStart
+            })?.id == id
+        }
     }
 
 }

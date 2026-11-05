@@ -51,7 +51,7 @@ struct PhoneRootView: View {
                         batches: runtime.activeBatches,
                         delete: { try await runtime.delete(sessionID: $0) },
                         refresh: { await runtime.refresh() }, canDiscuss: runtime.remoteAgent.store != nil,
-                        discuss: { discuss([$0]) }, openSettings: { showingSettings = true },
+                        discuss: { discuss([$0]) }, illustrations: runtime.lifeIllustrations, openSettings: { showingSettings = true },
                         retryTranscription: { try await runtime.retryTranscription(sessionID: $0, expectedGeneration: $1) },
                         discussSources: discuss,
                         retryTimeline: { try await runtime.retryTimeline($0) },
@@ -72,7 +72,7 @@ struct PhoneRootView: View {
             NavigationStack {
                 SettingsView(archive: runtime.archive, remoteAgent: runtime.remoteAgent,
                     modelDirectory: runtime.modelDirectory, modelStatus: runtime.modelStatus,
-                    speechSettings: runtime.speechSettings, earphone: runtime.earphone,
+                    speechSettings: runtime.speechSettings, illustrations: runtime.lifeIllustrations, earphone: runtime.earphone,
                     speakerRematch: runtime.speakerRematch,
                     onSpeakersChanged: { await runtime.didMutateSpeakers() })
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showingSettings = false } } }

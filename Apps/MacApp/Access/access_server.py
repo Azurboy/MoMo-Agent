@@ -129,8 +129,9 @@ class AccessService:
         body = await request.read() if request.method == 'POST' else None
         async with await self.upstream(request.method, target, body, context, headers) as response:
             data = await response.read()
-            return web.Response(status=response.status, body=data, content_type='application/json',
-                headers={'Retry-After':response.headers['Retry-After']} if 'Retry-After' in response.headers else None)
+            return web.Response(status=response.status, body=data, content_type=response.content_type,
+                headers={'Cache-Control': response.headers.get('Cache-Control', 'no-store'),
+                         **({'Retry-After':response.headers['Retry-After']} if 'Retry-After' in response.headers else {})})
 
     async def desktop_frames(self, request):
         feed = DesktopFrameFeed(self.desktop, self.token(request))
@@ -235,7 +236,7 @@ async def errors(request, handler):
         response = web.json_response({'error': {'code': 'unauthorized', 'message': '配对凭据不匹配'}}, status=401)
     except (OSError, ClientError, asyncio.TimeoutError):
         response = web.json_response({'error': {'code': 'unavailable', 'message': 'Mac Agent 暂时不可用，请检查运行状态。'}}, status=503)
-    response.headers['Cache-Control'] = 'no-store'
+    response.headers.setdefault('Cache-Control', 'no-store')
     return response
 
 

@@ -2,6 +2,23 @@ import Foundation
 import MoMoContracts
 
 extension ArchiveStore {
+    /// Received, unfinished audio only: the still-open capture tail is not a processing dependency.
+    public func pendingTranscriptionIntervals(sessionID: UUID, configurationFingerprint: String?) throws -> [DateInterval] {
+        let coverage = try recordingCoverage(sessionID: sessionID, configurationFingerprint: configurationFingerprint)
+        let rows = try database.rows("SELECT id,wall_clock_anchor FROM epochs WHERE session_id=?", [.text(sessionID.uuidString)])
+        var intervals: [DateInterval] = []
+        for epoch in coverage.epochs {
+            guard let rate = epoch.timebaseHz, let row = rows.first(where: { $0.string(0) == epoch.epochID.uuidString }),
+                  let anchor = row.double(1), rate > 0, rate.isFinite, anchor.isFinite else { continue }
+            // Without a current model configuration, received processing coverage is unknown.
+            let pending = configurationFingerprint == nil ? epoch.received : epoch.pending
+            intervals += pending.map {
+                DateInterval(start: Date(timeIntervalSince1970: anchor + Double($0.start) / rate), duration: Double($0.count) / rate)
+            }
+        }
+        return intervals.sorted { $0.start < $1.start }
+    }
+
     /// All processing ranges belong to the requested configuration; old model coverage is not combined.
     public func recordingCoverage(sessionID: UUID, configurationFingerprint: String?) throws -> RecordingCoverage {
         if let configurationFingerprint, !ContentHash.isValid(configurationFingerprint) { throw ArchiveError.invalidQuery }

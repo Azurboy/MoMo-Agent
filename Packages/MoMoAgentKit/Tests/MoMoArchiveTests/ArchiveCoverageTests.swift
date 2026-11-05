@@ -6,6 +6,29 @@ import MoMoContracts
 struct ArchiveCoverageTests {
     private let fingerprint = ContentHash.sha256(Data("coverage-configuration".utf8))
 
+    @Test func pendingIllustrationRangesUseReceivedFramesAndExcludeOpenCaptureTail() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store()
+        let first = try fixture.envelope()
+        let later = try fixture.envelope(startFrame: 3200, sequence: 2)
+        for envelope in [first, later] {
+            _ = try await store.commitReceivedChunk(fixture.deliver(envelope, to: store))
+        }
+        let anchor = first.manifest.wallClockAnchor
+        let before = try await store.pendingTranscriptionIntervals(sessionID: fixture.sessionID, configurationFingerprint: fingerprint)
+        #expect(before == [DateInterval(start: anchor, duration: 0.1), DateInterval(start: anchor.addingTimeInterval(0.2), duration: 0.1)])
+        let ticket = try #require(await store.claimEpochAnalysis(configurationFingerprint: fingerprint))
+        try await store.commitAnalysisBatch(ticket: ticket, windows: [], analyzedCoverage: [first.manifest.frames],
+            noSpeechCoverage: [first.manifest.frames], checkpoint: nil, waitingForMoreAudio: true)
+        let pending = try await store.pendingTranscriptionIntervals(sessionID: fixture.sessionID, configurationFingerprint: fingerprint)
+        #expect(pending == [DateInterval(start: anchor.addingTimeInterval(0.2), duration: 0.1)])
+        let unknown = try await store.pendingTranscriptionIntervals(sessionID: fixture.sessionID, configurationFingerprint: nil)
+        #expect(unknown == before)
+        let coverage = try await store.recordingCoverage(sessionID: fixture.sessionID, configurationFingerprint: fingerprint)
+        #expect(coverage.epochs.first?.closedAtFrame == nil)
+    }
+
     @Test func duplicateAndOverlappingAnalysisUseFrameUnionWithoutFillingMissingAudio() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

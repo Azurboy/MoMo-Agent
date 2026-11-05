@@ -37,6 +37,15 @@ def permitted_route(method, path):
             (method == 'POST' and parts.path in ('/desktop/v1/request', '/desktop/v1/claim', '/desktop/v1/release', '/desktop/v1/heartbeat', '/desktop/v1/input', '/desktop/v1/frame-ack'))):
         return parts.path, False, False
     target = parts.path[len('/context'):] if context else parts.path
+    if context and target.startswith('/v1/life-illustrations/'):
+        suffix = target.removeprefix('/v1/life-illustrations/')
+        query = parse_qs(parts.query, keep_blank_values=True)
+        valid = (method == 'GET' and suffix == 'settings' and not parts.query or
+                 method == 'POST' and suffix in ('settings', 'delete') and not parts.query or
+                 method == 'GET' and re.fullmatch(r'assets/[a-f0-9]{64}', suffix) and not parts.query or
+                 method == 'GET' and suffix == 'manifest' and set(query) <= {'cursor', 'limit'}
+                 and all(len(value) == 1 and value[0].isdigit() for value in query.values()))
+        return (target + ('?' + parts.query if parts.query else ''), True, False) if valid else None
     # The native session transcript carries detached delegation delivery notices.
     if (not context and method == 'GET' and
             re.fullmatch(r'/api/sessions/[A-Za-z0-9_-]+/messages', target)):

@@ -14,6 +14,7 @@ from hermes_memory import HermesMemory
 import transcript_ingestion
 import memory_review
 import recording_summary
+from life_illustrations import LifeIllustrations
 from health_store import read_health, sync_health
 from phone_sources import read_phone_sources, sync_phone_source
 
@@ -28,6 +29,7 @@ class ContextService:
         self.stopped = threading.Event()
         self.next_dispatch = time.monotonic() + transcript_ingestion.INTERVAL
         store = ContextStore(self.directory); store.close()
+        illustrations = LifeIllustrations(self.data); illustrations.recover(); illustrations.close()
         service = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -49,11 +51,47 @@ class ContextService:
                     self.respond(401, {"error": {"code": "unauthorized", "message": "Invalid connection credential"}})
                     return
                 store = ContextStore(service.directory)
+                illustrations = None
                 try:
                     url = urllib.parse.urlsplit(self.path)
                     query = urllib.parse.parse_qs(url.query)
                     after = query.get("after", [""])[0]
                     limit = int(query.get("limit", ["100"])[0])
+                    if url.path.startswith('/v1/life-illustrations/'):
+                        illustrations = LifeIllustrations(service.data)
+                        illustrations.reconcile(store)
+                        from life_illustration_generator import CodexIllustrationGenerator
+                        availability = CodexIllustrationGenerator(service.data).availability()
+                        suffix = url.path.removeprefix('/v1/life-illustrations/')
+                        if self.command == 'POST':
+                            size = int(self.headers.get('Content-Length', '0'))
+                            if not 0 < size <= 4096:
+                                self.respond(413, {'error': {'code': 'body_too_large'}}); return
+                            body = json.loads(self.rfile.read(size))
+                            if suffix == 'settings':
+                                result = illustrations.update_settings(body, availability)
+                            elif suffix == 'delete':
+                                result = illustrations.delete(body['id'])
+                            else:
+                                self.respond(404, {'error': {'code': 'not_found'}}); return
+                        elif suffix == 'settings':
+                            result = illustrations.settings(availability)
+                        elif suffix == 'manifest':
+                            result = illustrations.manifest(query.get('cursor', ['0'])[0], limit)
+                            if not availability['supported']:
+                                result = dict(items=[], next_cursor=query.get('cursor', ['0'])[0], has_more=False)
+                        elif suffix.startswith('assets/'):
+                            if not availability['supported']:
+                                self.respond(404, {'error': {'code': 'not_found'}}); return
+                            raw = illustrations.asset(suffix.removeprefix('assets/'))
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'image/png')
+                            self.send_header('Content-Length', str(len(raw)))
+                            self.send_header('Cache-Control', 'private, no-store')
+                            self.end_headers(); self.wfile.write(raw); return
+                        else:
+                            self.respond(404, {'error': {'code': 'not_found'}}); return
+                        self.respond(200, result); return
                     if self.command == "POST":
                         size = int(self.headers.get("Content-Length", "0"))
                         if not 0 < size <= 8_000_000:
@@ -104,6 +142,8 @@ class ContextService:
                     self.respond(200, result)
                 except Conflict as error:
                     self.respond(409, {"error": {"code": "revision_conflict", "message": str(error)}})
+                except FileNotFoundError:
+                    self.respond(404, {'error': {'code': 'not_found', 'message': 'Illustration is unavailable'}})
                 except (ValueError, KeyError, TypeError) as error:
                     self.respond(400, {"error": {"code": "invalid_source", "message": str(error)}})
                 except Exception as error:
@@ -111,6 +151,8 @@ class ContextService:
                     self.respond(500, {"error": {"code": "storage_failure", "message": "MoMo context could not be committed"}})
                 finally:
                     store.close()
+                    if illustrations:
+                        illustrations.close()
 
             do_GET = handle_request
             do_POST = handle_request
@@ -121,6 +163,7 @@ class ContextService:
         self.threads = [threading.Thread(target=self.server.serve_forever, daemon=True, name="momo-sync"),
                         threading.Thread(target=self.dispatch, daemon=True, name="momo-transcript-dispatch"),
                         threading.Thread(target=self.dispatch_summaries, daemon=True, name="momo-summary-dispatch")]
+        self.threads.append(threading.Thread(target=self.dispatch_illustrations, daemon=True, name='momo-life-illustrations'))
 
     def start(self):
         for thread in self.threads:
@@ -206,6 +249,25 @@ class ContextService:
                 logging.error('MoMo summary dispatch failed: %s', type(error).__name__)
             finally:
                 store.close()
+
+    def dispatch_illustrations(self):
+        # A separate worker and idle admission keep image work out of chat and summary queues.
+        while not self.stopped.wait(30):
+            store = ContextStore(self.directory)
+            illustrations = LifeIllustrations(self.data)
+            try:
+                from life_illustration_generator import CodexIllustrationGenerator
+                generator = CodexIllustrationGenerator(self.data)
+                if generator.availability()['supported']:
+                    illustrations.scan(store)
+                    if memory_review.chat_idle(self.data, time.time()):
+                        illustrations.advance(generator, store)
+                else:
+                    illustrations.reconcile(store)
+            except Exception as error:
+                logging.error('MoMo illustration dispatch failed: %s', type(error).__name__)
+            finally:
+                illustrations.close(); store.close()
 
     def advance_job(self, store, job):
         try:
