@@ -14,22 +14,26 @@ SCENE_POLICY = '''为 MoMo Agent 的生活插画提炼真实场景，仅输出�
 用 120–240 个中文字说明这一个瞬间的动作、物件、人物互动和仍未确定的事实；不添成功、庆祝或情绪判断。
 如果资料只有噪声、寒暄、重复语气词或没有任何可依据的具体事件，只输出 SKIP。'''
 
-ART_POLICY = '''Create one 1024x1024 full-bleed matte editorial illustration for MoMo Agent.
+ART_POLICY = '''Create one compact editorial spot-sticker vignette for MoMo Agent on a truly transparent
+1024x1024 canvas. Leave generous fully transparent margins on all four sides.
 Match the Anthropic product-release editorial spot-illustration design language in the attached visual
 style board. Its top row demonstrates cut-paper shapes and fluid calligraphic ink; bottom-left demonstrates
 the composition; bottom-right defines MoMo's canonical silhouette. Compose a new scene from the brief.
-Choose ONE calm mineral paper ground to fit the moment's mood: dusty celadon sage (#B8C9C3), muted
-terracotta clay (#D4856A), warm oatmeal stone (#EAE5DB), or misty slate (#C6CFD9). Let different moments
+Choose ONE calm mineral cut-paper accent spot to fit the moment's mood: dusty celadon sage (#B8C9C3), muted
+terracotta clay (#D4856A), warm oatmeal stone (#DFD7C8), or misty slate (#C6CFD9). Let different moments
 naturally vary in tone. Favor misty slate for analytical collaboration, celadon for outdoor observation,
-terracotta for a quiet evening, and oatmeal for other everyday pauses. Pair this full-bleed ground with
+terracotta for a quiet evening, and oatmeal for other everyday pauses. Pair this organic accent spot with
 crisp warm-ivory (#FAF9F5) unlined paper-cutout
 shapes and deep charcoal-black (#161514) fluid, tapered fountain-pen / brush-ink strokes.
 Use strictly 2–3 flat matte tones total. A subtle mineral paper grain is welcome. No gradients, 3D shading,
 yellow-orange parchment, comic panels, frames or borders.
-Keep 60–68 percent of the square canvas calm, open mineral ground, with at least 55 percent negative space.
-Compose 1–2 graphic offset paper-cutout shapes and 1–2 concrete everyday props from the supported moment,
-drawn with expressive, sparse calligraphic strokes. Preserve this spacious composition across the full canvas.
-Integrate MoMo at a small poetic scale, about 20–28 percent of canvas width, as an UNLINED warm-ivory
+Compose one cohesive connected cluster of MoMo and 1–2 grounded props resting on or overlapping one
+organic mineral cut-paper spot. Keep expressive sparse ink legible at 42pt miniature size.
+The outer canvas must be 100% transparent: no full-square wall, rectangular card, border or background.
+Every interior shape of MoMo, props and the mineral accent MUST be solidly filled and fully opaque.
+Use warm ivory or the mineral color inside shapes; never leave transparent holes in bodies or props.
+Do not draw a sticker rim or shadow; deterministic post-processing adds the physical paper edge.
+Integrate MoMo at a small poetic scale as an UNLINED warm-ivory
 paper-cutout silhouette. Preserve the exact asymmetric TWO-bump head contour, left rounded bump slightly
 taller than right, and two tiny vertical dark oval eyes. Show quiet minimalist Chiikawa-like tenderness
 through gesture. Never a giant zoomed-in mascot head, thick black marker outline around MoMo, cartoon
@@ -128,7 +132,7 @@ class CodexIllustrationGenerator:
                             {'type': 'input_image', 'image_url': 'data:image/png;base64,' + reference},
                             {'type': 'input_text', 'text': brief}]}],
                         tools=[{'type': 'image_generation', 'size': '1024x1024', 'quality': 'medium',
-                                'output_format': 'png'}],
+                                'background': 'transparent', 'output_format': 'png'}],
                         tool_choice={'type': 'image_generation'}, store=False, stream=True,
                         extra_headers={'X-Client-Request-Id': request_id}) as stream:
                     for event in stream:

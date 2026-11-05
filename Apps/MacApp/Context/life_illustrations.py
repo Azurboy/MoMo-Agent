@@ -332,17 +332,29 @@ class LifeIllustrations:
             candidate.load()
             has_alpha = 'A' in candidate.getbands() or 'transparency' in candidate.info
             artwork = candidate.convert('RGBA' if has_alpha else 'RGB')
-            if has_alpha and artwork.getchannel('A').getbbox() is None:
-                raise ValueError('Illustration contains no visible artwork')
+            has_transparent_ground = has_alpha and artwork.getchannel('A').getextrema()[0] < 200
+            if has_transparent_ground:
+                alpha = artwork.getchannel('A')
+                bounds = alpha.point(lambda value: 255 if value > 24 else 0).getbbox()
+                if bounds is None:
+                    raise ValueError('Illustration contains no visible artwork')
+                artwork.putalpha(alpha.point(lambda value: value if value > 24 else 0))
+                left, top, right, bottom = bounds
+                artwork = artwork.crop((max(0, left - 2), max(0, top - 2),
+                                        min(artwork.width, right + 2), min(artwork.height, bottom + 2)))
             visible = Image.new('RGBA', artwork.size, '#FAF9F5')
             visible.alpha_composite(artwork.convert('RGBA'))
             if all(low == high for low, high in visible.convert('RGB').getextrema()):
                 raise ValueError('Illustration contains no visible variation')
-            # The full canvas carries intentional negative space, including legacy transparent images.
-            picture = ImageOps.fit(artwork, (1024, 1024), method=Image.Resampling.LANCZOS)
+            if has_transparent_ground:
+                from life_illustration_sticker import kiss_cut_sticker
+                picture, preview = kiss_cut_sticker(artwork)
+            else:
+                picture = ImageOps.fit(artwork, (1024, 1024), method=Image.Resampling.LANCZOS)
+                preview = ImageOps.fit(picture, (512, 512), method=Image.Resampling.LANCZOS)
         original, thumbnail = io.BytesIO(), io.BytesIO()
         picture.save(original, format='PNG', optimize=True)
-        ImageOps.fit(picture, (512, 512), method=Image.Resampling.LANCZOS).save(thumbnail, format='PNG', optimize=True)
+        preview.save(thumbnail, format='PNG', optimize=True)
         encoded = [original.getvalue(), thumbnail.getvalue()]
         hashes = [hashlib.sha256(value).hexdigest() for value in encoded]
         # Store pixels before the manifest; a crash cannot publish a missing image.

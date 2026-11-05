@@ -42,13 +42,18 @@ struct LifeIllustrationImageView: View {
 }
 
 struct LifeIllustrationPlate: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
     func body(content: Content) -> some View {
         content
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(LifeIllustrationPaper.fill(for: colorScheme))
+            .clipShape(Rectangle())
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                    .allowsHitTesting(false)
+                ZStack {
+                    Rectangle().strokeBorder(MoMoPalette.line, lineWidth: 0.6)
+                    Rectangle().inset(by: 5).strokeBorder(MoMoPalette.line.opacity(0.65), lineWidth: 0.5)
+                }
+                .allowsHitTesting(false)
             }
     }
 }
@@ -66,7 +71,7 @@ struct LifeIllustrationMetadata: View {
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(MoMoPalette.surface, in: Capsule())
                     .accessibilityHidden(true)
-                Text(illustration.caption).phoneText(.caption).monospacedDigit()
+                Text(illustration.caption).font(.system(.caption, design: .monospaced))
                     .lineLimit(1)
                     .accessibilityLabel(illustration.dateCaption)
                     .accessibilityIdentifier("lifeIllustration.viewer.caption")
@@ -80,61 +85,6 @@ struct LifeIllustrationMetadata: View {
             }
         }
         .foregroundStyle(MoMoPalette.muted)
-    }
-}
-
-struct LifeIllustrationInlineView: View {
-    let illustration: LifeIllustration
-    let thumbnailURL: URL
-    let connected: Bool
-    let open: () -> Void
-    let showSource: () -> Void
-    let delete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Color.clear.frame(width: 12)
-                .overlay {
-                    if connected { Rectangle().fill(MoMoPalette.line).frame(width: 1) }
-                }
-                .accessibilityHidden(true)
-            Button(action: open) {
-                HStack(spacing: 9) {
-                    LifeIllustrationImageView(url: thumbnailURL, contentMode: .fill)
-                        .frame(width: 22, height: 22)
-                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                        }
-                        .accessibilityHidden(true)
-                    Text(illustration.caption).phoneText(.caption).monospacedDigit()
-                        .foregroundStyle(MoMoPalette.ink.opacity(0.82))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(MoMoPalette.muted)
-                        .accessibilityHidden(true)
-                }
-                .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 6)
-                .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                }
-                .padding(.vertical, 5)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.dateCaption)
-            .accessibilityIdentifier("lifeIllustration.inline.\(illustration.id)")
-            .contextMenu {
-                Button("查看依据", systemImage: "text.alignleft", action: showSource)
-                Button("删除", systemImage: "trash", role: .destructive, action: delete)
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -209,21 +159,25 @@ struct LifeIllustrationViewer: View {
         _selection = State(initialValue: initialID)
     }
 
-    private var selected: LifeIllustration? { store.items.first { $0.id == selection } }
+    private var items: [LifeIllustration] {
+        store.items.filter { store.imageURL(for: $0, thumbnail: false) != nil }
+            .sorted { $0.windowStart < $1.windowStart }
+    }
+    private var selected: LifeIllustration? { items.first { $0.id == selection } }
 
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                let side = max(0, min(geometry.size.width - 48, geometry.size.height - 64))
+                let side = max(0, min(geometry.size.width - 48, geometry.size.height - 124))
                 VStack(spacing: 16) {
                     if let selected {
                         LifeIllustrationMetadata(illustration: selected,
-                            position: (store.items.firstIndex(where: { $0.id == selection }) ?? 0) + 1,
-                            count: store.items.count)
+                            position: (items.firstIndex(where: { $0.id == selection }) ?? 0) + 1,
+                            count: items.count)
                             .frame(width: side)
                     }
                     TabView(selection: $selection) {
-                        ForEach(store.items) { item in
+                        ForEach(items) { item in
                             Group {
                                 if let url = store.imageURL(for: item, thumbnail: false) {
                                     LifeIllustrationZoomView(url: url, zoomed: Binding(
@@ -239,7 +193,7 @@ struct LifeIllustrationViewer: View {
                                 Button("查看依据", systemImage: "text.alignleft") { dismiss(); showSource(item) }
                                 Button("删除", systemImage: "trash", role: .destructive) {
                                     Task {
-                                        do { try await store.delete(item); if store.items.isEmpty { dismiss() } }
+                                        do { try await store.delete(item); if items.isEmpty { dismiss() } }
                                         catch { failure = error.localizedDescription }
                                     }
                                 }
@@ -249,6 +203,12 @@ struct LifeIllustrationViewer: View {
                     .tabViewStyle(.page(indexDisplayMode: .never))
                     .frame(height: side)
                     .accessibilityIdentifier("lifeIllustration.viewer.image")
+                    if let selected {
+                        Button("查看这段转录") { dismiss(); showSource(selected) }
+                            .font(.caption).foregroundStyle(MoMoPalette.muted)
+                            .frame(minHeight: 44).buttonStyle(.plain)
+                            .accessibilityIdentifier("lifeIllustration.viewer.source")
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -271,7 +231,7 @@ struct LifeIllustrationViewer: View {
             }
         }
         .onChange(of: selection) { zoomed = false }
-        .onChange(of: store.items.map(\.id)) { _, ids in
+        .onChange(of: items.map(\.id)) { _, ids in
             if ids.isEmpty { dismiss() }
             else if !ids.contains(selection), let first = ids.first { selection = first }
         }
