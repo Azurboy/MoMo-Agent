@@ -129,7 +129,10 @@ struct LibraryView: View {
         }
         .fullScreenCover(item: $selectedIllustration) { item in
             if let illustrations {
-                LifeIllustrationViewer(store: illustrations, initialID: item.id, showSource: showIllustrationSource)
+                LifeIllustrationJourneyMapView(store: illustrations, initialID: item.id) { source in
+                    selectedIllustration = nil
+                    showIllustrationSource(source)
+                }
             }
         }
         .alert("资料暂不可用", isPresented: Binding(get: { navigationFailure != nil }, set: { if !$0 { navigationFailure = nil } })) {

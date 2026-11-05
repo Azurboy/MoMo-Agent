@@ -10,7 +10,7 @@ extension PhoneSourceKind {
     }
     var scope: String {
         switch self {
-        case .visits: String(localized: "最近 7 天的到访地点，不持续跟踪定位。")
+        case .visits: String(localized: "最近 7 天的停留与移动轨迹。")
         case .calendar: String(localized: "过去 24 小时和未来 7 天的日程，只读不修改。")
         case .reminders: String(localized: "未完成的提醒事项，包含逾期和未设日期的事项，只读不修改。")
         }

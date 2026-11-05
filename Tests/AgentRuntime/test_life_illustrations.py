@@ -21,8 +21,8 @@ sys.path[:0] = [str(ROOT / 'Apps/MacApp/Context'), str(ROOT / 'Apps/MacApp/Runti
                 str(ROOT / 'Apps/MacApp/Access'), str(ROOT / 'Vendor/HermesAgent')]
 from context_store import ContextStore, digest
 from context_server import ContextService
-from life_illustrations import LifeIllustrations, evidence_for, visit_evidence, window_at
-from life_illustration_generator import CodexIllustrationGenerator, ImageRejected
+from life_illustrations import LifeIllustrations, evidence_for, visit_evidence, trajectory_evidence, window_at
+from life_illustration_generator import CodexIllustrationGenerator, ImageRejected, parse_scene_output
 from rtc_transport import permitted_route
 
 READY = dict(provider='openai-codex', supported=True, service_status='ready')
@@ -329,6 +329,93 @@ class IllustrationTests(unittest.TestCase):
         result = visit_evidence(self.context, self.start, self.start + 3*3600)
         self.assertEqual(['valid', 'boundary'], [visit['id'] for visit in result])
 
+    def install_journey(self):
+        records = [dict(id='stay', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
+                        title='工作室', latitude=39.9982, longitude=116.4796, accuracy=20),
+                   dict(id='transit', source_name='CoreLocation significant_change', start=self.start + 4000,
+                        end=self.start + 4000, latitude=39.9685, longitude=116.4660, accuracy=80)]
+        snapshot = dict(state='enabled', window_start=self.start, window_end=self.start + 10800, records=records)
+        self.context.db.execute('INSERT INTO phone_source_snapshots VALUES(?,?,?,?,?)',
+            (self.payload['device_id'], 'visits', 1, json.dumps(snapshot), self.start))
+        return snapshot
+
+    def test_scene_output_legacy_structured_json_and_skip(self):
+        self.assertEqual((None, 'SKIP'), parse_scene_output(' SKIP '))
+        self.assertEqual(('喝茶看书', '喝茶看书'), parse_scene_output('喝茶看书'))
+        self.assertEqual(('一起讨论模块边界', '桌边有两组积木。方案还没确定。'),
+            parse_scene_output('SUMMARY: 一起讨论模块边界\nBRIEF: 桌边有两组积木。方案还没确定。'))
+        self.assertEqual(('喝茶', '手里拿着茶杯'), parse_scene_output('{"summary":"喝茶","brief":"手里拿着茶杯"}'))
+        self.assertEqual(56, len(parse_scene_output('字' * 120)[0]))
+
+    def test_summary_and_trajectory_publish_without_private_provenance(self):
+        self.install_journey()
+        self.generator.prepare = lambda evidence: 'SUMMARY: 在工作室用积木讨论模块交接，方案还没确定\nBRIEF: 两人在桌边用积木说明模块边界。'
+        self.generate()
+        item = self.queue.manifest()['items'][0]
+        self.assertEqual('在工作室用积木讨论模块交接，方案还没确定', item['summary'])
+        self.assertEqual(('工作室', 39.9982, 116.4796), (item['place'], item['latitude'], item['longitude']))
+        self.assertEqual(self.start, item['place_start'])
+        self.assertEqual(['visit', 'waypoint'], [point['kind'] for point in item['route_points']])
+        self.assertNotIn('device_id', item['route_points'][0])
+        self.assertEqual(2, len(json.loads(self.row()['evidence'])['trajectory']))
+
+    def test_transit_alone_never_attributes_a_stay(self):
+        snapshot = self.install_journey()
+        snapshot['records'] = snapshot['records'][1:]
+        self.context.db.execute('UPDATE phone_source_snapshots SET payload=?', (json.dumps(snapshot),))
+        self.generate()
+        self.assertIsNone(self.row()['place'])
+        self.assertIsNone(self.row()['latitude'])
+        self.assertEqual('waypoint', json.loads(self.row()['route_points'])[0]['kind'])
+
+    def test_transit_revocation_erases_locations_summaries_assets_and_history(self):
+        snapshot = self.install_journey()
+        self.generate()
+        snapshot['records'].pop()
+        self.context.db.execute('UPDATE phone_source_snapshots SET revision=2,payload=?', (json.dumps(snapshot),))
+        self.queue.reconcile(self.context)
+        self.assertEqual('invalid', self.row()['state'])
+        for key in ('summary', 'place', 'latitude', 'longitude', 'place_start', 'place_end'):
+            self.assertIsNone(self.row()[key])
+        self.assertEqual('[]', self.row()['route_points'])
+        self.assertFalse(list(self.queue.assets.glob('*.png')))
+        self.assertTrue(all(item['deleted'] for item in self.queue.manifest()['items']))
+        self.assertNotIn('route_points', self.queue.db.execute('SELECT payload FROM changes LIMIT 1').fetchone()[0])
+
+    def test_disabled_or_deleted_snapshot_withdraws_and_aging_does_not(self):
+        snapshot = self.install_journey()
+        self.generate()
+        snapshot.update(records=[], window_start=self.start + 20000, window_end=self.start + 30000)
+        self.context.db.execute('UPDATE phone_source_snapshots SET revision=2,payload=?', (json.dumps(snapshot),))
+        self.queue.reconcile(self.context)
+        self.assertEqual('ready', self.row()['state'])
+        snapshot['state'] = 'needs_permission'
+        self.context.db.execute('UPDATE phone_source_snapshots SET revision=3,payload=?', (json.dumps(snapshot),))
+        self.queue.reconcile(self.context)
+        self.assertEqual('invalid', self.row()['state'])
+
+    def test_bounded_trajectory_keeps_stays_and_rejects_nonfinite_coordinates(self):
+        snapshot = self.install_journey()
+        waypoint = snapshot['records'][1]
+        snapshot['records'] += [dict(waypoint, id=f'p-{index}', start=self.start + 4001 + index,
+                                    end=self.start + 4001 + index) for index in range(100)]
+        snapshot['records'] += [dict(waypoint, id='bad', latitude=float('nan'))]
+        self.context.db.execute('UPDATE phone_source_snapshots SET payload=?', (json.dumps(snapshot),))
+        points = trajectory_evidence(self.context, self.start, self.start + 10800)
+        self.assertEqual(64, len(points))
+        self.assertEqual('stay', points[0]['id'])
+        self.assertEqual('p-99', points[-1]['id'])
+        self.assertNotIn('bad', [point['id'] for point in points])
+
+    def test_schema_migration_is_idempotent_for_legacy_slots(self):
+        self.scan()
+        for name in ('summary', 'latitude', 'longitude', 'place_start', 'place_end', 'route_points'):
+            self.queue.db.execute(f'ALTER TABLE slots DROP COLUMN {name}')
+        self.queue.ensure_columns()
+        self.queue.ensure_columns()
+        self.generate()
+        self.assertEqual('ready', self.row()['state'])
+
     def test_visit_becoming_unreliable_withdraws_existing_picture(self):
         visit = dict(id='visit', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
                      title='河边', latitude=31, longitude=121, accuracy=20)
@@ -413,6 +500,18 @@ class NativeImageStreamTests(unittest.TestCase):
             self.assertEqual((768, 768), reference.size)
         self.assertEqual({'type': 'input_text', 'text': '真实场景'}, content[1])
         self.assertEqual({'X-Client-Request-Id': 'operation'}, client.kwargs['extra_headers'])
+
+    def test_availability_recognizes_logged_in_codex_and_separates_transient_errors(self):
+        with tempfile.TemporaryDirectory() as raw:
+            data = Path(raw)
+            (data / 'hermes').mkdir(parents=True)
+            (data / 'hermes/auth.json').write_text(json.dumps({'active_provider': 'openai-codex'}), encoding='utf-8')
+            generator = CodexIllustrationGenerator(data)
+            with patch('model_setup.resolve_credentials', return_value={'api_key': 'tok', 'base_url': 'https://chatgpt.com/backend-api'}), \
+                 patch('model_setup.catalog', return_value=['gpt-5.4']):
+                self.assertEqual({'provider': 'openai-codex', 'supported': True, 'service_status': 'ready'}, generator.availability())
+            with patch.object(generator, 'resolve', side_effect=RuntimeError('sqlite busy')):
+                self.assertEqual({'provider': 'openai-codex', 'supported': False, 'service_status': 'unavailable'}, generator.availability())
 
 
 if __name__ == '__main__': unittest.main()

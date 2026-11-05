@@ -64,15 +64,14 @@ struct LifeIllustrationMetadata: View {
     let count: Int
 
     var body: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 9) {
                 Text(illustration.logicalDay)
                     .font(.system(.caption2, design: .monospaced))
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(MoMoPalette.surface, in: Capsule())
                     .accessibilityHidden(true)
                 Text(illustration.caption).font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
                     .accessibilityLabel(illustration.dateCaption)
                     .accessibilityIdentifier("lifeIllustration.viewer.caption")
             }
@@ -88,18 +87,32 @@ struct LifeIllustrationMetadata: View {
     }
 }
 
+extension LifeIllustrationStore {
+    var settingsRowStatus: String {
+        if settings.supported { return String(localized: "Codex 订阅可用") }
+        if settings.provider == "anthropic" { return String(localized: "Claude 订阅暂不支持") }
+        if !isConfigured { return String(localized: "连接 Mac 后可用") }
+        if !hasLoadedSettings { return isRefreshing ? String(localized: "正在同步…") : String(localized: "连接 Mac 后同步") }
+        if settings.serviceStatus == "unavailable" { return String(localized: "暂不可用") }
+        return String(localized: "需要 Codex 订阅")
+    }
+
+    var settingsDetailStatus: String {
+        if settings.supported { return String(localized: "Codex 订阅可用") }
+        if settings.provider == "anthropic" {
+            return String(localized: "Claude 订阅暂不支持，切换为 Codex 订阅后可用。")
+        }
+        if !isConfigured { return String(localized: "连接 Mac 后可用") }
+        if !hasLoadedSettings { return isRefreshing ? String(localized: "正在同步…") : String(localized: "连接 Mac 后同步") }
+        if settings.serviceStatus == "unavailable" { return String(localized: "暂不可用") }
+        return String(localized: "登录 Codex 订阅后可用。")
+    }
+}
+
 struct LifeIllustrationSettingsControls: View {
     let store: LifeIllustrationStore
     @State private var saving = false
     @State private var failure: String?
-
-    private var status: String {
-        if store.settings.supported { return String(localized: "Codex 订阅可用") }
-        if store.settings.provider == "anthropic" {
-            return String(localized: "Claude 订阅暂不支持，切换为 Codex 订阅后可用。")
-        }
-        return String(localized: "登录 Codex 订阅后可用。")
-    }
 
     var body: some View {
         Toggle("生活插画", isOn: Binding(get: { store.settings.enabled }, set: {
@@ -114,8 +127,9 @@ struct LifeIllustrationSettingsControls: View {
         }
         .disabled(!store.settings.supported || saving)
         .accessibilityIdentifier("lifeIllustration.settings.interval")
-        Text(status).font(.footnote).foregroundStyle(.secondary)
+        Text(store.settingsDetailStatus).font(.footnote).foregroundStyle(.secondary)
             .accessibilityIdentifier("lifeIllustration.settings.subscription")
+            .task { await store.refresh() }
         if let failure = failure ?? store.error {
             Text(failure).font(.footnote).foregroundStyle(MoMoPalette.failure)
         }
@@ -160,7 +174,8 @@ struct LifeIllustrationViewer: View {
     }
 
     private var items: [LifeIllustration] {
-        store.items.filter { store.imageURL(for: $0, thumbnail: false) != nil }
+        let day = store.items.first { $0.id == initialID }?.logicalDay
+        return store.items.filter { $0.logicalDay == day && store.imageURL(for: $0, thumbnail: false) != nil }
             .sorted { $0.windowStart < $1.windowStart }
     }
     private var selected: LifeIllustration? { items.first { $0.id == selection } }
@@ -168,7 +183,8 @@ struct LifeIllustrationViewer: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                let side = max(0, min(geometry.size.width - 48, geometry.size.height - 124))
+                let side = max(0, min(geometry.size.width - 48, geometry.size.height * 0.54))
+                ScrollView {
                 VStack(spacing: 16) {
                     if let selected {
                         LifeIllustrationMetadata(illustration: selected,
@@ -204,13 +220,16 @@ struct LifeIllustrationViewer: View {
                     .frame(height: side)
                     .accessibilityIdentifier("lifeIllustration.viewer.image")
                     if let selected {
-                        Button("查看这段转录") { dismiss(); showSource(selected) }
-                            .font(.caption).foregroundStyle(MoMoPalette.muted)
-                            .frame(minHeight: 44).buttonStyle(.plain)
-                            .accessibilityIdentifier("lifeIllustration.viewer.source")
+                        let index = items.firstIndex { $0.id == selected.id } ?? 0
+                        LifeIllustrationDetailView(illustration: selected, previous: index > 0 ? items[index - 1] : nil) {
+                            dismiss(); showSource(selected)
+                        }
+                        .padding(.horizontal, 24)
                     }
                 }
+                .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             .background(MoMoPalette.canvas)
             .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
@@ -242,7 +261,7 @@ struct LifeIllustrationViewer: View {
 }
 
 // UIScrollView keeps pinch zoom and image panning native, without taking timeline gestures.
-private struct LifeIllustrationZoomView: UIViewRepresentable {
+struct LifeIllustrationZoomView: UIViewRepresentable {
     let url: URL
     @Binding var zoomed: Bool
 
@@ -259,6 +278,9 @@ private struct LifeIllustrationZoomView: UIViewRepresentable {
         scroll.imageView.image = UIImage(contentsOfFile: url.path)
         scroll.imageView.contentMode = .scaleAspectFit
         scroll.addSubview(scroll.imageView)
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scroll.addGestureRecognizer(doubleTap)
         return scroll
     }
 
@@ -289,6 +311,101 @@ private struct LifeIllustrationZoomView: UIViewRepresentable {
             scrollView.panGestureRecognizer.isEnabled = zoomed
             parent.zoomed = zoomed
         }
+        @objc func doubleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scroll = gesture.view as? ImageScrollView else { return }
+            if scroll.zoomScale > 1.01 {
+                scroll.setZoomScale(1, animated: true)
+            } else {
+                let center = gesture.location(in: scroll.imageView)
+                let size = CGSize(width: scroll.bounds.width / 2.5, height: scroll.bounds.height / 2.5)
+                scroll.zoom(to: CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                                      width: size.width, height: size.height), animated: true)
+            }
+        }
+    }
+}
+#elseif os(macOS)
+struct LifeIllustrationZoomView: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> ImageScrollView {
+        let scroll = ImageScrollView()
+        scroll.drawsBackground = false
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 1
+        scroll.maxMagnification = 5
+        scroll.imageView.image = NSImage(contentsOf: url)
+        scroll.imageView.imageScaling = .scaleProportionallyUpOrDown
+        scroll.documentView = scroll.imageView
+        let doubleClick = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleClick(_:)))
+        doubleClick.numberOfClicksRequired = 2
+        scroll.addGestureRecognizer(doubleClick)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: ImageScrollView, context: Context) {
+        if context.coordinator.url != url {
+            scroll.magnification = 1
+            scroll.imageView.image = NSImage(contentsOf: url)
+            context.coordinator.url = url
+        }
+    }
+
+    final class ImageScrollView: NSScrollView {
+        let imageView = NSImageView()
+        override func layout() {
+            super.layout()
+            if magnification == 1 { imageView.frame = CGRect(origin: .zero, size: contentView.bounds.size) }
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var url: URL?
+        @objc func doubleClick(_ gesture: NSClickGestureRecognizer) {
+            guard let scroll = gesture.view as? ImageScrollView else { return }
+            scroll.setMagnification(scroll.magnification > 1.01 ? 1 : 2.5, centeredAt: gesture.location(in: scroll.imageView))
+        }
     }
 }
 #endif
+
+struct LifeIllustrationDetailView: View {
+    let illustration: LifeIllustration
+    let previous: LifeIllustration?
+    let showSource: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let place = illustration.place, !place.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(place).font(.headline).foregroundStyle(MoMoPalette.ink)
+                        if illustration.placeStart != nil {
+                            Text(illustration.stayCaption).font(.system(.caption, design: .monospaced))
+                        }
+                    }
+                }
+                if let previous, let departure = previous.placeEnd, let arrival = illustration.placeStart,
+                   arrival >= departure, let place = previous.place, !place.isEmpty {
+                    Text("\(place) \(previous.clock(departure)) → \(illustration.clock(arrival))")
+                        .font(.system(.caption, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .foregroundStyle(MoMoPalette.muted)
+            if let summary = illustration.summary, !summary.isEmpty {
+                Text(summary).font(.system(size: 14)).lineSpacing(5)
+                    .foregroundStyle(MoMoPalette.ink).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("lifeIllustration.viewer.summary")
+            }
+            Button("查看转录", systemImage: "text.alignleft", action: showSource)
+                .font(.caption).foregroundStyle(MoMoPalette.ink)
+                .frame(minHeight: 44).buttonStyle(.plain)
+                .accessibilityIdentifier("lifeIllustration.viewer.source")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("lifeIllustration.viewer.detail")
+    }
+}

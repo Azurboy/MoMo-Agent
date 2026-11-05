@@ -66,14 +66,22 @@ import MoMoAgentClient
         if enabled { updateMonitoring() }
         else {
             location.stopMonitoringVisits()
+            location.stopMonitoringSignificantLocationChanges()
             geocoder.cancelGeocode()
             visits = []
             try saveVisits()
         }
     }
     private func updateMonitoring() {
-        if enabled && ["enabled", "foreground_only"].contains(authorization(.visits)) { location.startMonitoringVisits() }
-        else { location.stopMonitoringVisits() }
+        if enabled && ["enabled", "foreground_only"].contains(authorization(.visits)) {
+            location.startMonitoringVisits()
+            if CLLocationManager.significantLocationChangeMonitoringAvailable() {
+                location.startMonitoringSignificantLocationChanges()
+            }
+        } else {
+            location.stopMonitoringVisits()
+            location.stopMonitoringSignificantLocationChanges()
+        }
     }
     func read(_ kind: PhoneSourceKind, from: Date, to: Date) async throws -> [PhoneSourceSnapshot.Record] {
         guard ["enabled", "foreground_only"].contains(authorization(kind)) else { throw ReadError.denied }
@@ -122,6 +130,14 @@ import MoMoAgentClient
     private func pruneVisits() {
         let cutoff = Date.now.addingTimeInterval(-7 * 86400).timeIntervalSince1970
         visits.removeAll { ($0.end ?? $0.start ?? 0) < cutoff }
+        visits.sort { ($0.start ?? $0.end ?? 0) < ($1.start ?? $1.end ?? 0) }
+        var excess = max(0, visits.count - 1800)
+        visits.removeAll { record in
+            guard excess > 0, record.sourceName == "CoreLocation significant_change" else { return false }
+            excess -= 1
+            return true
+        }
+        if visits.count > 1800 { visits.removeFirst(visits.count - 1800) }
     }
     private func enrichVisit(_ record: PhoneSourceSnapshot.Record) async {
         guard enabled, !geocoder.isGeocoding, let latitude = record.latitude, let longitude = record.longitude else { return }
@@ -157,9 +173,10 @@ import MoMoAgentClient
         let arrival = visit.arrivalDate == .distantPast ? nil : visit.arrivalDate.timeIntervalSince1970
         let departure = visit.departureDate == .distantFuture ? nil : visit.departureDate.timeIntervalSince1970
         Task { @MainActor [weak self] in
-            guard let self, enabled, ["enabled", "foreground_only"].contains(authorization(.visits)),
-                  latitude.isFinite, longitude.isFinite, accuracy.isFinite, accuracy >= 0,
+            guard let self, enabled, [.authorizedAlways, .authorizedWhenInUse].contains(location.authorizationStatus),
+                  (-90...90).contains(latitude), (-180...180).contains(longitude), accuracy.isFinite, accuracy >= 0,
                   arrival != nil || departure != nil else { return }
+            locationFailed = false
             let id = Self.digest("\(latitude):\(longitude):\(arrival ?? departure!)")
             let existingTitle = visits.first(where: { $0.id == id })?.title
             let record = PhoneSourceSnapshot.Record(id: id, title: existingTitle, sourceName: "CoreLocation visits",
@@ -169,6 +186,35 @@ import MoMoAgentClient
             do { try saveVisits() } catch { locationFailed = true }
             onChange?()
             if existingTitle == nil { await enrichVisit(record) }
+        }
+    }
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        let records = locations.compactMap { fix -> PhoneSourceSnapshot.Record? in
+            let latitude = fix.coordinate.latitude, longitude = fix.coordinate.longitude
+            let timestamp = fix.timestamp.timeIntervalSince1970
+            guard CLLocationCoordinate2DIsValid(fix.coordinate), latitude.isFinite, longitude.isFinite,
+                  timestamp.isFinite, fix.horizontalAccuracy.isFinite, (0...500).contains(fix.horizontalAccuracy) else { return nil }
+            return .init(id: Self.digest("sig:\(latitude):\(longitude):\(timestamp)"), title: nil,
+                         sourceName: "CoreLocation significant_change", start: timestamp, end: timestamp,
+                         latitude: latitude, longitude: longitude, accuracy: fix.horizontalAccuracy)
+        }.sorted { ($0.start ?? 0) < ($1.start ?? 0) }
+        Task { @MainActor [weak self] in
+            guard let self, enabled, !records.isEmpty,
+                  [.authorizedAlways, .authorizedWhenInUse].contains(location.authorizationStatus) else { return }
+            locationFailed = false
+            for record in records {
+                guard let latitude = record.latitude, let longitude = record.longitude, let timestamp = record.start else { continue }
+                if let prior = visits.filter({ $0.sourceName == "CoreLocation significant_change" }).max(by: { ($0.start ?? 0) < ($1.start ?? 0) }),
+                   let priorTime = prior.start, let priorLatitude = prior.latitude, let priorLongitude = prior.longitude {
+                    let distance = CLLocation(latitude: latitude, longitude: longitude)
+                        .distance(from: CLLocation(latitude: priorLatitude, longitude: priorLongitude))
+                    if distance < 150 && abs(timestamp - priorTime) < 300 { continue }
+                }
+                visits.append(record)
+            }
+            pruneVisits()
+            do { try saveVisits() } catch { locationFailed = true }
+            onChange?()
         }
     }
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

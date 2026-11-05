@@ -3,12 +3,48 @@ import XCTest
 @testable import MoMoAgentClient
 
 final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
+    func testJourneyDecodingValidationAndLegacyCache() throws {
+        var payload: [String: Any] = ["id": "test", "window_start": 100, "window_end": 200,
+            "logical_day": "2026-11-05", "timezone": "Asia/Shanghai", "place": "工作室",
+            "asset_sha256": String(repeating: "a", count: 64), "thumbnail_sha256": String(repeating: "b", count: 64),
+            "width": 1024, "height": 1024, "source_ids": ["source"], "created_at": 201, "updated_at": 201]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        func decode(_ value: [String: Any]) throws -> LifeIllustration {
+            try decoder.decode(LifeIllustration.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        let legacy = try decode(payload)
+        try legacy.validate()
+        XCTAssertNil(legacy.summary)
+        XCTAssertEqual(legacy.routePoints, [])
+        payload.merge(["summary": "在桌边讨论模块边界", "latitude": 39.9, "longitude": 116.4,
+            "place_start": 100, "place_end": 180, "route_points": [["latitude": 39.9, "longitude": 116.4,
+            "timestamp": 100, "end_timestamp": 180, "kind": "visit", "title": "工作室"]]]) { _, new in new }
+        let journey = try decode(payload)
+        try journey.validate()
+        XCTAssertEqual(journey.summary, "在桌边讨论模块边界")
+        XCTAssertEqual(journey.routePoints.first?.endTimestamp, 180)
+        for invalid in [["latitude": 91], ["longitude": -181], ["place_end": 99], ["latitude": NSNull()]] as [[String: Any]] {
+            let value = payload.merging(invalid) { _, new in new }
+            XCTAssertThrowsError(try decode(value).validate())
+        }
+        payload["route_points"] = Array(repeating: ["latitude": 39.9, "longitude": 116.4, "timestamp": 100, "kind": "waypoint"], count: 129)
+        XCTAssertThrowsError(try decode(payload).validate())
+        let point = LifeIllustrationRoutePoint(latitude: .nan, longitude: 0, timestamp: 1, kind: "visit")
+        XCTAssertFalse(point.isValid)
+        XCTAssertFalse(LifeIllustrationRoutePoint(latitude: 0, longitude: 0, timestamp: .infinity, kind: "visit").isValid)
+    }
+
     @MainActor func testIncrementalSyncRestoresAssetsAndHidesUnsupportedProvider() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let route = IllustrationTransport()
         let store = try makeStore(directory, route: route)
+        XCTAssertTrue(store.isConfigured)
+        XCTAssertFalse(store.hasLoadedSettings)
+        XCTAssertEqual(store.settings.serviceStatus, "unknown")
         await store.refresh()
+        XCTAssertTrue(store.hasLoadedSettings)
         XCTAssertNil(store.error)
         let item = try XCTUnwrap(store.items.first)
         XCTAssertEqual(item.width, 1024)
@@ -118,7 +154,11 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         let route = IllustrationTransport()
         await route.replayDeletedHistory()
         let store = try makeStore(directory, route: route)
+        XCTAssertTrue(store.isConfigured)
+        XCTAssertFalse(store.hasLoadedSettings)
+        XCTAssertEqual(store.settings.serviceStatus, "unknown")
         await store.refresh()
+        XCTAssertTrue(store.hasLoadedSettings)
         XCTAssertNil(store.error)
         XCTAssertTrue(store.items.isEmpty)
         let downloads = await route.assetRequests
