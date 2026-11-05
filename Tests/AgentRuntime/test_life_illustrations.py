@@ -34,7 +34,7 @@ def png():
     out = io.BytesIO()
     image = Image.new('RGBA', (1024, 1024))
     image.paste((255, 255, 255, 255), (312, 212, 712, 812))
-    # Detached semi-transparent ink must survive cropping and thumbnail generation.
+    # Legacy transparent art keeps every stroke at its original position and scale.
     image.paste((30, 29, 27, 128), (292, 192, 300, 200))
     image.paste((30, 29, 27, 1), (1, 1, 5, 5))
     image.save(out, format='PNG')
@@ -132,26 +132,32 @@ class IllustrationTests(unittest.TestCase):
             self.assertEqual(1, len(self.generator.generated))
         finally: other.close()
 
-    def test_rgba_assets_trim_center_and_preserve_complete_ink_bounds(self):
+    def test_legacy_rgba_preserves_full_canvas_and_detached_ink(self):
         from PIL import Image
         self.generate()
         row = self.row()
         self.assertEqual((1024, 1024), (row['width'], row['height']))
+        original = Image.open(io.BytesIO(png()))
         for key, side in [('asset_sha256', 1024), ('thumbnail_sha256', 512)]:
             with Image.open(io.BytesIO(self.queue.asset(row[key]))) as image:
                 self.assertEqual('RGBA', image.mode)
                 self.assertEqual((side, side), image.size)
-                alpha = image.getchannel('A')
-                self.assertEqual((0, 255), alpha.getextrema())
-                left, top, right, bottom = alpha.getbbox()
-                self.assertAlmostEqual((left + right) / 2, side / 2, delta=2)
-                self.assertAlmostEqual((top + bottom) / 2, side / 2, delta=2)
-                self.assertTrue(0.82 * side <= bottom - top <= 0.86 * side)
-                self.assertAlmostEqual((right - left) / (bottom - top), 420 / 620, delta=0.02)
-                self.assertEqual(0, alpha.getpixel((0, 0)))
-                self.assertGreater(sum(alpha.histogram()[100:161]), 0)
-                # The upper-left detached stroke stays charcoal, with its original alpha.
-                self.assertLess(image.getpixel((left + 2, top + 2))[0], 80)
+                expected = original.resize((side, side), Image.Resampling.LANCZOS)
+                self.assertEqual(expected.tobytes(), image.tobytes())
+
+    def test_editorial_rgb_preserves_negative_space_and_full_bleed_ground(self):
+        from PIL import Image
+        self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
+        artwork = Image.new('RGB', (1024, 1024), '#B8C9C3')
+        artwork.paste('#FAF9F5', (520, 650, 750, 850))
+        artwork.paste('#161514', (600, 720, 610, 740))
+        raw = io.BytesIO(); artwork.save(raw, format='PNG')
+        self.queue.save_image(self.row()['id'], raw.getvalue())
+        for key, side in [('asset_sha256', 1024), ('thumbnail_sha256', 512)]:
+            with Image.open(io.BytesIO(self.queue.asset(self.row()[key]))) as image:
+                self.assertEqual('RGB', image.mode)
+                self.assertEqual(artwork.resize((side, side), Image.Resampling.LANCZOS).tobytes(), image.tobytes())
+                self.assertEqual((184, 201, 195), image.getpixel((0, 0)))
 
     def test_empty_alpha_is_rejected_without_publishing(self):
         from PIL import Image
@@ -161,15 +167,26 @@ class IllustrationTests(unittest.TestCase):
             self.queue.save_image(self.row()['id'], raw.getvalue())
         self.assertEqual([], self.queue.manifest()['items'])
 
-    def test_opaque_legacy_png_still_fits_without_stretching_or_losing_edges(self):
-        from PIL import Image
+    def test_non_square_png_uses_center_fit_without_stretching(self):
+        from PIL import Image, ImageOps
         self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
-        raw = io.BytesIO(); Image.new('RGB', (1360, 1020), '#fff9ef').save(raw, format='PNG')
+        artwork = Image.new('RGB', (1360, 1020), '#EAE5DB')
+        artwork.paste('#161514', (500, 400, 800, 700))
+        raw = io.BytesIO(); artwork.save(raw, format='PNG')
         self.queue.save_image(self.row()['id'], raw.getvalue())
         with Image.open(io.BytesIO(self.queue.asset(self.row()['asset_sha256']))) as image:
-            self.assertEqual('RGBA', image.mode)
-            left, top, right, bottom = image.getchannel('A').getbbox()
-            self.assertAlmostEqual((right - left) / (bottom - top), 4 / 3, delta=0.01)
+            expected = ImageOps.fit(artwork, (1024, 1024), method=Image.Resampling.LANCZOS)
+            self.assertEqual(expected.tobytes(), image.tobytes())
+
+    def test_solid_blank_images_are_rejected_without_publishing(self):
+        from PIL import Image
+        self.scan(); self.queue.db.execute("UPDATE slots SET state='submitting'")
+        for mode in ('RGB', 'RGBA', 'P'):
+            with self.subTest(mode=mode):
+                raw = io.BytesIO(); Image.new('RGB', (1024, 1024), '#B8C9C3').convert(mode, dither=Image.Dither.NONE).save(raw, format='PNG')
+                with self.assertRaisesRegex(ValueError, 'no visible variation'):
+                    self.queue.save_image(self.row()['id'], raw.getvalue())
+                self.assertEqual([], self.queue.manifest()['items'])
 
     def test_delete_is_tombstoned_and_does_not_regenerate(self):
         self.generate(); image = self.queue.manifest()['items'][0]
@@ -364,13 +381,16 @@ class NativeImageStreamTests(unittest.TestCase):
         self.assertEqual(False, client.kwargs['store']); self.assertEqual(True, client.kwargs['stream'])
         self.assertEqual('1024x1024', client.kwargs['tools'][0]['size'])
         self.assertEqual('medium', client.kwargs['tools'][0]['quality'])
-        self.assertEqual('transparent', client.kwargs['tools'][0]['background'])
+        self.assertNotIn('background', client.kwargs['tools'][0])
         self.assertEqual('png', client.kwargs['tools'][0]['output_format'])
         content = client.kwargs['input'][0]['content']
         self.assertEqual('input_image', content[0]['type'])
         self.assertTrue(content[0]['image_url'].startswith('data:image/png;base64,'))
         self.assertEqual((ROOT / 'Apps/MacApp/Runtime/momo_character_reference.png').read_bytes(),
                          base64.b64decode(content[0]['image_url'].split(',', 1)[1]))
+        from PIL import Image
+        with Image.open(io.BytesIO(base64.b64decode(content[0]['image_url'].split(',', 1)[1]))) as reference:
+            self.assertEqual((768, 768), reference.size)
         self.assertEqual({'type': 'input_text', 'text': '真实场景'}, content[1])
         self.assertEqual({'X-Client-Request-Id': 'operation'}, client.kwargs['extra_headers'])
 

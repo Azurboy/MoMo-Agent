@@ -693,7 +693,7 @@ private struct TimelineDayPage: View {
                         }
                         ForEach(inserted) { item in
                             if let illustrations, let url = illustrations.imageURL(for: item) {
-                                LifeIllustrationInlineView(illustration: item, url: url,
+                                LifeIllustrationInlineView(illustration: item, thumbnailURL: url,
                                     connected: window.id != windows.last?.id || item.id != inserted.last?.id,
                                     open: { openIllustration(item) },
                                     showSource: { open(TimelineDestination(windowID: window.id)) },

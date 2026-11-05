@@ -31,8 +31,8 @@ def main():
         import io
         for raw, size in [(data, 1024), (thumbnail, 512)]:
             with Image.open(io.BytesIO(raw)) as image:
-                if image.format != 'PNG' or image.size != (size, size) or image.mode != 'RGBA':
-                    raise ValueError('Acceptance needs the real square RGBA originals and thumbnails')
+                if image.format != 'PNG' or image.size != (size, size) or image.mode not in ('RGB', 'RGBA'):
+                    raise ValueError('Acceptance needs the real square originals and thumbnails')
         sha = hashlib.sha256(data).hexdigest()
         thumbnail_sha = hashlib.sha256(thumbnail).hexdigest()
         assets[sha] = data

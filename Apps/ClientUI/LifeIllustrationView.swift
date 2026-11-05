@@ -21,12 +21,13 @@ extension LifeIllustration {
 
 struct LifeIllustrationImageView: View {
     let url: URL
+    var contentMode: ContentMode = .fit
     @State private var image: Image?
 
     var body: some View {
         Color.clear.aspectRatio(1, contentMode: .fit)
-            .overlay { if let image { image.resizable().scaledToFit() } }
-            .modifier(LifeIllustrationPaper())
+            .overlay { if let image { image.resizable().aspectRatio(contentMode: contentMode) } }
+            .clipped()
         .task(id: url) {
             image = nil
             let bytes = await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
@@ -40,20 +41,51 @@ struct LifeIllustrationImageView: View {
     }
 }
 
-// Dark ink needs a light backing even where a transparent vignette has detached fine lines.
-private struct LifeIllustrationPaper: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
+struct LifeIllustrationPlate: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .background(colorScheme == .dark ? Color(white: 0.96) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+struct LifeIllustrationMetadata: View {
+    let illustration: LifeIllustration
+    let position: Int
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Text(illustration.logicalDay)
+                    .font(.system(.caption2, design: .monospaced))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(MoMoPalette.surface, in: Capsule())
+                    .accessibilityHidden(true)
+                Text(illustration.caption).phoneText(.caption).monospacedDigit()
+                    .lineLimit(1)
+                    .accessibilityLabel(illustration.dateCaption)
+                    .accessibilityIdentifier("lifeIllustration.viewer.caption")
+            }
+            Spacer(minLength: 0)
+            if count > 1 {
+                Text(String(format: "%02d / %02d", position, count))
+                    .font(.system(.caption2, design: .monospaced))
+                    .fixedSize()
+                    .accessibilityIdentifier("lifeIllustration.viewer.page")
+            }
+        }
+        .foregroundStyle(MoMoPalette.muted)
     }
 }
 
 struct LifeIllustrationInlineView: View {
     let illustration: LifeIllustration
-    let url: URL
+    let thumbnailURL: URL
     let connected: Bool
     let open: () -> Void
     let showSource: () -> Void
@@ -67,14 +99,30 @@ struct LifeIllustrationInlineView: View {
                 }
                 .accessibilityHidden(true)
             Button(action: open) {
-                HStack(spacing: 12) {
-                    LifeIllustrationImageView(url: url).frame(width: 96, height: 96)
-                    Text(illustration.caption).phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-                        .lineLimit(3)
-                        .frame(maxWidth: 140, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 9) {
+                    LifeIllustrationImageView(url: thumbnailURL, contentMode: .fill)
+                        .frame(width: 22, height: 22)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                        }
+                        .accessibilityHidden(true)
+                    Text(illustration.caption).phoneText(.caption).monospacedDigit()
+                        .foregroundStyle(MoMoPalette.ink.opacity(0.82))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(MoMoPalette.muted)
+                        .accessibilityHidden(true)
                 }
-                .padding(.vertical, 8)
+                .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 6)
+                .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                }
+                .padding(.vertical, 5)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -165,40 +213,44 @@ struct LifeIllustrationViewer: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
-                TabView(selection: $selection) {
-                    ForEach(store.items) { item in
-                        Group {
-                            if let url = store.imageURL(for: item, thumbnail: false) {
-                                LifeIllustrationZoomView(url: url, zoomed: Binding(
-                                    get: { selection == item.id && zoomed },
-                                    set: { if selection == item.id { zoomed = $0 } }))
-                                    .id(item.id + (selection == item.id ? "-selected" : "-offscreen"))
-                                    .aspectRatio(1, contentMode: .fit)
-                                    .modifier(LifeIllustrationPaper())
-                                    .padding(.horizontal, 24)
-                                    .frame(maxHeight: .infinity)
+            GeometryReader { geometry in
+                let side = max(0, min(geometry.size.width - 48, geometry.size.height - 64))
+                VStack(spacing: 16) {
+                    if let selected {
+                        LifeIllustrationMetadata(illustration: selected,
+                            position: (store.items.firstIndex(where: { $0.id == selection }) ?? 0) + 1,
+                            count: store.items.count)
+                            .frame(width: side)
+                    }
+                    TabView(selection: $selection) {
+                        ForEach(store.items) { item in
+                            Group {
+                                if let url = store.imageURL(for: item, thumbnail: false) {
+                                    LifeIllustrationZoomView(url: url, zoomed: Binding(
+                                        get: { selection == item.id && zoomed },
+                                        set: { if selection == item.id { zoomed = $0 } }))
+                                        .id(item.id + (selection == item.id ? "-selected" : "-offscreen"))
+                                        .frame(width: side, height: side)
+                                        .modifier(LifeIllustrationPlate())
+                                }
                             }
-                        }
-                        .tag(item.id)
-                        .contextMenu {
-                            Button("查看依据", systemImage: "text.alignleft") { dismiss(); showSource(item) }
-                            Button("删除", systemImage: "trash", role: .destructive) {
-                                Task {
-                                    do { try await store.delete(item); if store.items.isEmpty { dismiss() } }
-                                    catch { failure = error.localizedDescription }
+                            .tag(item.id)
+                            .contextMenu {
+                                Button("查看依据", systemImage: "text.alignleft") { dismiss(); showSource(item) }
+                                Button("删除", systemImage: "trash", role: .destructive) {
+                                    Task {
+                                        do { try await store.delete(item); if store.items.isEmpty { dismiss() } }
+                                        catch { failure = error.localizedDescription }
+                                    }
                                 }
                             }
                         }
                     }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(height: side)
+                    .accessibilityIdentifier("lifeIllustration.viewer.image")
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .accessibilityIdentifier("lifeIllustration.viewer.image")
-                if let selected {
-                    Text(selected.dateCaption).font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 24).padding(.bottom, 24)
-                        .accessibilityIdentifier("lifeIllustration.viewer.caption")
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(MoMoPalette.canvas)
             .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in

@@ -126,6 +126,8 @@ struct DesktopSources: View {
                     DesktopLifeIllustrationReader(
                         illustration: illustration,
                         url: url,
+                        position: (illustrations.firstIndex(where: { $0.id == illustration.id }) ?? 0) + 1,
+                        count: illustrations.count,
                         expanded: $illustrationExpanded,
                         close: closeIllustration,
                         previous: adjacentIllustration(to: illustration, offset: -1).map { item in
@@ -244,7 +246,7 @@ struct DesktopSources: View {
                                 if let url = model.lifeIllustrations.imageURL(for: illustration) {
                                     LifeIllustrationInlineView(
                                         illustration: illustration,
-                                        url: url,
+                                        thumbnailURL: url,
                                         connected: item.id != windows.last?.id || illustration.id != insertedIllustrations[item.id]?.last?.id,
                                         open: { selectedIllustrationID = illustration.id },
                                         showSource: { showSource(for: illustration) },
@@ -373,6 +375,8 @@ struct DesktopSources: View {
 private struct DesktopLifeIllustrationReader: View {
     let illustration: LifeIllustration
     let url: URL
+    let position: Int
+    let count: Int
     @Binding var expanded: Bool
     let close: () -> Void
     let previous: (() -> Void)?
@@ -384,15 +388,13 @@ private struct DesktopLifeIllustrationReader: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 16) {
-                Text(illustration.dateCaption)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
                 Spacer(minLength: 8)
                 ShareLink(item: url) {
                     Image(systemName: "square.and.arrow.up")
                 }
                 .help("分享插画")
                 .accessibilityLabel("分享插画")
+                .accessibilityIdentifier("lifeIllustration.viewer.share")
                 Button(action: close) {
                     Image(systemName: "xmark")
                 }
@@ -405,25 +407,31 @@ private struct DesktopLifeIllustrationReader: View {
             .frame(minHeight: 44)
 
             GeometryReader { geometry in
-                Button { expanded.toggle() } label: {
-                    LifeIllustrationImageView(url: url)
-                        .frame(width: min(geometry.size.width, geometry.size.height),
-                               height: min(geometry.size.width, geometry.size.height))
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .contentShape(Rectangle())
+                let side = max(0, min(geometry.size.width, geometry.size.height - 48))
+                VStack(spacing: 16) {
+                    LifeIllustrationMetadata(illustration: illustration, position: position, count: count)
+                        .frame(width: side)
+                    Button { expanded.toggle() } label: {
+                        LifeIllustrationImageView(url: url)
+                            .frame(width: side, height: side)
+                            .modifier(LifeIllustrationPlate())
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(expanded ? "空格还原" : "空格放大")
+                    .accessibilityLabel(expanded ? "还原插画" : "放大插画")
+                    .accessibilityIdentifier("desktop.illustration.image")
+                    .contextMenu {
+                        Button("查看依据", action: showSource)
+                        Button("删除", role: .destructive, action: delete)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help(expanded ? "空格还原" : "空格放大")
-                .accessibilityLabel(expanded ? "还原插画" : "放大插画")
-                .accessibilityIdentifier("desktop.illustration.image")
-                .contextMenu {
-                    Button("查看依据", action: showSource)
-                    Button("删除", role: .destructive, action: delete)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
         }
+        .background(MoMoPalette.canvas)
         .focusable()
         .focusEffectDisabled()
         .focused($hasKeyboardFocus)
