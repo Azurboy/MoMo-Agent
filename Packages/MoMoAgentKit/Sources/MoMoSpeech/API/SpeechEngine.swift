@@ -108,7 +108,7 @@ public final class SpeechEngine: @unchecked Sendable {
 
     public var recognitionLanguage: SpeechLanguage { selection.withLock { $0.language } }
     public var recognitionModel: SpeechModelChoice { selection.withLock { $0.download?.model ?? .senseVoice } }
-    /// Bounds peak encoder memory. SenseVoice runs batch=2; LLM Nano and CPU X-ASR decode batch=1.
+    /// Bounds peak encoder memory. SenseVoice runs batch=2; CoreML ANE Nano and X-ASR decode static batch=1 windows.
     public var archiveBatchSize: Int {
         switch recognitionModel {
         case .senseVoice: 2

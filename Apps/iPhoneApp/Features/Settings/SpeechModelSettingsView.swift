@@ -13,8 +13,8 @@ struct SpeechModelSettingsView: View {
                             .disabled(busy)
                     }
                 }
-                modelCard(.xASR, subtitle: "中英混说更准、体积小") {
-                    Text("离线识别普通话、英文及中英混说，带标点。不支持粤语、日语和韩语。")
+                modelCard(.xASR, subtitle: "神经网络引擎加速 · 中英混说更准、体积小") {
+                    Text("离线识别普通话、英文及中英混说，带标点与英文大小写；Zipformer2 编码器原生运行于 Apple 神经网络引擎。不支持粤语、日语和韩语。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
                     download(.xASR, use: "使用 X-ASR")
                 }

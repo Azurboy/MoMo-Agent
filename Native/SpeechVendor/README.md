@@ -6,7 +6,7 @@ SenseVoice、FunASR Nano 和 X-ASR 共用 sherpa-onnx 1.13.8、ONNX Runtime 1.28
 | --- | --- | --- |
 | SenseVoice Small | sherpa 官方 INT8 ONNX，随 App 提供 | 支持的静态子图使用 Core ML，其余由 ORT 执行；归档识别每次最多两个窗口 |
 | FunASR Nano | `Fun-ASR-Nano-2512` 完整 Core ML MLProgram（INT8 权重），设置中下载，约 1.01 GB | `FunASREncoderAdaptor.mlmodelc` + 多函数有状态 `FunASRLlm.mlmodelc`（`MLState` KV cache）原生运行于 Core ML ANE，`embedding.int8.bin` 由 `mmap` 按行反量化 |
-| X-ASR-zh-en（离线 Zipformer transducer，带标点） | sherpa 发布的 INT8 ONNX，设置中下载，约 176 MB | ORT CPU，逐窗识别；只支持普通话、英文及中英混说 |
+| X-ASR-zh-en（离线 Zipformer2 transducer，带标点与英文大小写） | `Gilgamesh-J/X-ASR` 完整 Core ML MLProgram（INT8 权重），设置中下载，约 159 MB | `XASREncoder.mlmodelc` 原生运行于 Core ML ANE + Accelerate 贪心 Transducer 解码（`decoder_joiner.bin`）；支持普通话、英文及中英混说 |
 | Silero VAD 6.2.3 | Silero 官方原版 ONNX，固定 tag 与 SHA256 | ORT CPU，使用 sherpa 已有的 v5/v6 状态接口 |
 | DiariZen WavLM-Base-s80-md | 随 App 提供的 FP32 ONNX（默认分段模型） | ORT CPU，16 秒 / 8 秒滑窗 11 类 4 说话人 powerset 解码 |
 | PyAnnote Community-1 | 随 App 提供的 FP32 ONNX（设置中可切换） | ORT CPU，10 秒 / 5 秒滑窗 7 类 3 说话人 powerset 解码 |
@@ -18,7 +18,7 @@ ASR、VAD、声纹与分段权重均按上游发布的文件和固定 SHA256 使
 
 ## 模型文件
 
-SenseVoice 与 VAD 的固定哈希见 [manifest.json](manifest.json)。FunASR Nano Core ML 包的十四个文件、大小、哈希和固定下载 revision 见 [下载清单](../../Packages/MoMoAgentKit/Sources/MoMoSpeech/Resources/funasr-nano-coreml-v1.json)（导出脚本见 `Tools/FunASRNanoCoreML/export_funasr_nano_coreml.py`）。X-ASR 的四个文件见 [下载清单](../../Packages/MoMoAgentKit/Sources/MoMoSpeech/Resources/x-asr-zh-en-onnx-v1.json)。下载目录只有在全部文件校验成功后才写入完成凭证。
+SenseVoice 与 VAD 的固定哈希见 [manifest.json](manifest.json)。FunASR Nano Core ML 包的十四个文件、大小、哈希和固定下载 revision 见 [下载清单](../../Packages/MoMoAgentKit/Sources/MoMoSpeech/Resources/funasr-nano-coreml-v1.json)（导出脚本见 `Tools/FunASRNanoCoreML/export_funasr_nano_coreml.py`）。X-ASR Core ML 包的七个文件、大小、哈希和固定下载 revision 见 [下载清单](../../Packages/MoMoAgentKit/Sources/MoMoSpeech/Resources/x-asr-coreml-v1.json)（导出脚本见 `Tools/XASRCoreML/export_xasr_coreml.py`）。下载目录只有在全部文件校验成功后才写入完成凭证。
 
 ```sh
 uv run Native/SpeechVendor/prepare-models.py Models/Speech --scratch-directory tmp_agent_output/speech-model-download

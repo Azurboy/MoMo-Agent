@@ -36,7 +36,8 @@ public struct DownloadedSpeechModel: Equatable, Sendable {
 
     /// Runtime construction still compares the whole catalog; the identifier only names the model.
     public var model: SpeechModelChoice {
-        catalog.identifier == DownloadableSpeechModel.xASRIdentifier ? .xASR : .funASRNano
+        (catalog.identifier == DownloadableSpeechModel.xASRIdentifier
+            || catalog.identifier == DownloadableSpeechModel.legacyXASRIdentifier) ? .xASR : .funASRNano
     }
 }
 

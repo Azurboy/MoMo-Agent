@@ -1,0 +1,48 @@
+{
+  "identifier": "momo-x-asr-zipformer-coreml-ane-int8-v1",
+  "baseURL": "https://github.com/Miri-Labs/MoMo-Agent/releases/download/models-x-asr-coreml-v1/",
+  "files": [
+    {
+      "path": "XASREncoder.mlmodelc/analytics/coremldata.bin",
+      "asset": "XASREncoder.mlmodelc__analytics__coremldata.bin",
+      "byteCount": 243,
+      "sha256": "9e905fa4979b325c5ddf09cb2ddec0ccb3efc602be7d172c8a312bee41107224"
+    },
+    {
+      "path": "XASREncoder.mlmodelc/coremldata.bin",
+      "asset": "XASREncoder.mlmodelc__coremldata.bin",
+      "byteCount": 669,
+      "sha256": "164caf6f620b7ac7dbe44b172e1139c86a3f597f34b61014e5d782a6cee0a2b7"
+    },
+    {
+      "path": "XASREncoder.mlmodelc/metadata.json",
+      "asset": "XASREncoder.mlmodelc__metadata.json",
+      "byteCount": 12712,
+      "sha256": "ea3f12b3b0a380e169311ec3c9d4ab9b22eb91bf2835c0c17ac0c80dc841d854"
+    },
+    {
+      "path": "XASREncoder.mlmodelc/model.mil",
+      "asset": "XASREncoder.mlmodelc__model.mil",
+      "byteCount": 1892851,
+      "sha256": "571425375c557bef01c824214c991d40930cebd3e790cd3dbe87143db517133c"
+    },
+    {
+      "path": "XASREncoder.mlmodelc/weights/weight.bin",
+      "asset": "XASREncoder.mlmodelc__weights__weight.bin",
+      "byteCount": 154345280,
+      "sha256": "8b5fc6a374051e86fcbb23d3e99a5768af205e488bd76f5639f7b57176054e7b"
+    },
+    {
+      "path": "decoder_joiner.bin",
+      "asset": "decoder_joiner.bin",
+      "byteCount": 10802880,
+      "sha256": "36a98adf89854b201239ab7ebbbca9c49733877af4f882ead49c4cfb9f2e967a"
+    },
+    {
+      "path": "tokens.txt",
+      "asset": "tokens.txt",
+      "byteCount": 58806,
+      "sha256": "b818a60878b9aae978cbb8ad594acbd403d76d1af2e31ef4197c84e2dbdba27c"
+    }
+  ]
+}

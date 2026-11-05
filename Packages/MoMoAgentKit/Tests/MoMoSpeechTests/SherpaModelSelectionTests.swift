@@ -15,12 +15,13 @@ import MoMoSherpaBridge
     #expect(catalog.baseURL.absoluteString == "https://github.com/Miri-Labs/MoMo-Agent/releases/download/models-funasr-nano-coreml-v1/")
 }
 
-@Test func xASRCatalogPinsUpstreamFilesWithoutRequantization() throws {
+@Test func xASRCatalogPinsCoreMLANEBundle() throws {
     let catalog = try DownloadableSpeechModel.xASR()
-    #expect(catalog.files.map(\.path).sorted() == ["decoder-epoch-99-avg-1.onnx", "encoder-epoch-99-avg-1.int8.onnx",
-                                                   "joiner-epoch-99-avg-1.int8.onnx", "tokens.txt"])
-    #expect(catalog.files.contains { $0.path == "encoder-epoch-99-avg-1.int8.onnx" && $0.byteCount == 161_744_450 })
-    #expect(catalog.baseURL.absoluteString.contains("ce812cc05d858539a68dd42e86f4fd7a9ce1acf0"))
+    #expect(catalog.identifier == "momo-x-asr-zipformer-coreml-ane-int8-v1")
+    #expect(catalog.files.contains { $0.path == "XASREncoder.mlmodelc/weights/weight.bin" })
+    #expect(catalog.files.contains { $0.path == "decoder_joiner.bin" && $0.byteCount == 10_802_880 })
+    #expect(catalog.files.contains { $0.path == "tokens.txt" && $0.byteCount == 58_806 })
+    #expect(catalog.baseURL.absoluteString == "https://github.com/Miri-Labs/MoMo-Agent/releases/download/models-x-asr-coreml-v1/")
     #expect(try SpeechModelChoice.xASR.catalog() == catalog)
     #expect(try SpeechModelChoice.senseVoice.catalog() == nil)
     #expect(try catalog.revision != DownloadableSpeechModel.funASRNano().revision)
