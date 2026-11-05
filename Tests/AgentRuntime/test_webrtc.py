@@ -104,6 +104,8 @@ class RTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({},status=503,headers={'Retry-After':'17'})
         if request.path == '/context/v1/status':
             return web.json_response(dict(workspace_id=self.service.connection['workspace_id'], source_sync=True, memory_writer='Hermes'))
+        if request.path.startswith('/context/v1/life-illustrations/assets/'):
+            return web.Response(body=b'\x89PNG\r\n\x1a\nfixture', content_type='image/png', headers={'Cache-Control': 'private, no-store'})
         if request.path == '/v1/runs' and request.method == 'POST':
             operation = request.headers['Idempotency-Key']; self.operations.setdefault(operation, 'r1')
             return web.json_response(dict(run_id=self.operations[operation], session_id='s1', status='queued'), status=202)
@@ -167,6 +169,16 @@ class RTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.service.store.revoke(self.device['id'])
         async with self.session.get(self.endpoint+'/momo/v1/conversation/push',headers={'Authorization':'Bearer '+self.token}) as response:
             self.assertEqual(401,response.status)
+
+    async def test_illustration_asset_keeps_binary_type_and_requires_device_auth(self):
+        url = self.endpoint + '/context/v1/life-illustrations/assets/' + 'a' * 64
+        async with self.session.get(url) as response:
+            self.assertEqual(401, response.status)
+        async with self.session.get(url, headers={'Authorization': 'Bearer ' + self.token}) as response:
+            self.assertEqual(200, response.status)
+            self.assertEqual('image/png', response.content_type)
+            self.assertEqual('private, no-store', response.headers['Cache-Control'])
+            self.assertEqual(b'\x89PNG\r\n\x1a\nfixture', await response.read())
 
     async def test_signaling_requires_approved_device_and_matches_identity(self):
         for token in ['', 'r' * 64, secrets.token_urlsafe(48)]:

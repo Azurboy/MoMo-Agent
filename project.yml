@@ -86,6 +86,11 @@ targets:
         MoMoDataFolder: "$(MOMO_MAC_DATA_FOLDER)"
         MoMoLocalPort: "$(MOMO_MAC_LOCAL_PORT)"
         NSLocalNetworkUsageDescription: "允许通过加密连接直接与附近的 iPhone 通信，减少连接延迟。"
+        NSRemindersFullAccessUsageDescription: "允许 MoMo 读取和整理你的提醒事项，帮你在对话与录音后创建、编辑、完成或删除待办。"
+        NSRemindersUsageDescription: "允许 MoMo 读取和整理你的提醒事项，帮你在对话与录音后创建、编辑、完成或删除待办。"
+        NSCalendarsFullAccessUsageDescription: "允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。"
+        NSCalendarsUsageDescription: "允许 MoMo 查看和管理你的日历日程，帮你核对安排、添加或调整日程。"
+        NSAppleEventsUsageDescription: "允许 MoMo 与「备忘录」「提醒事项」「日历」协作，帮你读取、记录和整理备忘与待办。"
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:

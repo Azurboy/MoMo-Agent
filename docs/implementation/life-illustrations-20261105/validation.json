@@ -1,0 +1,39 @@
+{
+  "branch": "feat/timeline-life-illustrations",
+  "python_tests": 61,
+  "swift_focused_tests": 12,
+  "iphone_ui_tests": 1,
+  "iphone_build": "passed",
+  "mac_final_build": "passed",
+  "web_localization_keys": 176,
+  "new_native_localization_keys": 23,
+  "simulator": "Dedicated iPhone 18 Pro / iOS 27.0; shut down and deleted",
+  "production_app_and_physical_devices": "not modified",
+  "scenes": "Invented acceptance transcripts; actual Codex subscription generated PNGs",
+  "images": {
+    "01_iphone_timeline_inline.png": {
+      "sha256": "b7ab8162591fccda0b3a29f0cd6771bb1fa8d481f141237dc4f5862ae3ff8619",
+      "bytes": 1480102
+    },
+    "02_iphone_fullscreen_viewer.png": {
+      "sha256": "f21a57404def9fb65afa5ca361750761803e5734705d010596e9d4fe655d0c3b",
+      "bytes": 1671998
+    },
+    "03_iphone_settings_row.png": {
+      "sha256": "d3da8ab75fd4c25b798cc92b3686b4d8cf08dc6a57c2c51262067a7843bf3892",
+      "bytes": 109593
+    },
+    "sample_code.png": {
+      "sha256": "12452660b20438b53c7122f4ac55687b3e48093679b1091d0370bc1894ec2f6e",
+      "bytes": 2042060
+    },
+    "sample_night.png": {
+      "sha256": "ae71354ee5a1c75dae7eeae08cefad8d3c31250a82c15be92a539230e8b0e209",
+      "bytes": 1933485
+    },
+    "sample_outdoor.png": {
+      "sha256": "91c75bff3a696c00e82b9a71b25eee645ee9c9dfb9a8b0696653bac2383001e1",
+      "bytes": 1867934
+    }
+  }
+}

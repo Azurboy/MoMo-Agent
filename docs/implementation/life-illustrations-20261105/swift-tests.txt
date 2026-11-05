@@ -1,0 +1,47 @@
+Build complete! (10.63秒)
+Test Suite 'Selected tests' started at 2026-11-05 12:23:05.881.
+Test Suite 'MoMoPhoneSyncTests.xctest' started at 2026-11-05 12:23:05.887.
+Test Suite 'RemoteContextSyncTests' started at 2026-11-05 12:23:05.887.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testMemoryExcerptOnlyMovesRecognizedSourcePrefix]' started.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testMemoryExcerptOnlyMovesRecognizedSourcePrefix]' passed (0.003 seconds).
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testNativeMemoryCacheSurvivesRestartAndFailedDeleteIsNotQueued]' started.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testNativeMemoryCacheSurvivesRestartAndFailedDeleteIsNotQueued]' passed (0.042 seconds).
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testOrdinaryChatDoesNotWaitForArchiveOrMemoryDownload]' started.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testOrdinaryChatDoesNotWaitForArchiveOrMemoryDownload]' passed (0.023 seconds).
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery]' started.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery]' passed (0.067 seconds).
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testRecordingSummaryOutboxResumesAndCachesWithoutModelKey]' started.
+Test Case '-[MoMoPhoneSyncTests.RemoteContextSyncTests testRecordingSummaryOutboxResumesAndCachesWithoutModelKey]' passed (5.147 seconds).
+Test Suite 'RemoteContextSyncTests' passed at 2026-11-05 12:23:11.170.
+Test Suite 'MoMoPhoneSyncTests.xctest' passed at 2026-11-05 12:23:11.170.
+Test Suite 'Selected tests' passed at 2026-11-05 12:23:11.170.
+Test Suite 'Selected tests' started at 2026-11-05 12:23:11.247.
+Test Suite 'MoMoArchiveTests.xctest' started at 2026-11-05 12:23:11.248.
+Test Suite 'MoMoArchiveTests.xctest' passed at 2026-11-05 12:23:11.248.
+Test Suite 'Selected tests' passed at 2026-11-05 12:23:11.248.
+Test Suite 'Selected tests' started at 2026-11-05 12:23:11.303.
+Test Suite 'MoMoAgentClientTests.xctest' started at 2026-11-05 12:23:11.303.
+Test Suite 'LifeIllustrationTests' started at 2026-11-05 12:23:11.303.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testCrossPageTombstoneDoesNotDownloadDeletedHistoricalAsset]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testCrossPageTombstoneDoesNotDownloadDeletedHistoricalAsset]' passed (0.007 seconds).
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testHashMismatchDoesNotAdvanceCursorAndRetriesOnlyUncachedBytes]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testHashMismatchDoesNotAdvanceCursorAndRetriesOnlyUncachedBytes]' passed (0.004 seconds).
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testIncrementalSyncRestoresAssetsAndHidesUnsupportedProvider]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testIncrementalSyncRestoresAssetsAndHidesUnsupportedProvider]' passed (0.005 seconds).
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testPendingTranscriptionMetadataDoesNotChangeTextIdentity]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testPendingTranscriptionMetadataDoesNotChangeTextIdentity]' passed (0.001 seconds).
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testRepeatedManifestCursorFailsWithoutPublishingPartialResults]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testRepeatedManifestCursorFailsWithoutPublishingPartialResults]' passed (0.001 seconds).
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testSettingsValidationAndDeleteUseAuthenticatedDataAPI]' started.
+Test Case '-[MoMoAgentClientTests.LifeIllustrationTests testSettingsValidationAndDeleteUseAuthenticatedDataAPI]' passed (0.003 seconds).
+Test Suite 'LifeIllustrationTests' passed at 2026-11-05 12:23:11.325.
+Test Suite 'MoMoAgentClientTests.xctest' passed at 2026-11-05 12:23:11.325.
+Test Suite 'Selected tests' passed at 2026-11-05 12:23:11.325.
+◇ Test run started.
+↳ Testing Library Version: 2084
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite ArchiveCoverageTests started.
+◇ Test pendingIllustrationRangesUseReceivedFramesAndExcludeOpenCaptureTail() started.
+✔ Test pendingIllustrationRangesUseReceivedFramesAndExcludeOpenCaptureTail() passed after 0.063 seconds.
+✔ Suite ArchiveCoverageTests passed after 0.065 seconds.
+✔ Test run with 1 test in 1 suite passed after 0.065 seconds.

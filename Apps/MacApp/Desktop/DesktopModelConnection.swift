@@ -150,6 +150,7 @@ extension DesktopModel {
 
     func applyModelAccount(_ account: DesktopModelAccount, updateSelection: Bool = true) {
         modelAccount = account
+        if account.provider != .codex || !account.connected { lifeIllustrations.invalidateSupport() }
         modelAccountCheckedAt = .now
         if modelName.isEmpty || updateSelection && !account.models.contains(modelName) {
             modelName = account.models.first ?? ""

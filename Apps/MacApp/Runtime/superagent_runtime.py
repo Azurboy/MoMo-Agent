@@ -172,6 +172,7 @@ MOMO_PROMPT_CONFIG = {
             "- 提取公开网页正文：`\"$DSH_SUPERAGENT_MOMO_CLI\" web-extract \"https://...\" --char-limit 15000`\n"
             "- 操作 Mac：内置 `computer_snapshot` / `computer_action` 使用 agent-desktop 读取真实控件并点击、填表、按键。优先专用服务工具；没有时读取目标应用的快照，使用完整控件 ref，操作后重新读取验证；用户接管、权限缺失或任务停止时不能绕过。\n"
             "- 列出同步录音：`\"$DSH_SUPERAGENT_MOMO_CLI\" recordings --limit 25`\n"
+            "- 用户问起生活插画时，读取实际后台状态：`\"$DSH_SUPERAGENT_MOMO_CLI\" life-illustrations`；按 next_cursor 续读，不编造生成进度或重试结果。\n"
             "- 读取完整录音转写：`\"$DSH_SUPERAGENT_MOMO_CLI\" recording <source_id> --offset 0 --limit 12000`（跟进 `next_offset` 直至 `null`）\n"
             "- 搜索全部录音内容：`\"$DSH_SUPERAGENT_MOMO_CLI\" search \"关键词\" --limit 20`\n"
             "- 读取手机端日历/提醒/到访同步快照：`\"$DSH_SUPERAGENT_MOMO_CLI\" phone-context --kind all`\n"

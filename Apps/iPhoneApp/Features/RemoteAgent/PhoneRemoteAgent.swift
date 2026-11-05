@@ -9,6 +9,10 @@ import MoMoArchive
 @MainActor @Observable
 final class PhoneRemoteAgent {
     private(set) var context: PhoneContextSync?
+    let lifeIllustrations: LifeIllustrationStore
+    var transcriptionFingerprint: String? {
+        didSet { context?.configurationFingerprint = transcriptionFingerprint }
+    }
     @ObservationIgnored var onSummariesChanged: (() -> Void)?
 
     func summarizeRecordings(_ windows: [TimelineWindow]) async throws -> [String: String] {
@@ -49,6 +53,7 @@ final class PhoneRemoteAgent {
     init(directory: URL, archive: ArchiveStore, deviceID: UUID) throws {
         self.archive = archive; self.deviceID = deviceID
         self.directory = directory
+        lifeIllustrations = LifeIllustrationStore(directory: directory.appendingPathComponent("life-illustrations"))
         tailnet = EmbeddedTailnet(directory: directory.appendingPathComponent("tailscale"), device: "phone")
         let protection: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: protection)
@@ -122,7 +127,7 @@ final class PhoneRemoteAgent {
             connection = proposed; store = restored.tasks; context = restored.sync; health = restored.health; sources = restored.sources; network = restored.network; desktopClient = restored.desktop; failure = nil
             desktopClientID = UUID()
             notifications.start(); notifications.foreground()
-            if active { network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); restored.tasks.foreground() }
+            if active { network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); restored.tasks.foreground(); lifeIllustrations.startPolling() }
             onSummariesChanged?()
         } catch {
             failure = AgentTransportFailure.isTransient(error) ? String(localized: "暂时无法连接 Mac，请重试，无需重新扫码。") : error.localizedDescription
@@ -168,6 +173,7 @@ final class PhoneRemoteAgent {
             guard self.store === store else { return }
             await store.retryConnection()
             await context?.refresh()
+            await lifeIllustrations.refresh()
         } catch is CancellationError { }
         catch {
             guard !AgentTransportFailure.isCancelled(error) else { return }
@@ -196,12 +202,14 @@ final class PhoneRemoteAgent {
         if connection?.network == "tailscale" { tailnet.prepareForForeground() }
         guard store?.canContactServer != false else { return }
         network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); store?.foreground(); notifications.foreground()
+        lifeIllustrations.startPolling()
         onSummariesChanged?()
     }
     func leavingForeground() {
         active = false
         stopPathMonitor()
         context?.stopPolling(); health?.background(); sources?.background(); notifications.background()
+        lifeIllustrations.stopPolling()
         replyContinuation.leavingForeground()
     }
     func background() { replyContinuation.background() }
@@ -270,6 +278,7 @@ final class PhoneRemoteAgent {
         let route = try transport(for: connection) ?? network
         let client = try AgentClient(baseURL: connection.baseURL, credential: key, assistantID: connection.assistantID, transport: route)
         let sync = try PhoneContextSync(directory: directory, archive: archive, deviceID: deviceID, connection: connection, key: key, transport: route)
+        sync.configurationFingerprint = transcriptionFingerprint
         let health = try? PhoneHealthSync(directory: directory, deviceID: deviceID, connection: connection, key: key, transport: route)
         let sources: PhoneSourcesSync?
         do {
@@ -283,6 +292,8 @@ final class PhoneRemoteAgent {
         let tasks = try Self.openTaskStore(file: directory.appendingPathComponent("tasks.json"), connection: connection, client: client)
         tasks.onAuthenticationRequired = { [weak self, weak sync] in
             sync?.background(); self?.health?.background(); self?.sources?.background(); self?.network?.suspend(); self?.notifications.background()
+            self?.lifeIllustrations.stopPolling()
+            self?.lifeIllustrations.invalidateSupport()
         }
         tasks.onConnectionRestored = { [weak self] in
             self?.failure = nil
@@ -293,6 +304,10 @@ final class PhoneRemoteAgent {
         health?.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
         sources?.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
         tasks.prepareSubmission = { task in try await sync.prepareSubmission(input: task.input) }
+        if let endpoint = connection.dataURL {
+            let dataClient = try AgentClient(baseURL: endpoint, credential: key, assistantID: connection.assistantID, transport: route)
+            lifeIllustrations.configure(client: dataClient, scope: connection.workspaceID.uuidString)
+        }
         return (tasks, sync, health, sources, network, client)
     }
 
