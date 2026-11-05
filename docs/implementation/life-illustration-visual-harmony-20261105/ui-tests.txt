@@ -1,0 +1,23 @@
+ui-final.log
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testDarkTimelineAndViewer]' failed (10.891 seconds).
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testRealGeneratedImagesInTimelineViewerAndSettings]' failed (42.052 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testChronologicalTimelineStartsAtBottomAndKeepsEarlierPositionAfterRefreshAndTabSwitch]' passed (40.974 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testContinuousSpeechMergesAndSpeakerChangeStartsAnotherRow]' passed (20.645 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testDailyPagingAndNativeDatePickerKeepCompactStatusAvailable]' passed (29.362 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testHorizontalSwipesChangeOnlyTheDay]' passed (17.630 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testMergedWindowDetailPlaybackAndMultipleDraftSources]' failed (29.267 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testPagingBackToTodayKeepsTheLatestAndManualReadingPositions]' passed (50.163 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testShortContentAppearsAtItsTimeWithoutAnExpansionControl]' passed (16.379 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testTimelineWithoutGeneratedImagesHasNoIllustrationControls]' passed (11.857 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testUnknownSpeakerCanBeCorrectedBesideTheTime]' passed (56.286 seconds).
+
+ui-acceptance.log
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testDarkTimelineAndViewer]' passed (20.230 seconds).
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testRealGeneratedImagesInTimelineViewerAndSettings]' failed (27.281 seconds).
+Test Case '-[MoMoAgentUITests.PhoneTimelineJourneyTests testMergedWindowDetailPlaybackWithoutMacConnection]' passed (28.032 seconds).
+
+life-acceptance.log
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testDarkTimelineAndViewer]' passed (19.961 seconds).
+Test Case '-[MoMoAgentUITests.LifeIllustrationJourneyTests testRealGeneratedImagesInTimelineViewerAndSettings]' passed (35.317 seconds).
+
+Final LifeIllustrationJourneyTests: 2 passed. PhoneTimelineJourneyTests: 8 unchanged cases passed in ui-final; updated unpaired playback case passed in ui-acceptance. Superseded failures above are retained for audit.

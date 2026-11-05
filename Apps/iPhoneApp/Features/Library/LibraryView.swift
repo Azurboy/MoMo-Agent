@@ -657,11 +657,13 @@ private struct TimelineDayPage: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
                 ForEach(windows) { window in
+                    let inserted = illustrationsAfter(window.id, windows: windows)
                     VStack(alignment: .leading, spacing: 0) {
                         Button { open(TimelineDestination(windowID: window.id)) } label: {
                             TimelineRow(window: window, summary: timeline.summary(for: window),
                                 status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
-                                connected: window.id != windows.last?.id,
+                                connected: window.id != windows.last?.id || !inserted.isEmpty,
+                                continuesFromPrevious: window.id != windows.first?.id,
                                 includeUTCOffset: repeatedClockRanges.contains(window.id))
                         }
                         .buttonStyle(.plain)
@@ -682,10 +684,17 @@ private struct TimelineDayPage: View {
                                     }
                                 }
                             }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
+                                .overlay(alignment: .leading) {
+                                    if window.id != windows.last?.id || !inserted.isEmpty {
+                                        Rectangle().fill(MoMoPalette.line).frame(width: 1)
+                                            .frame(width: 12).accessibilityHidden(true)
+                                    }
+                                }
                         }
-                        ForEach(illustrationsAfter(window.id, windows: windows)) { item in
+                        ForEach(inserted) { item in
                             if let illustrations, let url = illustrations.imageURL(for: item) {
                                 LifeIllustrationInlineView(illustration: item, url: url,
+                                    connected: window.id != windows.last?.id || item.id != inserted.last?.id,
                                     open: { openIllustration(item) },
                                     showSource: { open(TimelineDestination(windowID: window.id)) },
                                     delete: {
@@ -694,7 +703,6 @@ private struct TimelineDayPage: View {
                                             catch { illustrationFailure(error.localizedDescription) }
                                         }
                                     })
-                                    .padding(.leading, 26).padding(.bottom, 28)
                             }
                         }
                     }

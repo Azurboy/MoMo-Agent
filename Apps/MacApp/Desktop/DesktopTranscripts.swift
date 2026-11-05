@@ -228,8 +228,9 @@ struct DesktopSources: View {
                                     time: timeLabel(item),
                                     preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
                                     status: nil,
-                                    connected: item.id != windows.last?.id && insertedIllustrations[item.id] == nil,
-                                    isFinal: true
+                                    connected: item.id != windows.last?.id || !(insertedIllustrations[item.id] ?? []).isEmpty,
+                                    isFinal: true,
+                                    continuesFromPrevious: item.id != windows.first?.id
                                 ) {
                                     EmptyView()
                                 }
@@ -244,13 +245,12 @@ struct DesktopSources: View {
                                     LifeIllustrationInlineView(
                                         illustration: illustration,
                                         url: url,
+                                        connected: item.id != windows.last?.id || illustration.id != insertedIllustrations[item.id]?.last?.id,
                                         open: { selectedIllustrationID = illustration.id },
                                         showSource: { showSource(for: illustration) },
                                         delete: { deleteIllustration(illustration) }
                                     )
-                                    .padding(.leading, 38)
-                                    .padding(.trailing, 12)
-                                    .padding(.bottom, 26)
+                                    .padding(.horizontal, 12)
                                 }
                             }
                         }
@@ -407,6 +407,8 @@ private struct DesktopLifeIllustrationReader: View {
             GeometryReader { geometry in
                 Button { expanded.toggle() } label: {
                     LifeIllustrationImageView(url: url)
+                        .frame(width: min(geometry.size.width, geometry.size.height),
+                               height: min(geometry.size.width, geometry.size.height))
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .contentShape(Rectangle())
                 }

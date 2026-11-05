@@ -19,6 +19,9 @@ struct MoMoAgentApp: App {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .phonePageSurface()
+            #if DEBUG
+            .preferredColorScheme(uiTestColorScheme)
+            #endif
             .task { appDelegate.bootstrap.initialize() }
             .onChange(of: scenePhase) {
                 if scenePhase == .inactive, let runtime = appDelegate.bootstrap.runtime { runtime.leavingForeground() }
@@ -33,4 +36,17 @@ struct MoMoAgentApp: App {
             }
         }
     }
+
+    #if DEBUG
+    // Keep appearance acceptance deterministic when the Simulator's system toggle does not apply.
+    private var uiTestColorScheme: ColorScheme? {
+        let environment = ProcessInfo.processInfo.environment
+        guard let run = environment["MOMO_UI_TEST_RUN_ID"], UUID(uuidString: run) != nil else { return nil }
+        switch environment["MOMO_UI_TEST_APPEARANCE"] {
+        case "dark": return .dark
+        case "light": return .light
+        default: return nil
+        }
+    }
+    #endif
 }

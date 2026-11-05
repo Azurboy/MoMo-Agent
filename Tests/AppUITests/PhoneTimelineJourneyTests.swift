@@ -257,7 +257,7 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         XCTAssertTrue(latestWindow(app).isHittable)
     }
 
-    func testMergedWindowDetailPlaybackAndMultipleDraftSources() {
+    func testMergedWindowDetailPlaybackWithoutMacConnection() {
         let app = launch()
         let row = latestWindow(app)
         XCTAssertTrue(row.waitForExistence(timeout: 15))
@@ -284,11 +284,10 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         play.tap()
         wait(play, contains: "继续回听")
         attach(app, name: "timeline-multiple-recordings-detail")
-        app.buttons["transcript.discuss"].tap()
-        XCTAssertTrue(app.staticTexts["已引用这段时间"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["assistant.source.remove"].exists)
-        app.buttons["assistant.source.remove"].tap()
-        XCTAssertFalse(app.staticTexts["已引用这段时间"].exists)
+        XCTAssertFalse(app.buttons["transcript.discuss"].isEnabled,
+                       "This unpaired fixture can read and play recordings; discussion requires the remote Agent.")
+        app.tabBars.buttons["聊天"].tap()
+        XCTAssertTrue(app.buttons["remote.connect"].waitForExistence(timeout: 5))
     }
 
     func testShortContentAppearsAtItsTimeWithoutAnExpansionControl() {

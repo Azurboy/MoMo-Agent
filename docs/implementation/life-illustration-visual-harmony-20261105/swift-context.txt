@@ -1,0 +1,51 @@
+warning: 'momo-recording-summary-z0ztrnmn': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/syh/.cache/momo-life-ill-polish-build/tmp/momo-recording-summary-z0ztrnmn/Sources/MoMoAgentClient/Resources/RelayKit-LICENSE
+warning: 'momoagentkit': failed to retrieve search paths with pkg-config; maybe pkg-config is not installed
+warning: 'momoagentkit': couldn't find pc file for sqlite3
+Building for debugging...
+[Computing dependencies]
+[Pre-planning 1 / 185]
+[Planning deferred tasks]
+[3 / 50] RemoteSummaryProbeTests-product
+[16 / 44] MoMoAgentClient
+[19 / 55] MoMoAgentClient
+[20 / 55] MoMoAgentClient
+[21 / 55] MoMoAgentClient
+[24 / 56] MoMoAgentClient
+[26 / 56] MoMoAgentClient
+[27 / 56] RemoteSummaryProbe
+[29 / 57] RemoteSummaryProbe
+[31 / 57] MoMoAgentClient
+[32 / 61] RemoteSummaryProbe
+[33 / 61] RemoteSummaryProbe
+[34 / 61] RemoteSummaryProbe
+[35 / 61] RemoteSummaryProbe
+[37 / 59] RemoteSummaryProbe
+[41 / 59]
+[45 / 59] RemoteSummaryProbe
+[49 / 60] RemoteSummaryProbeTests-product
+[52 / 63] RemoteSummaryProbeTests-product
+[53 / 63] RemoteSummaryProbeTests-product
+[57 / 63] RemoteSummaryProbeTests-product
+[59 / 63] RemoteSummaryProbeTests-product
+[60 / 63] RemoteSummaryProbeTests-product
+Build complete! (22.77秒)
+Test Suite 'Selected tests' started at 2026-11-05 13:52:37.432.
+Test Suite 'RemoteSummaryProbeTests.xctest' started at 2026-11-05 13:52:37.438.
+Test Suite 'RemoteContextSyncTests' started at 2026-11-05 13:52:37.438.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testMemoryExcerptOnlyMovesRecognizedSourcePrefix]' started.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testMemoryExcerptOnlyMovesRecognizedSourcePrefix]' passed (0.004 seconds).
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testNativeMemoryCacheSurvivesRestartAndFailedDeleteIsNotQueued]' started.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testNativeMemoryCacheSurvivesRestartAndFailedDeleteIsNotQueued]' passed (0.154 seconds).
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testOrdinaryChatDoesNotWaitForArchiveOrMemoryDownload]' started.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testOrdinaryChatDoesNotWaitForArchiveOrMemoryDownload]' passed (0.029 seconds).
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery]' started.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery]' passed (0.105 seconds).
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testRecordingSummaryOutboxResumesAndCachesWithoutModelKey]' started.
+Test Case '-[RemoteSummaryProbeTests.RemoteContextSyncTests testRecordingSummaryOutboxResumesAndCachesWithoutModelKey]' passed (5.174 seconds).
+Test Suite 'RemoteContextSyncTests' passed at 2026-11-05 13:52:42.905.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.466 (5.467) seconds
+Test Suite 'RemoteSummaryProbeTests.xctest' passed at 2026-11-05 13:52:42.905.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.466 (5.467) seconds
+Test Suite 'Selected tests' passed at 2026-11-05 13:52:42.905.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.466 (5.473) seconds

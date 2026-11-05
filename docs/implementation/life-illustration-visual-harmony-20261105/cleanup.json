@@ -1,0 +1,14 @@
+{
+  "verified_at": "2026-11-05T14:19:43.086589+08:00",
+  "removed": [
+    "/Users/syh/.cache/momo-life-ill-polish-build",
+    "/Users/syh/Workspace/MoMo-Agent-worktrees/life-ill-polish/Vendor/AgentDesktop/Cache"
+  ],
+  "temporary_simulator_deleted": "D9D7B450-8F10-47C4-8FF9-F5931E32CD42",
+  "fixture_server_stopped": true,
+  "active_builds_using_paths": false,
+  "disk_free_bytes_before_final_cleanup": 5423067136,
+  "disk_free_bytes_after_final_cleanup": 8587165696,
+  "disk_free_gib_after_final_cleanup": 8.0,
+  "note": "Actual disk free-space readback; changes from concurrent tasks are not attributed to this cleanup. Source, real installed apps, production data, model symlinks, and final image/screenshot evidence are retained."
+}

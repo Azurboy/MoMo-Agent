@@ -1,0 +1,189 @@
+{
+  "branch": "fix/life-illustration-visual-harmony",
+  "base_commit": "eacd4dbe0a56eeff51bc6852e514db619d98dd0d",
+  "tests": {
+    "python_life": {
+      "passed": 26
+    },
+    "python_webrtc": {
+      "passed": 14,
+      "skipped": 4,
+      "reason": "Native RTC probe and TURN not configured"
+    },
+    "swift_life": {
+      "passed": 6
+    },
+    "swift_remote_context": {
+      "passed": 5
+    },
+    "ui_life": {
+      "passed": 2
+    },
+    "ui_phone_timeline": {
+      "passed": 9,
+      "execution": "8 unchanged cases plus 1 corrected case rerun"
+    },
+    "mac_debug_build": "passed"
+  },
+  "inline_geometry_pt": {
+    "image": [
+      96,
+      96
+    ],
+    "row_height": 112,
+    "button_width": 248,
+    "text_axis_inset": 26
+  },
+  "ui_checks": [
+    "Actual dark canvas pixels",
+    "Continuous spine pixel sampling in light and dark",
+    "96pt image dimensions",
+    "Adjacent row bounds and 26pt alignment",
+    "Pinch zoom in/out in native UIScrollView",
+    "Horizontal paging",
+    "Swipe-down dismissal",
+    "Close and share affordances",
+    "Settings route and subscription state"
+  ],
+  "appearance": "DEBUG-only native preferredColorScheme selected by UUID-gated UI-test environment; iOS 27 Simulator system appearance override did not affect rendered apps.",
+  "screenshots": {
+    "02b_iphone_fullscreen_viewer_dark.png": {
+      "sha256": "5b57281cd51947759bc1482642dca34bce17416d78ad4634ca957b0a49e1a3db",
+      "pixels": [
+        1206,
+        2622
+      ],
+      "mode": "RGB",
+      "test": "LifeIllustrationJourneyTests/testDarkTimelineAndViewer()",
+      "timestamp": 1793859279.942
+    },
+    "01b_iphone_timeline_inline_dark.png": {
+      "sha256": "57edeb715f88e8fdce1d6f3b5f7242a8ea175b437e2e6bb5c4836790cb50fb52",
+      "pixels": [
+        1206,
+        2622
+      ],
+      "mode": "RGB",
+      "test": "LifeIllustrationJourneyTests/testDarkTimelineAndViewer()",
+      "timestamp": 1793859277.799
+    },
+    "03_iphone_settings_row.png": {
+      "sha256": "e244899666fc28d27e2ee4dc03535175552ee08cbb3dc7bf066dd66bf66aac3c",
+      "pixels": [
+        1206,
+        2622
+      ],
+      "mode": "RGB",
+      "test": "LifeIllustrationJourneyTests/testRealGeneratedImagesInTimelineViewerAndSettings()",
+      "timestamp": 1793859316.033
+    },
+    "02_iphone_fullscreen_viewer.png": {
+      "sha256": "98bcf182b68fb940f0558c250006947ddf6c12bb17e53f740be67402ba9ab946",
+      "pixels": [
+        1206,
+        2622
+      ],
+      "mode": "RGB",
+      "test": "LifeIllustrationJourneyTests/testRealGeneratedImagesInTimelineViewerAndSettings()",
+      "timestamp": 1793859299.142
+    },
+    "01_iphone_timeline_inline.png": {
+      "sha256": "7875492c36c7c036d19529c5fc8371dfb23cd8db0581c4271f5a4c6653acb210",
+      "pixels": [
+        1206,
+        2622
+      ],
+      "mode": "RGB",
+      "test": "LifeIllustrationJourneyTests/testRealGeneratedImagesInTimelineViewerAndSettings()",
+      "timestamp": 1793859297.135
+    }
+  },
+  "images": {
+    "sample_code.png": {
+      "mode": "RGBA",
+      "pixels": [
+        1024,
+        1024
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "9d91a9107119543d40c1f452cd908119b2d69c5ed448688a9973301a1cde3928"
+    },
+    "sample_code_thumbnail.png": {
+      "mode": "RGBA",
+      "pixels": [
+        512,
+        512
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "7c062c7759650c4d78c9abf8275e81373c96bd1ea4eed9e7c1a3ed74beb04fe1"
+    },
+    "sample_outdoor.png": {
+      "mode": "RGBA",
+      "pixels": [
+        1024,
+        1024
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "3b63b70206658b4c9525382d20db4ea3ca3d8a8b2749a39a777441aaa4c1a63a"
+    },
+    "sample_outdoor_thumbnail.png": {
+      "mode": "RGBA",
+      "pixels": [
+        512,
+        512
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "ae6fc6ab620297c2a3cc496e781b1413e8410ed890d176f70b8f22d9b49eb26b"
+    },
+    "sample_night.png": {
+      "mode": "RGBA",
+      "pixels": [
+        1024,
+        1024
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "1b6affedaa11fe6306807652664cbb14100d2e9dc6ddd692145a4484ed0496e7"
+    },
+    "sample_night_thumbnail.png": {
+      "mode": "RGBA",
+      "pixels": [
+        512,
+        512
+      ],
+      "alpha_extrema": [
+        0,
+        255
+      ],
+      "sha256": "de984e0802cc2f8784ed96e1d8a20d56d52ee6107cfd36882c4ab184211a8fce"
+    }
+  },
+  "cleanup": {
+    "verified_at": "2026-11-05T14:19:43.086589+08:00",
+    "removed": [
+      "/Users/syh/.cache/momo-life-ill-polish-build",
+      "/Users/syh/Workspace/MoMo-Agent-worktrees/life-ill-polish/Vendor/AgentDesktop/Cache"
+    ],
+    "temporary_simulator_deleted": "D9D7B450-8F10-47C4-8FF9-F5931E32CD42",
+    "fixture_server_stopped": true,
+    "active_builds_using_paths": false,
+    "disk_free_bytes_before_final_cleanup": 5423067136,
+    "disk_free_bytes_after_final_cleanup": 8587165696,
+    "disk_free_gib_after_final_cleanup": 8.0,
+    "note": "Actual disk free-space readback; changes from concurrent tasks are not attributed to this cleanup. Source, real installed apps, production data, model symlinks, and final image/screenshot evidence are retained."
+  }
+}

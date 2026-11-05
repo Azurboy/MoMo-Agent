@@ -1,0 +1,23 @@
+test_data_channel_cannot_forward_control_or_replace_root_headers (test_webrtc.RTCIntegrationTests.test_data_channel_cannot_forward_control_or_replace_root_headers) ... ok
+test_desktop_video_offer_uses_public_pairing_and_keeps_private_control_private (test_webrtc.RTCIntegrationTests.test_desktop_video_offer_uses_public_pairing_and_keeps_private_control_private) ... ok
+test_disabled_remote_access_blocks_a_peer_that_was_already_admitted (test_webrtc.RTCIntegrationTests.test_disabled_remote_access_blocks_a_peer_that_was_already_admitted) ... ok
+test_ice_file_is_private_and_reconfiguration_closes_only_network (test_webrtc.RTCIntegrationTests.test_ice_file_is_private_and_reconfiguration_closes_only_network) ... ok
+test_illustration_asset_keeps_binary_type_and_requires_device_auth (test_webrtc.RTCIntegrationTests.test_illustration_asset_keeps_binary_type_and_requires_device_auth) ... ok
+test_malformed_frame_closes_network_without_agent_side_effects (test_webrtc.RTCIntegrationTests.test_malformed_frame_closes_network_without_agent_side_effects) ... ok
+test_native_direct_rpc_cursor_and_https_resume (test_webrtc.RTCIntegrationTests.test_native_direct_rpc_cursor_and_https_resume) ... skipped 'Set MOMO_RTC_PROBE to run native interoperability'
+test_native_real_turn_relay (test_webrtc.RTCIntegrationTests.test_native_real_turn_relay) ... skipped 'Set MOMO_TEST_TURN_URL for real TURN allocation'
+test_native_revocation_closes_active_channel (test_webrtc.RTCIntegrationTests.test_native_revocation_closes_active_channel) ... skipped 'Set MOMO_RTC_PROBE to run native interoperability'
+test_native_unreachable_relay_falls_back_to_https (test_webrtc.RTCIntegrationTests.test_native_unreachable_relay_falls_back_to_https) ... skipped 'Set MOMO_RTC_PROBE to run native interoperability'
+test_push_route_overrides_device_identity_and_preserves_retry_after (test_webrtc.RTCIntegrationTests.test_push_route_overrides_device_identity_and_preserves_retry_after) ... ok
+test_real_private_router_accepts_only_management_key_and_bounded_commands (test_webrtc.RTCIntegrationTests.test_real_private_router_accepts_only_management_key_and_bounded_commands) ... ok
+test_signaling_requires_approved_device_and_matches_identity (test_webrtc.RTCIntegrationTests.test_signaling_requires_approved_device_and_matches_identity) ... ok
+test_native_conversation_read_is_available_without_exposing_session_mutations (test_webrtc.RouteTests.test_native_conversation_read_is_available_without_exposing_session_mutations) ... ok
+test_recording_summary_uses_authenticated_context_transport_only (test_webrtc.RouteTests.test_recording_summary_uses_authenticated_context_transport_only) ... ok
+test_shared_allowlist_preserves_cursor_and_context_queries (test_webrtc.RouteTests.test_shared_allowlist_preserves_cursor_and_context_queries) ... ok
+test_shared_conversation_and_exact_native_controls_share_the_allowlist (test_webrtc.RouteTests.test_shared_conversation_and_exact_native_controls_share_the_allowlist) ... ok
+test_standard_ice_configuration_has_no_vendor_names (test_webrtc.RouteTests.test_standard_ice_configuration_has_no_vendor_names) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.076s
+
+OK (skipped=4)

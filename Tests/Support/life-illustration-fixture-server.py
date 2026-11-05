@@ -25,15 +25,22 @@ def main():
         boundary -= dt.timedelta(days=1)
     assets, items = {}, []
     for index, name in enumerate(('code', 'outdoor', 'night')):
-        data = (args.samples / f'sample-{name}.png').read_bytes()
-        if data[:8] != b'\x89PNG\r\n\x1a\n':
-            raise ValueError('Only actual PNG assets may enter acceptance fixtures')
+        data = (args.samples / f'sample_{name}.png').read_bytes()
+        thumbnail = (args.samples / f'sample_{name}_thumbnail.png').read_bytes()
+        from PIL import Image
+        import io
+        for raw, size in [(data, 1024), (thumbnail, 512)]:
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.format != 'PNG' or image.size != (size, size) or image.mode != 'RGBA':
+                    raise ValueError('Acceptance needs the real square RGBA originals and thumbnails')
         sha = hashlib.sha256(data).hexdigest()
+        thumbnail_sha = hashlib.sha256(thumbnail).hexdigest()
         assets[sha] = data
+        assets[thumbnail_sha] = thumbnail
         start = boundary.timestamp() + (6 + index * 3) * 3600
         items.append(dict(id=f'sample-{name}', deleted=False, window_start=start, window_end=start+10800,
                           logical_day=boundary.date().isoformat(), timezone='Asia/Shanghai', place=None,
-                          asset_sha256=sha, thumbnail_sha256=sha, width=1360, height=1020,
+                          asset_sha256=sha, thumbnail_sha256=thumbnail_sha, width=1024, height=1024,
                           source_ids=[f'acceptance-{name}'], created_at=start+11400, updated_at=start+11400))
     settings = dict(enabled=True, interval_hours=3, day_start_hour=8, provider='openai-codex', supported=True,
                     service_status='ready', updated_at=now.timestamp(), pending_count=0, needs_review_count=0)
