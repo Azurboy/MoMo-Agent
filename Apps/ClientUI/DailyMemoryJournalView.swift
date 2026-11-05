@@ -1735,28 +1735,47 @@ struct ChiikawaDoodleCanvas: View {
         context.fill(woodPost, with: .color(Color(red: 0.82, green: 0.67, blue: 0.50)))
         context.stroke(woodPost, with: .color(ink), style: stroke)
 
-        let boardW = unit * 0.31
+        let concisePlace = place
+            .components(separatedBy: "·")
+            .last?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? place
+        let displayPlace = String((concisePlace.isEmpty ? place : concisePlace).prefix(6))
+
+        let boardW = max(unit * 0.31, unit * (0.14 + CGFloat(displayPlace.count) * 0.042))
         let boardH = unit * 0.105
-        let boardRect = CGRect(x: base.x - boardW * 0.46, y: base.y - postH - boardH * 0.65, width: boardW, height: boardH)
+        let boardRect = CGRect(x: base.x - boardW * 0.44, y: base.y - postH - boardH * 0.65, width: boardW, height: boardH)
         let board = Path(roundedRect: boardRect, cornerRadius: unit * 0.024)
         context.fill(board, with: .color(Color(red: 1.0, green: 0.97, blue: 0.89)))
         context.stroke(board, with: .color(ink), style: stroke)
 
-        // Tiny cute two-leaf sprout perched on top of the signpost
+        // Tiny cute two-leaf sprout perched right on top of the signpost
         let topPt = CGPoint(x: boardRect.midX + unit * 0.02, y: boardRect.minY)
-        var leafL = Path(ellipseIn: CGRect(x: topPt.x - unit * 0.036, y: topPt.y - unit * 0.032, width: unit * 0.036, height: unit * 0.022))
-        leafL = leafL.applying(CGAffineTransform(translationX: -topPt.x, y: -topPt.y).rotated(by: -0.35).translatedBy(x: topPt.x, y: topPt.y))
-        var leafR = Path(ellipseIn: CGRect(x: topPt.x, y: topPt.y - unit * 0.032, width: unit * 0.036, height: unit * 0.022))
-        leafR = leafR.applying(CGAffineTransform(translationX: -topPt.x, y: -topPt.y).rotated(by: 0.35).translatedBy(x: topPt.x, y: topPt.y))
+        var stem = Path()
+        stem.move(to: topPt)
+        stem.addLine(to: CGPoint(x: topPt.x, y: topPt.y - unit * 0.018))
+        context.stroke(stem, with: .color(ink), style: StrokeStyle(lineWidth: stroke.lineWidth * 0.75, lineCap: .round))
+
+        let sproutTip = CGPoint(x: topPt.x, y: topPt.y - unit * 0.016)
+        var leafL = Path(ellipseIn: CGRect(x: sproutTip.x - unit * 0.036, y: sproutTip.y - unit * 0.020, width: unit * 0.036, height: unit * 0.021))
+        leafL = leafL.applying(
+            CGAffineTransform(translationX: sproutTip.x, y: sproutTip.y)
+                .rotated(by: 0.36)
+                .translatedBy(x: -sproutTip.x, y: -sproutTip.y)
+        )
+        var leafR = Path(ellipseIn: CGRect(x: sproutTip.x, y: sproutTip.y - unit * 0.020, width: unit * 0.036, height: unit * 0.021))
+        leafR = leafR.applying(
+            CGAffineTransform(translationX: sproutTip.x, y: sproutTip.y)
+                .rotated(by: -0.36)
+                .translatedBy(x: -sproutTip.x, y: -sproutTip.y)
+        )
         let sproutGreen = Color(red: 0.56, green: 0.82, blue: 0.49)
         context.fill(leafL, with: .color(sproutGreen))
         context.fill(leafR, with: .color(sproutGreen))
         context.stroke(leafL, with: .color(ink), style: StrokeStyle(lineWidth: stroke.lineWidth * 0.75, lineCap: .round))
         context.stroke(leafR, with: .color(ink), style: StrokeStyle(lineWidth: stroke.lineWidth * 0.75, lineCap: .round))
 
-        let displayPlace = String(place.prefix(6))
         let label = Text("📍\(displayPlace)")
-            .font(.system(size: max(9, unit * 0.042), weight: .bold, design: .rounded))
+            .font(.system(size: max(9, unit * 0.041), weight: .bold, design: .rounded))
             .foregroundStyle(ink)
         context.draw(label, at: CGPoint(x: boardRect.midX, y: boardRect.midY), anchor: .center)
     }
