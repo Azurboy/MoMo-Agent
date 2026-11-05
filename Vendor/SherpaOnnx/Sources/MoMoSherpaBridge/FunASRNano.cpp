@@ -1,5 +1,6 @@
 #include "MoMoSherpaBridge.h"
 #include "CancelToken.hpp"
+#include "FunASRNanoCoreML.hpp"
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #if defined(__APPLE__)
@@ -1389,6 +1390,7 @@ struct MoMoFunASRNanoRuntime {
 
   KaldiFbankFrontend frontend;
   std::unique_ptr<Qwen3Tokenizer> tokenizer;
+  std::unique_ptr<momo_funasr::CoreMLBackend> coreml;
 };
 
 namespace {
@@ -1459,6 +1461,10 @@ void LookupSingleTokenEmbed(MoMoFunASRNanoRuntime *runtime, int64_t token_id,
 void EmbedTokenSpan(MoMoFunASRNanoRuntime *runtime, const int64_t *ids,
                     size_t count, Ort::RunOptions &run_opts, float *out_embeds) {
   if (count == 0) return;
+  if (runtime->coreml) {
+    runtime->coreml->EmbedTokenSpan(ids, count, out_embeds);
+    return;
+  }
   const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
   std::array<int64_t, 2> shape{1, static_cast<int64_t>(count)};
   Ort::Value ids_tensor = Ort::Value::CreateTensor<int64_t>(
@@ -1499,6 +1505,20 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     }
 
     auto rt = std::make_unique<MoMoFunASRNanoRuntime>();
+    if (momo_funasr::IsCoreMLModelPath(encoder_adaptor_path)) {
+      rt->coreml = momo_funasr::CoreMLBackend::Create(
+          encoder_adaptor_path, llm_path, embedding_path);
+      rt->lfr_window_size = 7;
+      rt->lfr_window_shift = 6;
+      rt->hidden_size = rt->coreml->hidden_size();
+      rt->vocab_size = rt->coreml->vocab_size();
+      rt->max_total_len = rt->coreml->max_total_len();
+      rt->decode_logits.assign(static_cast<size_t>(rt->vocab_size), 0.0f);
+      rt->emb_is_token_independent = true;
+      rt->tokenizer = std::make_unique<Qwen3Tokenizer>(tokenizer_dir);
+      return rt.release();
+    }
+
     int32_t max_perf_threads = 4;
 #if defined(__APPLE__)
     int32_t perf_cores = 0;
@@ -1751,6 +1771,11 @@ void MoMoDestroyFunASRNanoRuntime(MoMoFunASRNanoRuntime *runtime) {
   delete runtime;
 }
 
+int32_t MoMoGetFunASRNanoAcceleratorMask(const MoMoFunASRNanoRuntime *runtime) {
+  if (!runtime || !runtime->coreml) return 0;
+  return runtime->coreml->accelerator_mask();
+}
+
 void MoMoDestroyFunASRNanoResult(MoMoFunASRNanoResult *result) {
   if (!result) return;
   std::free(result->text);
@@ -1829,51 +1854,9 @@ int MoMoTranscribeFunASRNanoCancellable(
 
     CheckCancel(is_cancelled, cancel_context, cancel_token);
 
-    // 1. Run SAN-M Encoder + 2-layer Bidirectional Transformer Adaptor on ORT CPU.
-    const int64_t feat_dim =
-        static_cast<int64_t>(runtime->lfr_window_size) * 80;
-    std::array<int64_t, 3> enc_in_shape{1, static_cast<int64_t>(t_lfr),
-                                        feat_dim};
-    std::vector<uint16_t> lfr_fp16;
-    Ort::Value enc_input{nullptr};
-    if (runtime->enc_in_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      lfr_fp16.resize(lfr.size());
-      ConvertFloatToHalfRaw(lfr.data(), lfr_fp16.data(), lfr.size());
-      enc_input = Ort::Value::CreateTensor(
-          runtime->cpu_mem, lfr_fp16.data(),
-          lfr_fp16.size() * sizeof(uint16_t), enc_in_shape.data(),
-          enc_in_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
-    } else {
-      enc_input = Ort::Value::CreateTensor<float>(
-          runtime->cpu_mem, lfr.data(), lfr.size(), enc_in_shape.data(),
-          enc_in_shape.size());
-    }
-
     momo_bridge::ScopedCancellableRunOptions shared_run_opts(cancel_token);
-    std::vector<Ort::Value> enc_outputs = runtime->encoder_sess->Run(
-        shared_run_opts.get(), runtime->enc_in_ptrs.data(), &enc_input, 1,
-        runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
-    if (enc_outputs.empty() || !enc_outputs[0].IsTensor()) {
-      throw std::runtime_error("Empty encoder_adaptor output");
-    }
 
-    CheckCancel(is_cancelled, cancel_context, cancel_token);
-
-    auto enc_info = enc_outputs[0].GetTensorTypeAndShapeInfo();
-    auto enc_shape = enc_info.GetShape();
-    if (enc_shape.size() != 3 || enc_shape[1] <= 0 ||
-        enc_shape[2] != runtime->hidden_size) {
-      throw std::runtime_error("Unexpected encoder_adaptor output shape");
-    }
-
-    const int32_t t_enc = static_cast<int32_t>(enc_shape[1]);
-    // Official FunAudioLLM/Fun-ASR-Nano-2512 low-frame-rate pooling query count:
-    // Only the first n_aud adaptor positions received training supervision (~2.1 tok/s).
-    int32_t ol = 1 + (t_enc - 3 + 2) / 2;
-    ol = 1 + (ol - 3 + 2) / 2;
-    int32_t n_aud = std::clamp<int32_t>((ol - 1) / 2 + 1, 1, t_enc);
-
-    // 2. Build Qwen3 ChatML prompt + audio placeholder sequence (cached per language/ITN).
+    // 1. Build Qwen3 ChatML prompt + audio placeholder sequence (cached per language/ITN).
     const std::string lang = language ? language : "";
     const std::string prompt_key = lang + "|" + (use_itn == 0 ? "0" : "1");
     const size_t hidden_u = static_cast<size_t>(runtime->hidden_size);
@@ -1920,7 +1903,69 @@ int MoMoTranscribeFunASRNanoCancellable(
     if (max_audio_slots <= 0) {
       throw std::runtime_error("Prompt exceeds LLM KV capacity");
     }
-    const int32_t audio_len = std::min<int32_t>(n_aud, max_audio_slots);
+
+    // 2. Run SAN-M Encoder + 2-layer Bidirectional Transformer Adaptor (CoreML ANE or ORT CPU).
+    int32_t audio_len = 0;
+    std::vector<float> coreml_audio_embeds;
+    std::vector<Ort::Value> enc_outputs;
+    ONNXTensorElementDataType enc_et = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+
+    if (runtime->coreml) {
+      const int32_t alloc_slots = std::min<int32_t>(max_audio_slots, 68);
+      coreml_audio_embeds.resize(static_cast<size_t>(alloc_slots) * hidden_u);
+      int32_t eff_t_lfr = 0;
+      int32_t n_aud = 0;
+      runtime->coreml->RunEncoderAdaptor(
+          lfr.data(), t_lfr, &eff_t_lfr, &n_aud,
+          coreml_audio_embeds.data(), alloc_slots);
+      CheckCancel(is_cancelled, cancel_context, cancel_token);
+      audio_len = std::min<int32_t>(n_aud, max_audio_slots);
+    } else {
+      const int64_t feat_dim =
+          static_cast<int64_t>(runtime->lfr_window_size) * 80;
+      std::array<int64_t, 3> enc_in_shape{1, static_cast<int64_t>(t_lfr),
+                                          feat_dim};
+      std::vector<uint16_t> lfr_fp16;
+      Ort::Value enc_input{nullptr};
+      if (runtime->enc_in_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        lfr_fp16.resize(lfr.size());
+        ConvertFloatToHalfRaw(lfr.data(), lfr_fp16.data(), lfr.size());
+        enc_input = Ort::Value::CreateTensor(
+            runtime->cpu_mem, lfr_fp16.data(),
+            lfr_fp16.size() * sizeof(uint16_t), enc_in_shape.data(),
+            enc_in_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+      } else {
+        enc_input = Ort::Value::CreateTensor<float>(
+            runtime->cpu_mem, lfr.data(), lfr.size(), enc_in_shape.data(),
+            enc_in_shape.size());
+      }
+
+      enc_outputs = runtime->encoder_sess->Run(
+          shared_run_opts.get(), runtime->enc_in_ptrs.data(), &enc_input, 1,
+          runtime->enc_out_ptrs.data(), runtime->enc_out_ptrs.size());
+      if (enc_outputs.empty() || !enc_outputs[0].IsTensor()) {
+        throw std::runtime_error("Empty encoder_adaptor output");
+      }
+
+      CheckCancel(is_cancelled, cancel_context, cancel_token);
+
+      auto enc_info = enc_outputs[0].GetTensorTypeAndShapeInfo();
+      auto enc_shape = enc_info.GetShape();
+      if (enc_shape.size() != 3 || enc_shape[1] <= 0 ||
+          enc_shape[2] != runtime->hidden_size) {
+        throw std::runtime_error("Unexpected encoder_adaptor output shape");
+      }
+      enc_et = enc_info.GetElementType();
+
+      const int32_t t_enc = static_cast<int32_t>(enc_shape[1]);
+      // Official FunAudioLLM/Fun-ASR-Nano-2512 low-frame-rate pooling query count:
+      // Only the first n_aud adaptor positions received training supervision (~2.1 tok/s).
+      int32_t ol = 1 + (t_enc - 3 + 2) / 2;
+      ol = 1 + (ol - 3 + 2) / 2;
+      int32_t n_aud = std::clamp<int32_t>((ol - 1) / 2 + 1, 1, t_enc);
+      audio_len = std::min<int32_t>(n_aud, max_audio_slots);
+    }
+
     const int32_t fbank_beg = static_cast<int32_t>(ids_before.size());
     const int32_t context_len =
         fbank_beg + audio_len + static_cast<int32_t>(ids_after.size());
@@ -1956,8 +2001,13 @@ int MoMoTranscribeFunASRNanoCancellable(
     }
 
     // Splice first audio_len (= n_aud) projected audio queries into prefill_embeds.
-    const auto enc_et = enc_info.GetElementType();
-    if (enc_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    if (runtime->coreml) {
+      if (audio_len > 0) {
+        std::memcpy(prefill_embeds.data() + static_cast<size_t>(fbank_beg) * hidden_u,
+                    coreml_audio_embeds.data(),
+                    static_cast<size_t>(audio_len) * hidden_u * sizeof(float));
+      }
+    } else if (enc_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       const uint16_t *enc_ptr = enc_outputs[0].GetTensorData<uint16_t>();
       for (int32_t t = 0; t < audio_len; ++t) {
         const uint16_t *src = enc_ptr + static_cast<size_t>(t) * hidden_u;
@@ -1980,29 +2030,32 @@ int MoMoTranscribeFunASRNanoCancellable(
       }
     }
 
-    // 3. Reset only previously dirtied KV cache positions.
+    // 3. Reset only previously dirtied KV cache positions (ORT CPU path only).
     const size_t bytes_per_pos = static_cast<size_t>(runtime->kv_heads) *
                                  static_cast<size_t>(runtime->head_dim) *
                                  runtime->kv_elem_bytes;
 
-    for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
-      const size_t zero_bytes =
-          std::min(runtime->cache_k_bytes[l].size(),
-                   runtime->dirty_kv_len * bytes_per_pos);
-      if (zero_bytes > 0) {
-        std::memset(runtime->cache_k_bytes[l].data(), 0, zero_bytes);
-        std::memset(runtime->cache_v_bytes[l].data(), 0, zero_bytes);
+    std::vector<int64_t> attention_mask;
+    std::vector<int64_t> prefill_pos;
+    if (!runtime->coreml) {
+      for (size_t l = 0; l < static_cast<size_t>(runtime->num_layers); ++l) {
+        const size_t zero_bytes =
+            std::min(runtime->cache_k_bytes[l].size(),
+                     runtime->dirty_kv_len * bytes_per_pos);
+        if (zero_bytes > 0) {
+          std::memset(runtime->cache_k_bytes[l].data(), 0, zero_bytes);
+          std::memset(runtime->cache_v_bytes[l].data(), 0, zero_bytes);
+        }
       }
-    }
-    runtime->dirty_kv_len = 0;
+      runtime->dirty_kv_len = 0;
 
-    std::vector<int64_t> attention_mask(
-        static_cast<size_t>(runtime->max_total_len), 0);
-    std::fill(attention_mask.begin(), attention_mask.begin() + context_len, 1);
+      attention_mask.assign(static_cast<size_t>(runtime->max_total_len), 0);
+      std::fill(attention_mask.begin(), attention_mask.begin() + context_len, 1);
 
-    std::vector<int64_t> prefill_pos(static_cast<size_t>(context_len));
-    for (int32_t i = 0; i < context_len; ++i) {
-      prefill_pos[static_cast<size_t>(i)] = i;
+      prefill_pos.resize(static_cast<size_t>(context_len));
+      for (int32_t i = 0; i < context_len; ++i) {
+        prefill_pos[static_cast<size_t>(i)] = i;
+      }
     }
 
     // 4. Autoregressive KV-Delta LLM Generation with Windowed Repetition Penalty + N-gram Guard.
@@ -2030,7 +2083,17 @@ int MoMoTranscribeFunASRNanoCancellable(
       if (valid_len >= runtime->max_total_len) break;
       CheckCancel(is_cancelled, cancel_context, cancel_token);
 
-      if (step == 0) {
+      if (runtime->coreml) {
+        if (step == 0) {
+          runtime->coreml->RunPrefill(
+              prefill_embeds.data(), context_len, is_cancelled, cancel_context,
+              cancel_token, logits_buf);
+        } else {
+          runtime->coreml->RunDecodeStep(
+              generated_ids.back(), valid_len, logits_buf);
+          valid_len += 1;
+        }
+      } else if (step == 0) {
         std::array<int64_t, 3> emb_shape{1, static_cast<int64_t>(context_len),
                                          static_cast<int64_t>(runtime->hidden_size)};
         std::array<int64_t, 2> mask_shape{1, static_cast<int64_t>(context_len)};
@@ -2243,9 +2306,11 @@ int MoMoTranscribeFunASRNanoCancellable(
       if (!found || best_id == eos_id || best_id == im_end_id) break;
       generated_ids.push_back(best_id);
     }
-    runtime->dirty_kv_len =
-        std::min<size_t>(static_cast<size_t>(runtime->max_total_len),
-                         static_cast<size_t>(valid_len));
+    if (!runtime->coreml) {
+      runtime->dirty_kv_len =
+          std::min<size_t>(static_cast<size_t>(runtime->max_total_len),
+                           static_cast<size_t>(valid_len));
+    }
 
     CheckCancel(is_cancelled, cancel_context, cancel_token);
 
@@ -2263,6 +2328,8 @@ int MoMoTranscribeFunASRNanoCancellable(
     return 1;
   } catch (const CancelledError &) {
     return -2;
+  } catch (const momo_funasr::CancelledError &) {
+    return -2;
   } catch (const Ort::Exception &e) {
     if ((cancel_token && cancel_token->IsCancelled()) ||
         (is_cancelled && is_cancelled(cancel_context) != 0)) {
@@ -2270,6 +2337,10 @@ int MoMoTranscribeFunASRNanoCancellable(
     }
     SaveError(error, error_capacity, e.what());
   } catch (const std::exception &e) {
+    if ((cancel_token && cancel_token->IsCancelled()) ||
+        (is_cancelled && is_cancelled(cancel_context) != 0)) {
+      return -2;
+    }
     SaveError(error, error_capacity, e.what());
   } catch (...) {
     SaveError(error, error_capacity, "FunASR-Nano transcription failed");

@@ -31,6 +31,7 @@ MoMoFunASRNanoRuntime *MoMoCreateFunASRNanoRuntime(
     const char *embedding_path, const char *tokenizer_dir,
     int32_t num_threads, char *error, size_t error_capacity);
 void MoMoDestroyFunASRNanoRuntime(MoMoFunASRNanoRuntime *runtime);
+int32_t MoMoGetFunASRNanoAcceleratorMask(const MoMoFunASRNanoRuntime *runtime);
 // Returns 1 on success, -2 if cancelled, 0 on error.
 int MoMoTranscribeFunASRNano(
     MoMoFunASRNanoRuntime *runtime, const float *samples, int32_t sample_count,
@@ -46,6 +47,33 @@ int MoMoTranscribeFunASRNanoCancellable(
 void MoMoDestroyFunASRNanoResult(MoMoFunASRNanoResult *result);
 char *MoMoCleanFunASRText(const char *raw_text);
 void MoMoFreeCString(char *str);
+
+typedef struct MoMoXASRCoreMLRuntime MoMoXASRCoreMLRuntime;
+typedef struct {
+  char *text;
+  char **tokens;
+  float *timestamps;
+  int32_t count;
+  char *raw_json;
+} MoMoXASRCoreMLResult;
+
+MoMoXASRCoreMLRuntime *MoMoCreateXASRCoreMLRuntime(
+    const char *encoder_mlmodelc_path,
+    const char *decoder_joiner_bin_path,
+    const char *tokens_path,
+    int32_t num_threads,
+    char *error, size_t error_capacity);
+void MoMoDestroyXASRCoreMLRuntime(MoMoXASRCoreMLRuntime *runtime);
+int32_t MoMoGetXASRCoreMLAcceleratorMask(const MoMoXASRCoreMLRuntime *runtime);
+// Returns 1 on success, -2 if cancelled, 0 on error.
+int MoMoTranscribeXASRCoreMLCancellable(
+    MoMoXASRCoreMLRuntime *runtime,
+    const float *samples, int32_t sample_count,
+    MoMoCancelCallback is_cancelled, const void *cancel_context,
+    MoMoCancelToken *cancel_token,
+    MoMoXASRCoreMLResult **out_result,
+    char *error, size_t error_capacity);
+void MoMoDestroyXASRCoreMLResult(MoMoXASRCoreMLResult *result);
 
 typedef struct MoMoSpeakerRuntime MoMoSpeakerRuntime;
 typedef struct {

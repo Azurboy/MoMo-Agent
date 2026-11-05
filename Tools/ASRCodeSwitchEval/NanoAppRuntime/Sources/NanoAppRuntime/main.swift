@@ -8,9 +8,9 @@
 //       [--subsets a,b] [--shard K/N] [--limit N] [--resume] [--cache DIR]
 //   $X merge --output RUN_DIR SHARD_DIR...
 //
-// Recognition goes through MoMoSpeech.SherpaRuntime (FunASRNano.cpp: n_aud slicing, centred LFR,
-// repetition penalty 1.12 + no-repeat 5-gram, ORT CPU) with the app's SpeechConfiguration() defaults
-// (language automatic -> "", ITN on, 2 threads) and the funasr-nano-onnx-v1 catalog check. Each
+// Recognition goes through MoMoSpeech.SherpaRuntime (FunASRNano.cpp / FunASRNanoCoreML.mm: n_aud slicing,
+// centred LFR, repetition penalty 1.12 + no-repeat 5-gram, CoreML ANE) with the app's SpeechConfiguration()
+// defaults (language automatic -> "", ITN on, 2 threads) and DownloadableSpeechModel.funASRNano(). Each
 // utterance is the window core. Like SpeechEngine.recognizeArchive with continuousArchive (the iPhone
 // app's setting), exact-zero samples at both ends are trimmed and all-zero input yields "".
 // Speaker diarization re-decoding is not part of this harness.
@@ -179,7 +179,7 @@ func recorder(_ id: String?) -> SpeechDiagnosticRecorder {
 let rssBeforeLoad = peakRSSBytes()
 var started = Date()
 let loadRecorder = recorder(nil)
-let runtime = try SherpaRuntime(bundle: bundle, configuration: configuration, backend: .sherpa, download: download,
+let runtime = try SherpaRuntime(bundle: bundle, configuration: configuration, backend: .sherpaCoreML, download: download,
                                 cacheRoot: cacheRoot, attempt: attempt, recorder: loadRecorder)
 try runtime.warmUp(attempt: attempt, recorder: loadRecorder) // As SpeechEngine.selectRecognitionModel does.
 let loadSeconds = Date().timeIntervalSince(started)

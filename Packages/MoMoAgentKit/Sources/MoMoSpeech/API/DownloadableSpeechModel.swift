@@ -15,12 +15,13 @@ public struct DownloadableSpeechModel: Codable, Equatable, Sendable {
     public let files: [File]
     public var downloadBytes: Int64 { files.reduce(0) { $0 + $1.byteCount } }
 
-    static let xASRIdentifier = "sherpa-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03"
+    static let xASRIdentifier = "momo-x-asr-zipformer-coreml-ane-int8-v1"
+    static let legacyXASRIdentifier = "sherpa-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03"
 
-    public static func funASRNano() throws -> Self { try bundled("funasr-nano-onnx-v1") }
+    public static func funASRNano() throws -> Self { try bundled("funasr-nano-coreml-v1") }
 
     public static func xASR() throws -> Self {
-        let value = try bundled("x-asr-zh-en-onnx-v1")
+        let value = try bundled("x-asr-coreml-v1")
         guard value.identifier == xASRIdentifier else { throw SpeechModelInstallationError.invalidCatalog }
         return value
     }

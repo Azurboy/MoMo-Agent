@@ -26,12 +26,15 @@ private func speechAttemptIsCancelled(_ raw: UnsafeRawPointer?) -> Int32 {
 final class SherpaRuntime: @unchecked Sendable {
     private var recognizer: OpaquePointer?
     private var nanoRuntime: OpaquePointer?
+    private var xasrRuntime: OpaquePointer?
     private var configuration: SpeechConfiguration
     private var fingerprint: String
     private let revision: String
     private let runtimeTag: String
     private let model: SpeechModelChoice
     private var warmed = false
+    let usesCoreMLAccelerator: Bool
+    private(set) var acceleratorMask: Int = 0
 
     init(bundle: SpeechModelBundle, configuration: SpeechConfiguration,
          backend: SpeechRecognitionBackend, download: DownloadedSpeechModel?,
@@ -62,39 +65,77 @@ final class SherpaRuntime: @unchecked Sendable {
             revision = bundle.manifest.asrSHA256
         }
         self.revision = revision
+        let directory = download?.directory ?? bundle.directory
+        let coreMLEncoderPath = directory.appendingPathComponent("FunASREncoderAdaptor.mlmodelc").path
+        let coreMLLlmPath = directory.appendingPathComponent("FunASRLlm.mlmodelc").path
+        let coreMLEmbeddingPath = directory.appendingPathComponent("embedding.int8.bin").path
+        let onnxEncoderPath = directory.appendingPathComponent("encoder_adaptor.int8.onnx").path
+        let hasNanoCoreML = FileManager.default.fileExists(atPath: coreMLEncoderPath)
+            && FileManager.default.fileExists(atPath: coreMLLlmPath)
+            && FileManager.default.fileExists(atPath: coreMLEmbeddingPath)
+        let hasNanoONNX = FileManager.default.fileExists(atPath: onnxEncoderPath)
+        let nanoUsesCoreML = model == .funASRNano && hasNanoCoreML && (backend == .sherpaCoreML || !hasNanoONNX)
+
+        let xasrCoreMLEncoderPath = directory.appendingPathComponent("XASREncoder.mlmodelc").path
+        let xasrDJPath = directory.appendingPathComponent("decoder_joiner.bin").path
+        let xasrOnnxEncoderPath = directory.appendingPathComponent("encoder-epoch-99-avg-1.int8.onnx").path
+        let hasXASRCoreML = FileManager.default.fileExists(atPath: xasrCoreMLEncoderPath)
+            && FileManager.default.fileExists(atPath: xasrDJPath)
+        let hasXASRONNX = FileManager.default.fileExists(atPath: xasrOnnxEncoderPath)
+        let xasrUsesCoreML = model == .xASR && hasXASRCoreML && (backend == .sherpaCoreML || !hasXASRONNX)
+
+        let useSenseVoiceCoreML = backend == .sherpaCoreML && model == .senseVoice
+        self.usesCoreMLAccelerator = useSenseVoiceCoreML || nanoUsesCoreML || xasrUsesCoreML
+
         let runtimeTag = switch model {
         case .senseVoice: "sherpa-1.13.8-coreml-v1"
-        case .funASRNano: "funasr-nano-ort-cpu-naud-v2"
-        case .xASR: "sherpa-1.13.8-transducer-cpu-v1"
+        case .funASRNano: nanoUsesCoreML ? "funasr-nano-coreml-ane-v1" : "funasr-nano-ort-cpu-naud-v2"
+        case .xASR: xasrUsesCoreML ? "xasr-zipformer-coreml-ane-v1" : "sherpa-1.13.8-transducer-cpu-v1"
         }
         self.runtimeTag = runtimeTag
         fingerprint = ContentHash.sha256(Data(
             "\(revision):\(runtimeTag):\(configuration.language):\(configuration.useITN)".utf8))
         let provider = try Self.provider(backend: backend, revision: revision, model: model, cacheRoot: cacheRoot)
-        let directory = download?.directory ?? bundle.directory
         let cpuThreads = max(1, min(4, effectiveThreads ?? configuration.threads))
         var error = [CChar](repeating: 0, count: 2048)
 
         if model == .funASRNano {
-            let encoderPath = directory.appendingPathComponent("encoder_adaptor.int8.onnx").path
-            let llmPath = directory.appendingPathComponent("llm.int8.onnx").path
-            let embeddingPath = directory.appendingPathComponent("embedding.int8.onnx").path
+            let encoderPath = nanoUsesCoreML ? coreMLEncoderPath : onnxEncoderPath
+            let llmPath = nanoUsesCoreML
+                ? coreMLLlmPath
+                : directory.appendingPathComponent("llm.int8.onnx").path
+            let embeddingPath = nanoUsesCoreML
+                ? coreMLEmbeddingPath
+                : directory.appendingPathComponent("embedding.int8.onnx").path
             let tokenizerPath = directory.appendingPathComponent("Qwen3-0.6B").path
             nanoRuntime = MoMoCreateFunASRNanoRuntime(
                 encoderPath, llmPath, embeddingPath, tokenizerPath,
                 Int32(cpuThreads), &error, error.count)
-            guard nanoRuntime != nil else {
+            guard let nanoRuntime else {
                 throw SpeechNativeFailure(stage: .load,
                     detail: error.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
             }
+            self.acceleratorMask = Int(MoMoGetFunASRNanoAcceleratorMask(nanoRuntime))
             return
         }
 
         if model == .xASR {
-            // Offline Zipformer transducer with punctuation and casing; no language or ITN input.
+            if xasrUsesCoreML {
+                let tokensPath = directory.appendingPathComponent("tokens.txt").path
+                xasrRuntime = MoMoCreateXASRCoreMLRuntime(
+                    xasrCoreMLEncoderPath, xasrDJPath, tokensPath,
+                    Int32(cpuThreads), &error, error.count)
+                guard let xasrRuntime else {
+                    throw SpeechNativeFailure(stage: .load,
+                        detail: error.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
+                }
+                self.acceleratorMask = Int(MoMoGetXASRCoreMLAcceleratorMask(xasrRuntime))
+                return
+            }
+            // Legacy ONNX Zipformer transducer fallback.
             let strings = [
                 provider, "greedy_search",
-                directory.appendingPathComponent("encoder-epoch-99-avg-1.int8.onnx").path,
+                xasrOnnxEncoderPath,
                 directory.appendingPathComponent("decoder-epoch-99-avg-1.onnx").path,
                 directory.appendingPathComponent("joiner-epoch-99-avg-1.int8.onnx").path,
                 directory.appendingPathComponent("tokens.txt").path
@@ -150,11 +191,13 @@ final class SherpaRuntime: @unchecked Sendable {
     func close() {
         if let recognizer { SherpaOnnxDestroyOfflineRecognizer(recognizer); self.recognizer = nil }
         if let nanoRuntime { MoMoDestroyFunASRNanoRuntime(nanoRuntime); self.nanoRuntime = nil }
+        if let xasrRuntime { MoMoDestroyXASRCoreMLRuntime(xasrRuntime); self.xasrRuntime = nil }
     }
 
     func updateLanguage(_ language: SpeechLanguage) throws -> Bool {
         // Nano takes the language as a prompt; X-ASR ignores it, so neither needs a reload.
-        guard (model == .funASRNano && nanoRuntime != nil) || (model == .xASR && recognizer != nil) else { return false }
+        guard (model == .funASRNano && nanoRuntime != nil)
+            || (model == .xASR && (xasrRuntime != nil || recognizer != nil)) else { return false }
         guard model.supports(language) else { throw SpeechModelSelectionError.unsupportedLanguage }
         let updated = try configuration.withLanguage(language)
         configuration = updated
@@ -229,6 +272,61 @@ final class SherpaRuntime: @unchecked Sendable {
                     text: String(cString: textPtr),
                     tokens: [],
                     timestamps: [],
+                    rawJSON: String(cString: jsonPtr),
+                    configurationFingerprint: fingerprint)
+                output.recognitionFingerprint = self.fingerprint
+                return output
+            }
+        }
+
+        if model == .xASR, let xasrRuntime {
+            return try inputs.map { input in
+                try attempt.checkCancellation()
+                var error = [CChar](repeating: 0, count: 2048)
+                var rawResult: UnsafeMutablePointer<MoMoXASRCoreMLResult>?
+                onEvent(.nativeDecodeStarted(windowID: input.windowID))
+                let started = DispatchTime.now().uptimeNanoseconds
+                let status = withExtendedLifetime(attempt) {
+                    let context = UnsafeRawPointer(Unmanaged.passUnretained(attempt).toOpaque())
+                    return withNativeCancelToken(attempt) { cancelToken in
+                        input.samples.withUnsafeBufferPointer { buffer in
+                            MoMoTranscribeXASRCoreMLCancellable(
+                                xasrRuntime, buffer.baseAddress, Int32(buffer.count),
+                                speechAttemptIsCancelled, context, cancelToken,
+                                &rawResult, &error, error.count)
+                        }
+                    }
+                }
+                recorder.nativeReturned(startedAt: started, returnedAt: DispatchTime.now().uptimeNanoseconds, attempt: attempt)
+                onEvent(.nativeDecodeReturned(windowID: input.windowID))
+                defer { if let rawResult { MoMoDestroyXASRCoreMLResult(rawResult) } }
+                if status == -2 { throw SpeechError.cancelled }
+                try attempt.checkCancellation()
+                guard status == 1, let result = rawResult?.pointee,
+                      let textPtr = result.text, let jsonPtr = result.raw_json,
+                      (0...100_000).contains(result.count) else {
+                    throw failure(.decode, error)
+                }
+                var tokens: [String] = []
+                if result.count > 0 {
+                    guard let array = result.tokens else { throw SpeechError.nativeResult }
+                    tokens.reserveCapacity(Int(result.count))
+                    for index in 0..<Int(result.count) {
+                        guard let tok = array[index] else { throw SpeechError.nativeResult }
+                        tokens.append(String(cString: tok))
+                    }
+                }
+                let timestamps = result.timestamps.map {
+                    Array(UnsafeBufferPointer(start: $0, count: Int(result.count)))
+                } ?? []
+                guard timestamps.count == tokens.count, timestamps.allSatisfy(\.isFinite) else {
+                    throw SpeechError.nativeResult
+                }
+                var output = SpeechRecognition(
+                    windowID: input.windowID,
+                    text: String(cString: textPtr),
+                    tokens: tokens,
+                    timestamps: timestamps,
                     rawJSON: String(cString: jsonPtr),
                     configurationFingerprint: fingerprint)
                 output.recognitionFingerprint = self.fingerprint

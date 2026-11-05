@@ -9,16 +9,16 @@ See FunASR-MODEL-LICENSE-v1.1.txt. MoMoAgent does not requantize them.
 
 FunASR Nano — Alibaba / FunAudioLLM. Apache License 2.0.
 Original model: https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512
-Published ONNX: https://huggingface.co/csukuangfj/sherpa-onnx-funasr-nano-int8-2025-12-30
-Revision: 6f16bd378457e13f36ccf3910df9017f96c346fb.
-MoMoAgent downloads the published INT8 files without requantization.
+Published CoreML ANE bundle: https://github.com/Miri-Labs/MoMo-Agent/releases/tag/models-funasr-nano-coreml-v1
+Identifier: momo-funasr-nano-2512-coreml-ane-int8-v1.
+Exported directly from FunAudioLLM/Fun-ASR-Nano-2512 via Tools/FunASRNanoCoreML/export_funasr_nano_coreml.py.
 The Apache 2.0 license text is in sherpa-onnx-APACHE-2.0.txt.
 
 X-ASR-zh-en — X-ASR contributors. Apache License 2.0.
 Original model: https://github.com/Gilgamesh-J/X-ASR
-Published ONNX: https://huggingface.co/csukuangfj2/sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03
-Revision: ce812cc05d858539a68dd42e86f4fd7a9ce1acf0.
-MoMoAgent downloads the published INT8 files without requantization.
+Published CoreML ANE bundle: https://github.com/Miri-Labs/MoMo-Agent/releases/tag/models-x-asr-coreml-v1
+Identifier: momo-x-asr-zipformer-coreml-ane-int8-v1.
+Exported directly from Gilgamesh-J/X-ASR fintuned_with_punctuation.pt via Tools/XASRCoreML/export_xasr_coreml.py.
 The Apache 2.0 license text is in sherpa-onnx-APACHE-2.0.txt.
 
 Silero VAD — Silero Team. See Silero-MIT.txt.
