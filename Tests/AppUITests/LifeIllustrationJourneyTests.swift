@@ -10,6 +10,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         let firstStamp = app.buttons["lifeIllustration.stamp.sample-morning"]
         try assertJournalStrip(app)
         attach(app, name: "01_iphone_timeline_inline")
+        assertJournalMastheadPinnedOnScroll(app)
         firstStamp.tap()
         assertMap(app)
         attach(app, name: "02_iphone_journey_map")
@@ -115,6 +116,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         try assertJournalStrip(app)
         try assertDarkCanvas(app)
         attach(app, name: "01b_iphone_timeline_inline_dark")
+        assertJournalMastheadPinnedOnScroll(app)
         firstStamp.tap()
         assertMap(app)
         attach(app, name: "02b_iphone_journey_map_dark")
@@ -200,37 +202,40 @@ final class LifeIllustrationJourneyTests: XCTestCase {
     }
 
     private func assertJournalStrip(_ app: XCUIApplication) throws {
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
+        XCTAssertFalse(app.buttons["library.earphoneStatus"].exists)
+        let datePicker = app.buttons["timeline.datePicker"]
+        XCTAssertTrue(datePicker.waitForExistence(timeout: 10))
         let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
         XCTAssertTrue(strip.waitForExistence(timeout: 30))
-        XCTAssertEqual(strip.frame.width, app.frame.width - 48, accuracy: 1)
-        XCTAssertGreaterThanOrEqual(strip.frame.height, 70)
-        XCTAssertLessThanOrEqual(strip.frame.height, 84)
-        let cards = ["sample-morning", "sample-code"].map {
+        XCTAssertEqual(strip.frame.width, app.frame.width, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(strip.frame.height, 100)
+        XCTAssertLessThanOrEqual(strip.frame.height, 112)
+        XCTAssertGreaterThanOrEqual(strip.frame.minY, datePicker.frame.maxY - 2)
+        let cards = ["sample-morning", "sample-code", "sample-outdoor", "sample-night"].map {
             app.buttons["lifeIllustration.stamp.\($0)"]
         }
         for (index, card) in cards.enumerated() {
             XCTAssertTrue(card.isHittable)
-            XCTAssertEqual(card.frame.width, 144, accuracy: 1)
-            XCTAssertGreaterThanOrEqual(card.frame.height, 50)
-            XCTAssertLessThanOrEqual(card.frame.height, 64)
+            XCTAssertEqual(card.frame.width, 78, accuracy: 1.5)
+            XCTAssertEqual(card.frame.height, 92, accuracy: 2)
             XCTAssertEqual(card.frame.minY, cards[0].frame.minY, accuracy: 1)
-            XCTAssertEqual(card.frame.minX, 24 + CGFloat(index) * 154, accuracy: 1)
+            XCTAssertEqual(card.frame.minX, 24 + CGFloat(index) * 87, accuracy: 1.5)
             XCTAssertGreaterThanOrEqual(card.frame.minY, strip.frame.minY)
             XCTAssertLessThanOrEqual(card.frame.maxY, strip.frame.maxY)
-            // Meaningful text instead of repetitive xx–xx clock slots or №01
             XCTAssertFalse(card.label.contains("№"))
-            XCTAssertFalse(card.label.contains("11–14"))
-            XCTAssertFalse(card.label.contains("14–17"))
         }
         XCTAssertTrue(cards[0].label.contains("草图纸"))
         XCTAssertTrue(cards[1].label.contains("积木"))
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        let earliest = rows.matching(NSPredicate(format: "label CONTAINS %@", "打开台灯")).firstMatch
         let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
         let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
+        XCTAssertTrue(earliest.isHittable)
         XCTAssertTrue(preceding.isHittable)
         XCTAssertTrue(following.isHittable)
+        XCTAssertLessThanOrEqual(strip.frame.maxY, earliest.frame.minY + 4)
         XCTAssertEqual(preceding.frame.maxY, following.frame.minY, accuracy: 1)
-        XCTAssertLessThanOrEqual(following.frame.maxY, strip.frame.minY)
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
         let image = try XCTUnwrap(app.screenshot().image.cgImage)
         let scale = CGFloat(image.width) / app.frame.width
@@ -240,15 +245,16 @@ final class LifeIllustrationJourneyTests: XCTestCase {
             let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
             XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
         }
-        // Verify the strip scrolls with timeline content instead of sticking as a fixed bottom overlay.
-        let bottomY = strip.frame.minY
+    }
+
+    private func assertJournalMastheadPinnedOnScroll(_ app: XCUIApplication) {
+        let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
+        let mastheadY = strip.frame.minY
         preceding.swipeDown()
-        XCTAssertTrue(!strip.exists || strip.frame.minY > bottomY + 40)
-        for _ in 0..<4 {
-            if strip.exists && cards[0].isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(cards[0].isHittable)
+        XCTAssertEqual(strip.frame.minY, mastheadY, accuracy: 2)
+        XCTAssertTrue(app.buttons["lifeIllustration.stamp.sample-morning"].isHittable)
     }
 
     private func pixel(_ image: CGImage, x: Int, y: Int) throws -> [UInt8] {

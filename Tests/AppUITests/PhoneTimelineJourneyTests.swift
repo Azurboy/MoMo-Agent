@@ -115,10 +115,10 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         XCTAssertEqual(latest.frame.minX, initialPager.frame.minX + 24, accuracy: 1,
                        "The first page must align before any swipe.")
         XCTAssertEqual(latest.frame.maxX, initialPager.frame.maxX - 24, accuracy: 1)
-        let watchStatus = app.buttons["library.watchStatus"]
-        XCTAssertTrue(watchStatus.isHittable)
-        XCTAssertEqual(watchStatus.frame.height, 72, accuracy: 1)
-        let pinnedY = watchStatus.frame.minY
+        let dateBar = app.buttons["timeline.datePicker"]
+        XCTAssertTrue(dateBar.isHittable)
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
+        let pinnedY = dateBar.frame.minY
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "间隔约")).firstMatch.exists)
         attach(app, name: "timeline-latest-at-bottom")
         let earliest = rows.matching(NSPredicate(format: "label CONTAINS %@", "08:00")).firstMatch
@@ -131,9 +131,8 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "间隔约")).firstMatch.exists)
         // A hittable first row may still be partially clipped; finish reaching the top.
         pager.swipeDown()
-        XCTAssertTrue(watchStatus.isHittable)
-        XCTAssertEqual(watchStatus.frame.minY, pinnedY, accuracy: 1)
-        let dateBar = app.buttons["timeline.datePicker"]
+        XCTAssertTrue(dateBar.isHittable)
+        XCTAssertEqual(dateBar.frame.minY, pinnedY, accuracy: 1)
         let readingY = earliest.frame.minY - dateBar.frame.maxY
         assertPositionStays(earliest, below: dateBar, relativeY: readingY)
         pager.swipeDown() // Pull to refresh after reaching the oldest record.
@@ -144,7 +143,7 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         }, object: earliest)
         XCTAssertEqual(XCTWaiter.wait(for: [stayed], timeout: 8), .completed)
         assertPositionStays(earliest, below: dateBar, relativeY: readingY)
-        XCTAssertEqual(watchStatus.frame.minY, pinnedY, accuracy: 1)
+        XCTAssertEqual(dateBar.frame.minY, pinnedY, accuracy: 1)
         app.tabBars.buttons["聊天"].tap()
         app.tabBars.buttons["转录"].tap()
         XCTAssertTrue(earliest.isHittable, "Returning to the transcript tab must preserve manual reading.")
@@ -218,12 +217,10 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         XCTAssertTrue(app.buttons["timeline.datePicker"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["timeline.datePicker"].label.contains("今天"))
         XCTAssertFalse(app.buttons["timeline.nextDay"].isEnabled)
-        let status = app.buttons["library.watchStatus"]
-        XCTAssertEqual(status.frame.height, 72, accuracy: 1)
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
         app.buttons["timeline.previousDay"].tap()
         wait(app.buttons["timeline.datePicker"], contains: "昨天")
-        XCTAssertTrue(status.isHittable)
-        XCTAssertEqual(status.frame.height, 72, accuracy: 1)
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
         // Available text remains readable while an optional summary is unavailable.
         let yesterday = latestWindow(app)
         XCTAssertTrue(yesterday.waitForExistence(timeout: 5))
@@ -326,6 +323,7 @@ final class PhoneTimelineJourneyTests: XCTestCase {
         app.launchEnvironment["MOMO_UI_TEST_RUN_ID"] = UUID().uuidString
         app.launchEnvironment["MOMO_UI_TEST_TIMELINE_FIXTURE"] = timelineFixture
         app.launchEnvironment["MOMO_UI_TEST_WATCH_STATUS"] = "recording"
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         addTeardownBlock { app.terminate() }
         if app.buttons["welcome.skip"].waitForExistence(timeout: 5) {

@@ -47,27 +47,6 @@ struct EarphoneStatusPresentation {
     }
 }
 
-/// Transcript header for the earphone; mirrors the watch status card and its popover.
-struct EarphoneStatusView: View {
-    let runtime: EarphoneCaptureRuntime
-    @State private var showingDetails = false
-
-    var body: some View {
-        let status = EarphoneStatusPresentation(runtime)
-        Button { showingDetails = true } label: {
-            ClientRecordingStatusCard(title: status.title, subtitle: status.subtitle, indicator: status.indicatorColor)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(status.title)
-        .accessibilityValue(status.indicator.title)
-        .accessibilityIdentifier("library.earphoneStatus")
-        .popover(isPresented: $showingDetails) {
-            EarphoneStatusPopover(runtime: runtime, accessibilityPrefix: "library")
-                .presentationCompactAdaptation(.popover)
-        }
-    }
-}
-
 struct EarphoneStatusPopover: View {
     let runtime: EarphoneCaptureRuntime
     var accessibilityPrefix = "assistant"

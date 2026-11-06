@@ -82,34 +82,6 @@ struct WatchStatusPresentation {
     }
 }
 
-struct WatchStatusView: View {
-    let observation: WatchStatusObservation?
-    @State private var showingDetails = false
-
-    private let secondary = Color(white: 0.66)
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 5)) { clock in
-            let status = WatchStatusPresentation(observation: observation, now: clock.date)
-            Button { showingDetails = true } label: {
-                ClientRecordingStatusCard(title: status.compactTitle,
-                    subtitle: status.indicator == .red ? status.subtitle : observation.map {
-                        String(localized: "上次报告 \($0.snapshot.sampledAt.formatted(.dateTime.hour().minute()))")
-                    } ?? String(localized: "点按查看手表状态"), indicator: status.indicatorColor)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(status.compactTitle)
-            .accessibilityValue(status.indicator == .red
-                ? "\(status.indicator.title)，\(status.subtitle)" : status.indicator.title)
-            .accessibilityIdentifier("library.watchStatus")
-        }
-        .popover(isPresented: $showingDetails) {
-            WatchStatusPopover(observation: observation, accessibilityPrefix: "library")
-                .presentationCompactAdaptation(.popover)
-        }
-    }
-}
-
 struct WatchStatusPopover: View {
     let observation: WatchStatusObservation?
     var accessibilityPrefix = "assistant"

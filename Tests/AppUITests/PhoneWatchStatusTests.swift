@@ -15,24 +15,18 @@ final class PhoneWatchStatusTests: XCTestCase {
         dismiss.tap()
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: failure)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed)
-        XCTAssertTrue(app.buttons["library.watchStatus"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["timeline.datePicker"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
     }
 
-    func testLibraryStatusIsCompactAndDetailsAreOnDemand() {
+    func testLibraryOmitsRedundantStatusBanner() {
         let app = launch(status: "paused")
         XCTAssertTrue(app.tabBars.buttons["转录"].waitForExistence(timeout: 15))
         app.tabBars.buttons["转录"].tap()
-        let status = app.buttons["library.watchStatus"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertTrue(status.isHittable)
-        XCTAssertEqual(status.frame.height, 72, accuracy: 1)
-        XCTAssertFalse(app.staticTexts["library.watchStatus.sync"].exists)
-        attach(app, name: "library-compact-watch-status")
-        status.tap()
-        XCTAssertTrue(app.staticTexts["library.watchStatus.title"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["library.watchStatus.sync"].exists)
-        XCTAssertFalse(app.buttons["library.watchStatus.openLibrary"].exists)
-        attach(app, name: "library-watch-status-details")
+        XCTAssertTrue(app.buttons["timeline.datePicker"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
+        XCTAssertFalse(app.buttons["library.earphoneStatus"].exists)
+        attach(app, name: "library-clean-header")
     }
 
     func testRecordingStatusOpensCardFromChat() {
@@ -57,10 +51,9 @@ final class PhoneWatchStatusTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["assistant.watchStatus.sync"].exists)
         attach(app, name: "watch-status-popover")
         app.buttons["assistant.watchStatus.openLibrary"].tap()
-        XCTAssertTrue(app.buttons["library.watchStatus"].waitForExistence(timeout: 5))
-        // This fixture publishes one report. Pixel checks can outlive its 10-second
-        // sample freshness; the detail must honor that age instead of freezing green.
-        XCTAssertTrue(["手表正在录音", "等待手表声音采集", "手表状态待更新"].contains(app.buttons["library.watchStatus"].label))
+        XCTAssertTrue(app.navigationBars["转录"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["timeline.datePicker"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["library.watchStatus"].exists)
         attach(app, name: "watch-status-recording-row")
         app.tabBars.buttons["聊天"].tap()
         XCTAssertTrue(app.buttons["assistant.watchStatus"].waitForExistence(timeout: 5))
@@ -105,9 +98,20 @@ final class PhoneWatchStatusTests: XCTestCase {
         app.launchEnvironment["MOMO_UI_TEST_RUN_ID"] = UUID().uuidString
         app.launchEnvironment["MOMO_UI_TEST_WATCH_STATUS"] = status
         if statusFailure { app.launchEnvironment["MOMO_UI_TEST_STATUS_FAILURE"] = "1" }
-        app.launchArguments += ["-iphone.firstUse.completed", "YES"]
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         addTeardownBlock { app.terminate() }
+        if app.buttons["welcome.skip"].waitForExistence(timeout: 5) {
+            app.buttons["welcome.skip"].tap()
+        }
+        if app.buttons["welcome.start"].waitForExistence(timeout: 5) {
+            app.buttons["welcome.start"].tap()
+            XCTAssertTrue(app.buttons["稍后配对"].waitForExistence(timeout: 5))
+            app.buttons["稍后配对"].tap()
+            if app.tabBars.buttons["聊天"].waitForExistence(timeout: 10) {
+                app.tabBars.buttons["聊天"].tap()
+            }
+        }
         return app
     }
 

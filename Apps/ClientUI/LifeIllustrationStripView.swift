@@ -20,12 +20,18 @@ extension LifeIllustration {
         return caption
     }
 
-    var stampPlaceEyebrow: String? {
-        guard let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty,
-              let place = place?.trimmingCharacters(in: .whitespacesAndNewlines), !place.isEmpty else {
+    var stampPlaceLabel: String? {
+        guard let place = place?.trimmingCharacters(in: .whitespacesAndNewlines), !place.isEmpty else {
             return nil
         }
         return place
+    }
+
+    var stampStartClock: String {
+        let zone = TimeZone(identifier: timezone) ?? .current
+        var clock = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
+        clock.timeZone = zone
+        return Date(timeIntervalSince1970: windowStart).formatted(clock)
     }
 
     var stickerAngle: Double {
@@ -34,6 +40,7 @@ extension LifeIllustration {
     }
 }
 
+/// Daily journal masthead rendered directly beneath the date bar like commemorative stamps at the top of a diary page.
 struct LifeIllustrationStripView: View {
     let items: [LifeIllustration]
     let store: LifeIllustrationStore
@@ -53,18 +60,8 @@ struct LifeIllustrationStripView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GeometryReader { geometry in
-                Path { path in
-                    path.move(to: .zero)
-                    path.addLine(to: CGPoint(x: geometry.size.width, y: 0))
-                }
-                .stroke(MoMoPalette.line, style: StrokeStyle(lineWidth: 0.5, dash: [2.5, 3]))
-            }
-            .frame(height: 0.5)
-            .padding(.horizontal, margin)
-            .accessibilityHidden(true)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: 9) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         if let url = store.imageURL(for: item) {
                             LifeIllustrationStampCard(illustration: item, thumbnailURL: url, index: index,
@@ -77,9 +74,22 @@ struct LifeIllustrationStripView: View {
                         }
                     }
                 }
-                .padding(.horizontal, margin).padding(.vertical, 9)
+                .padding(.horizontal, margin)
+                .padding(.top, 4)
+                .padding(.bottom, 10)
             }
-            .frame(height: 75)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .frame(height: 106)
+            GeometryReader { geometry in
+                Path { path in
+                    path.move(to: .zero)
+                    path.addLine(to: CGPoint(x: geometry.size.width, y: 0))
+                }
+                .stroke(MoMoPalette.line, style: StrokeStyle(lineWidth: 0.5, dash: [2.5, 3]))
+            }
+            .frame(height: 0.5)
+            .padding(.horizontal, margin)
+            .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity)
         .background(MoMoPalette.canvas, ignoresSafeAreaEdges: [])
@@ -89,6 +99,9 @@ struct LifeIllustrationStripView: View {
 }
 
 struct LifeIllustrationStampCard: View {
+    static let cardWidth: CGFloat = 78
+    static let cardHeight: CGFloat = 92
+
     let illustration: LifeIllustration
     let thumbnailURL: URL
     let index: Int
@@ -97,46 +110,73 @@ struct LifeIllustrationStampCard: View {
     let delete: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
-    var body: some View {
-        Button(action: open) {
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 3) {
-                    if let place = illustration.stampPlaceEyebrow {
-                        Text(place)
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundStyle(MoMoPalette.muted)
-                            .lineLimit(1)
-                    }
-                    Text(illustration.stampExcerpt)
-                        .font(.system(size: 10.5, weight: .regular))
-                        .foregroundStyle(MoMoPalette.ink.opacity(0.88))
-                        .lineSpacing(1.3)
-                        .lineLimit(illustration.stampPlaceEyebrow == nil ? 3 : 2)
-                        .multilineTextAlignment(.leading)
-                }
-                .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 6)
-                .frame(width: 92, height: 56, alignment: .leading)
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: 6))
-                    path.addLine(to: CGPoint(x: 0, y: 50))
-                }
-                .stroke(MoMoPalette.line.opacity(0.85), style: StrokeStyle(lineWidth: 0.5, dash: [1.8, 2.4]))
-                .frame(width: 0.5)
-                LifeIllustrationImageView(url: thumbnailURL)
-                    .frame(width: 44, height: 44)
-                    .rotationEffect(.degrees(illustration.stickerAngle))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    private var accessibilitySummary: String {
+        "\(String(localized: "生活插画"))，\(illustration.stampStartClock)，\(illustration.stampExcerpt)"
+    }
+
+    private var artworkFrame: some View {
+        let hasPlace = illustration.stampPlaceLabel != nil
+        let artSize: CGFloat = hasPlace ? 48 : 54
+        let frameHeight: CGFloat = hasPlace ? 54 : 62
+        let matOpacity: Double = colorScheme == .dark ? 0.24 : 0.45
+        return LifeIllustrationImageView(url: thumbnailURL)
+            .frame(width: artSize, height: artSize)
+            .rotationEffect(.degrees(illustration.stickerAngle))
+            .frame(width: 64, height: frameHeight)
+            .background(MoMoPalette.canvas.opacity(matOpacity), in: RoundedRectangle(cornerRadius: 2))
+            .overlay {
+                RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(MoMoPalette.line.opacity(0.5), lineWidth: 0.5)
             }
-            .frame(width: 144, height: 56)
+    }
+
+    @ViewBuilder
+    private var postmarkCaption: some View {
+        if let place = illustration.stampPlaceLabel {
+            VStack(spacing: 1) {
+                Text(place)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(MoMoPalette.ink.opacity(0.88))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(illustration.stampStartClock)
+                    .font(.system(size: 8.5, weight: .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(MoMoPalette.muted)
+                    .lineLimit(1)
+            }
+            .frame(width: 64)
+        } else {
+            Text(illustration.stampStartClock)
+                .font(.system(size: 9.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(MoMoPalette.muted)
+                .lineLimit(1)
+                .frame(width: 64)
+                .frame(maxHeight: .infinity)
+        }
+    }
+
+    var body: some View {
+        let shadowOpacity: Double = colorScheme == .dark ? 0.28 : 0.05
+        Button(action: open) {
+            VStack(spacing: 4) {
+                artworkFrame
+                postmarkCaption
+            }
+            .padding(.top, 6)
+            .padding(.bottom, 5)
+            .padding(.horizontal, 7)
+            .frame(width: Self.cardWidth, height: Self.cardHeight)
             .background {
                 PostageStampTicketShape().fill(LifeIllustrationPaper.fill(for: colorScheme))
-                    .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.045), radius: 2.5, x: 0, y: 1)
+                    .shadow(color: .black.opacity(shadowOpacity), radius: 2.5, x: 0, y: 1)
             }
             .overlay { PostageStampTicketShape().stroke(MoMoPalette.line, lineWidth: 0.6) }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "生活插画") + "，" + illustration.stampExcerpt)
+        .accessibilityLabel(accessibilitySummary)
         .accessibilityIdentifier("lifeIllustration.stamp.\(illustration.id)")
         .contextMenu {
             Button("查看依据", systemImage: "text.alignleft", action: showSource)
@@ -147,14 +187,21 @@ struct LifeIllustrationStampCard: View {
 
 struct PostageStampTicketShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let corner: CGFloat = 3
-        let radius: CGFloat = 1.9
-        let teeth: [CGFloat] = [0.22, 0.41, 0.59, 0.78]
+        let corner: CGFloat = 3.5
+        let radius: CGFloat = 1.75
+        let horizontalTeeth: [CGFloat] = [0.18, 0.34, 0.50, 0.66, 0.82]
+        let verticalTeeth: [CGFloat] = [0.16, 0.296, 0.432, 0.568, 0.704, 0.84]
         return Path { path in
             path.move(to: CGPoint(x: rect.minX + corner, y: rect.minY))
+            for tooth in horizontalTeeth {
+                let x = rect.minX + rect.width * tooth
+                path.addLine(to: CGPoint(x: x - radius, y: rect.minY))
+                path.addArc(center: CGPoint(x: x, y: rect.minY), radius: radius,
+                            startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
+            }
             path.addLine(to: CGPoint(x: rect.maxX - corner, y: rect.minY))
             path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + corner), control: CGPoint(x: rect.maxX, y: rect.minY))
-            for tooth in teeth {
+            for tooth in verticalTeeth {
                 let y = rect.minY + rect.height * tooth
                 path.addLine(to: CGPoint(x: rect.maxX, y: y - radius))
                 path.addArc(center: CGPoint(x: rect.maxX, y: y), radius: radius,
@@ -162,9 +209,15 @@ struct PostageStampTicketShape: Shape {
             }
             path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - corner))
             path.addQuadCurve(to: CGPoint(x: rect.maxX - corner, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+            for tooth in horizontalTeeth.reversed() {
+                let x = rect.minX + rect.width * tooth
+                path.addLine(to: CGPoint(x: x + radius, y: rect.maxY))
+                path.addArc(center: CGPoint(x: x, y: rect.maxY), radius: radius,
+                            startAngle: .degrees(0), endAngle: .degrees(-180), clockwise: true)
+            }
             path.addLine(to: CGPoint(x: rect.minX + corner, y: rect.maxY))
             path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - corner), control: CGPoint(x: rect.minX, y: rect.maxY))
-            for tooth in teeth.reversed() {
+            for tooth in verticalTeeth.reversed() {
                 let y = rect.minY + rect.height * tooth
                 path.addLine(to: CGPoint(x: rect.minX, y: y + radius))
                 path.addArc(center: CGPoint(x: rect.minX, y: y), radius: radius,
