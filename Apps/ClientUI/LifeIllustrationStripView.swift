@@ -40,7 +40,7 @@ extension LifeIllustration {
     }
 }
 
-/// Daily journal masthead rendered directly beneath the date bar like commemorative stamps at the top of a diary page.
+/// Daily journal masthead rendered at the top of a day's scrollable timeline like commemorative stamps on a diary page.
 struct LifeIllustrationStripView: View {
     let items: [LifeIllustration]
     let store: LifeIllustrationStore

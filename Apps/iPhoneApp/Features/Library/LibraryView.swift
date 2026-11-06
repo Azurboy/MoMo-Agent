@@ -674,119 +674,118 @@ private struct TimelineDayPage: View {
 
     var body: some View {
         let windows = timeline.listWindows[day] ?? []
-        return VStack(spacing: 0) {
-            if let illustrations, !dayIllustrations.isEmpty {
-                LifeIllustrationStripView(items: dayIllustrations, store: illustrations, horizontalMargin: 24,
-                    open: openIllustration, showSource: showIllustrationSource, failure: illustrationFailure)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
-                        ForEach(windows) { window in
-                            VStack(alignment: .leading, spacing: 0) {
-                                Button { open(TimelineDestination(windowID: window.id)) } label: {
-                                    TimelineRow(window: window, summary: timeline.summary(for: window),
-                                        status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
-                                        connected: window.id != windows.last?.id,
-                                        continuesFromPrevious: window.id != windows.first?.id,
-                                        includeUTCOffset: repeatedClockRanges.contains(window.id))
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("timeline.window.\(window.id.key)")
-                                if !window.marks.isEmpty {
-                                    ScrollView(.horizontal) {
-                                        HStack(spacing: 12) {
-                                            ForEach(window.marks) { mark in
-                                                Button {
-                                                    open(TimelineDestination(windowID: window.id, markID: mark.id))
-                                                } label: {
-                                                    Label(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true), systemImage: "flag.fill")
-                                                        .phoneText(.caption).monospacedDigit().frame(minHeight: 44)
-                                                }
-                                                .buttonStyle(.plain).foregroundStyle(MoMoPalette.ink)
-                                                .accessibilityLabel("查看 \(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true)) 的标记")
-                                                .accessibilityIdentifier("timeline.mark.\(mark.id)")
-                                            }
-                                        }
-                                    }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
-                                        .overlay(alignment: .leading) {
-                                            if window.id != windows.last?.id {
-                                                Rectangle().fill(MoMoPalette.line).frame(width: 1)
-                                                    .frame(width: 12).accessibilityHidden(true)
-                                            }
-                                        }
-                                }
+        let isToday = day == TimelineDay(Date())
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if let illustrations, !dayIllustrations.isEmpty {
+                    LifeIllustrationStripView(items: dayIllustrations, store: illustrations, horizontalMargin: 0,
+                        open: openIllustration, showSource: showIllustrationSource, failure: illustrationFailure)
+                        .padding(.bottom, 8)
+                }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    let repeatedClockRanges = timeline.repeatedClockRanges[day] ?? []
+                    ForEach(windows) { window in
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button { open(TimelineDestination(windowID: window.id)) } label: {
+                                TimelineRow(window: window, summary: timeline.summary(for: window),
+                                    status: TimelinePresentation.status(window, transcription: transcription, speechFailure: speechFailure),
+                                    connected: window.id != windows.last?.id,
+                                    continuesFromPrevious: window.id != windows.first?.id,
+                                    includeUTCOffset: repeatedClockRanges.contains(window.id))
                             }
-                            .id(window.id)
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("timeline.window.\(window.id.key)")
+                            if !window.marks.isEmpty {
+                                ScrollView(.horizontal) {
+                                    HStack(spacing: 12) {
+                                        ForEach(window.marks) { mark in
+                                            Button {
+                                                open(TimelineDestination(windowID: window.id, markID: mark.id))
+                                            } label: {
+                                                Label(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true), systemImage: "flag.fill")
+                                                    .phoneText(.caption).monospacedDigit().frame(minHeight: 44)
+                                            }
+                                            .buttonStyle(.plain).foregroundStyle(MoMoPalette.ink)
+                                            .accessibilityLabel("查看 \(TimelineDate.time(mark.recordedAt, offset: window.id.timezoneOffset, seconds: true)) 的标记")
+                                            .accessibilityIdentifier("timeline.mark.\(mark.id)")
+                                        }
+                                    }
+                                }.scrollIndicators(.hidden).padding(.leading, 26).padding(.bottom, 16)
+                                    .overlay(alignment: .leading) {
+                                        if window.id != windows.last?.id {
+                                            Rectangle().fill(MoMoPalette.line).frame(width: 1)
+                                                .frame(width: 12).accessibilityHidden(true)
+                                        }
+                                    }
+                            }
                         }
-                        if let failure = timeline.failures[day] {
-                            Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
-                            Button("重试") { Task { await timeline.load(day) } }.frame(minHeight: 44)
-                        } else if windows.isEmpty, timeline.snapshots[day] != nil,
-                                  !timeline.loading.contains(day), !dateRange.isUnknown {
-                            ContentUnavailableView(timeline.earliestDay == nil ? String(localized: "还没有可读的转录") : String(localized: "这一天没有可读的转录"),
-                                systemImage: "waveform", description: Text(timeline.earliestDay == nil
-                                    ? String(localized: "在 Apple Watch 上开始录音，内容会自动出现在这里。")
-                                    : String(localized: "有说话的时段会显示在这里，长时间安静不会占据时间线。")))
-                                .accessibilityIdentifier("timeline.day.empty")
-                        }
+                        .id(window.id)
                     }
-                    .scrollTargetLayout()
+                    if let failure = timeline.failures[day] {
+                        Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                        Button("重试") { Task { await timeline.load(day) } }.frame(minHeight: 44)
+                    } else if windows.isEmpty, timeline.snapshots[day] != nil,
+                              !timeline.loading.contains(day), !dateRange.isUnknown {
+                        ContentUnavailableView(timeline.earliestDay == nil ? String(localized: "还没有可读的转录") : String(localized: "这一天没有可读的转录"),
+                            systemImage: "waveform", description: Text(timeline.earliestDay == nil
+                                ? String(localized: "在 Apple Watch 上开始录音，内容会自动出现在这里。")
+                                : String(localized: "有说话的时段会显示在这里，长时间安静不会占据时间线。")))
+                            .accessibilityIdentifier("timeline.day.empty")
+                    }
                 }
-                .padding(.top, dayIllustrations.isEmpty ? 0 : 8)
-                .padding(.bottom, 24)
+                .scrollTargetLayout()
             }
-            .overlay {
-                if windows.isEmpty, timeline.failures[day] == nil,
-                   timeline.snapshots[day] == nil || timeline.loading.contains(day) || dateRange.isUnknown {
-                    ProgressView("正在读取记录")
-                        .multilineTextAlignment(.center)
-                        .accessibilityIdentifier("timeline.day.loading")
-                        .allowsHitTesting(false)
-                }
-            }
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.top, for: .alignment)
-            .scrollPosition(Binding(get: {
-                reading.position
-            }, set: { position in
-                // Offscreen pages must not replace this day's saved reading position.
-                guard day == timeline.selectedDay else { return }
-                reading.position = position
-            }))
-            .onScrollPhaseChange { _, phase in
-                guard day == timeline.selectedDay, phase == .tracking || phase == .interacting else { return }
-                // A delayed first load must not take control back after the reader starts scrolling.
-                reading.positioned = true
-                reading.userScrolled = true
-            }
-            .onChange(of: timeline.currentID(reading.position.viewID(type: TimelineWindowID.self))) { _, replacement in
-                guard let previous = reading.position.viewID(type: TimelineWindowID.self),
-                      let replacement, replacement != previous else { return }
-                reading.position.scrollTo(id: replacement)
-            }
-            .onChange(of: day == timeline.selectedDay ? windows.last?.id : nil, initial: true) {
-                guard day == timeline.selectedDay, !windows.isEmpty,
-                      !reading.positioned else { return }
-                reading.positioned = true
-                var position = ScrollPosition(idType: TimelineWindowID.self)
-                position.scrollTo(edge: .bottom)
-                reading.position = position
-            }
-            .onChange(of: day == timeline.selectedDay ? !dayIllustrations.isEmpty : false) { _, hasIllustrations in
-                guard day == timeline.selectedDay, hasIllustrations, !reading.userScrolled else { return }
-                var position = ScrollPosition(idType: TimelineWindowID.self)
-                position.scrollTo(edge: .bottom)
-                reading.position = position
-            }
-            .refreshable { await refresh() }
-            .modifier(TimelineReadingEdge())
-            // Keep the gutter outside the scrollable coordinate space. When archive
-            // regrouping replaces a row ID, scrollTo(id:) can otherwise align that
-            // inset target horizontally and consume the 24pt page margin.
-            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
         }
+        .overlay {
+            if windows.isEmpty, timeline.failures[day] == nil,
+               timeline.snapshots[day] == nil || timeline.loading.contains(day) || dateRange.isUnknown {
+                ProgressView("正在读取记录")
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("timeline.day.loading")
+                    .allowsHitTesting(false)
+            }
+        }
+        .defaultScrollAnchor(isToday ? .bottom : .top, for: .initialOffset)
+        .defaultScrollAnchor(.top, for: .alignment)
+        .scrollPosition(Binding(get: {
+            reading.position
+        }, set: { position in
+            // Offscreen pages must not replace this day's saved reading position.
+            guard day == timeline.selectedDay else { return }
+            reading.position = position
+        }))
+        .onScrollPhaseChange { _, phase in
+            guard day == timeline.selectedDay, phase == .tracking || phase == .interacting else { return }
+            // A delayed first load must not take control back after the reader starts scrolling.
+            reading.positioned = true
+            reading.userScrolled = true
+        }
+        .onChange(of: timeline.currentID(reading.position.viewID(type: TimelineWindowID.self))) { _, replacement in
+            guard let previous = reading.position.viewID(type: TimelineWindowID.self),
+                  let replacement, replacement != previous else { return }
+            reading.position.scrollTo(id: replacement)
+        }
+        .onChange(of: day == timeline.selectedDay ? windows.last?.id : nil, initial: true) {
+            guard day == timeline.selectedDay, !windows.isEmpty,
+                  !reading.positioned else { return }
+            reading.positioned = true
+            var position = ScrollPosition(idType: TimelineWindowID.self)
+            position.scrollTo(edge: isToday ? .bottom : .top)
+            reading.position = position
+        }
+        .onChange(of: day == timeline.selectedDay ? !dayIllustrations.isEmpty : false) { _, hasIllustrations in
+            guard day == timeline.selectedDay, hasIllustrations, !reading.userScrolled else { return }
+            var position = ScrollPosition(idType: TimelineWindowID.self)
+            position.scrollTo(edge: isToday ? .bottom : .top)
+            reading.position = position
+        }
+        .refreshable { await refresh() }
+        .modifier(TimelineReadingEdge())
+        // Keep the gutter outside the scrollable coordinate space. When archive
+        // regrouping replaces a row ID, scrollTo(id:) can otherwise align that
+        // inset target horizontally and consume the 24pt page margin.
+        .padding(.horizontal, 24)
     }
 }
 

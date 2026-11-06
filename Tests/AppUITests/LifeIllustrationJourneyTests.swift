@@ -10,7 +10,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         let firstStamp = app.buttons["lifeIllustration.stamp.sample-morning"]
         try assertJournalStrip(app)
         attach(app, name: "01_iphone_timeline_inline")
-        assertJournalMastheadPinnedOnScroll(app)
+        assertJournalMastheadScrollsWithPage(app)
         firstStamp.tap()
         assertMap(app)
         attach(app, name: "02_iphone_journey_map")
@@ -116,7 +116,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         try assertJournalStrip(app)
         try assertDarkCanvas(app)
         attach(app, name: "01b_iphone_timeline_inline_dark")
-        assertJournalMastheadPinnedOnScroll(app)
+        assertJournalMastheadScrollsWithPage(app)
         firstStamp.tap()
         assertMap(app)
         attach(app, name: "02b_iphone_journey_map_dark")
@@ -206,11 +206,34 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertFalse(app.buttons["library.earphoneStatus"].exists)
         let datePicker = app.buttons["timeline.datePicker"]
         XCTAssertTrue(datePicker.waitForExistence(timeout: 10))
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
+        let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
+        XCTAssertTrue(preceding.waitForExistence(timeout: 15))
+        XCTAssertTrue(preceding.isHittable)
+        XCTAssertTrue(following.isHittable)
+        XCTAssertEqual(preceding.frame.maxY, following.frame.minY, accuracy: 1)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
+        let image = try XCTUnwrap(app.screenshot().image.cgImage)
+        let scale = CGFloat(image.width) / app.frame.width
+        let x = Int((preceding.frame.minX + 6) * scale)
+        for y in stride(from: preceding.frame.maxY - 12, through: following.frame.minY + 6, by: 3) {
+            let line = try pixel(image, x: x, y: Int(y * scale))
+            let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
+            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
+        }
         let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
-        XCTAssertTrue(strip.waitForExistence(timeout: 30))
-        XCTAssertEqual(strip.frame.width, app.frame.width, accuracy: 1)
+        let pager = app.scrollViews["timeline.dayPager"]
+        for _ in 0..<5 {
+            if strip.exists, strip.frame.minY >= datePicker.frame.maxY,
+               app.buttons["lifeIllustration.stamp.sample-morning"].isHittable { break }
+            pager.swipeDown()
+        }
+        XCTAssertTrue(strip.exists)
+        XCTAssertEqual(strip.frame.minX, 24, accuracy: 1.5)
+        XCTAssertEqual(strip.frame.width, app.frame.width - 48, accuracy: 2)
         XCTAssertGreaterThanOrEqual(strip.frame.height, 100)
-        XCTAssertLessThanOrEqual(strip.frame.height, 112)
+        XCTAssertLessThanOrEqual(strip.frame.height, 116)
         XCTAssertGreaterThanOrEqual(strip.frame.minY, datePicker.frame.maxY - 2)
         let cards = ["sample-morning", "sample-code", "sample-outdoor", "sample-night"].map {
             app.buttons["lifeIllustration.stamp.\($0)"]
@@ -227,33 +250,22 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         }
         XCTAssertTrue(cards[0].label.contains("草图纸"))
         XCTAssertTrue(cards[1].label.contains("积木"))
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
-        let earliest = rows.matching(NSPredicate(format: "label CONTAINS %@", "打开台灯")).firstMatch
-        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
-        let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
-        XCTAssertTrue(earliest.isHittable)
-        XCTAssertTrue(preceding.isHittable)
-        XCTAssertTrue(following.isHittable)
-        XCTAssertLessThanOrEqual(strip.frame.maxY, earliest.frame.minY + 4)
-        XCTAssertEqual(preceding.frame.maxY, following.frame.minY, accuracy: 1)
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
-        let image = try XCTUnwrap(app.screenshot().image.cgImage)
-        let scale = CGFloat(image.width) / app.frame.width
-        let x = Int((preceding.frame.minX + 6) * scale)
-        for y in stride(from: preceding.frame.maxY - 12, through: following.frame.minY + 6, by: 3) {
-            let line = try pixel(image, x: x, y: Int(y * scale))
-            let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
-            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
-        }
+        let morningRow = rows.matching(NSPredicate(format: "label CONTAINS %@", "草图纸")).firstMatch
+        XCTAssertTrue(morningRow.isHittable)
+        XCTAssertLessThanOrEqual(strip.frame.maxY, morningRow.frame.minY + 4)
     }
 
-    private func assertJournalMastheadPinnedOnScroll(_ app: XCUIApplication) {
+    private func assertJournalMastheadScrollsWithPage(_ app: XCUIApplication) {
         let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
-        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
-        let mastheadY = strip.frame.minY
-        preceding.swipeDown()
-        XCTAssertEqual(strip.frame.minY, mastheadY, accuracy: 2)
+        let pager = app.scrollViews["timeline.dayPager"]
+        let topY = strip.frame.minY
+        pager.swipeUp()
+        let scrolledAway = !strip.exists || !app.buttons["lifeIllustration.stamp.sample-morning"].isHittable || strip.frame.minY < topY - 40
+        XCTAssertTrue(scrolledAway, "Journal stamp masthead must scroll away naturally with page content rather than sticking to the top.")
+        for _ in 0..<5 {
+            if app.buttons["lifeIllustration.stamp.sample-morning"].isHittable { break }
+            pager.swipeDown()
+        }
         XCTAssertTrue(app.buttons["lifeIllustration.stamp.sample-morning"].isHittable)
     }
 

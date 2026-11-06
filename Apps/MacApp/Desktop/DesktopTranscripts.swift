@@ -193,13 +193,14 @@ struct DesktopSources: View {
                     Button("重试") { Task { await model.loadContext() } }
                 }.padding(.horizontal, 24)
             }
-            if !searching, query.isEmpty, !dayIllustrations.isEmpty {
-                LifeIllustrationStripView(items: dayIllustrations, store: model.lifeIllustrations, horizontalMargin: 16,
-                    open: { selectedIllustrationID = $0.id }, showSource: { showSource(for: $0) },
-                    failure: { illustrationError = $0 })
-            }
             ScrollView {
                 let windows = visible
+                if !searching, query.isEmpty, !dayIllustrations.isEmpty {
+                    LifeIllustrationStripView(items: dayIllustrations, store: model.lifeIllustrations, horizontalMargin: 16,
+                        open: { selectedIllustrationID = $0.id }, showSource: { showSource(for: $0) },
+                        failure: { illustrationError = $0 })
+                        .padding(.bottom, 8)
+                }
                 LazyVStack(spacing: 0) {
                     ForEach(windows) { item in
                         VStack(alignment: .leading, spacing: 0) {
