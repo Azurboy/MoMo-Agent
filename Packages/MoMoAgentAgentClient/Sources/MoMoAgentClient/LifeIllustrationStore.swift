@@ -8,7 +8,7 @@ public final class LifeIllustrationStore {
     public private(set) var error: String?
     public private(set) var isRefreshing = false
     public var isConfigured: Bool { client != nil }
-    public var items: [LifeIllustration] { settings.canDisplayIllustrations ? cachedItems : [] }
+    public var items: [LifeIllustration] { cachedItems }
     private var cachedItems: [LifeIllustration] = []
     private var assetURLs: [String: URL] = [:]
     @ObservationIgnored private let directory: URL
@@ -55,19 +55,17 @@ public final class LifeIllustrationStore {
         defer { if self.revision == revision { self.hydrateTask = nil } }
         guard let snapshot = try? await cache.load(),
               self.revision == revision,
-              !self.hasLoadedSettings,
-              let verifiedSettings = snapshot.lastVerifiedSettings,
-              verifiedSettings.canDisplayIllustrations else { return }
+              !self.hasLoadedSettings else { return }
         guard let cachedURLs = try? await cache.existingAssetURLs(for: Array(snapshot.items.values)),
               self.revision == revision,
               !self.hasLoadedSettings else { return }
-        self.settings = verifiedSettings
+        self.settings = snapshot.lastVerifiedSettings ?? LifeIllustrationSettings()
         self.assetURLs = cachedURLs
         self.publish(snapshot)
     }
 
     public func imageURL(for item: LifeIllustration, thumbnail: Bool = true) -> URL? {
-        guard settings.canDisplayIllustrations, cachedItems.contains(where: { $0.id == item.id }) else { return nil }
+        guard cachedItems.contains(where: { $0.id == item.id }) else { return nil }
         return assetURLs[thumbnail ? item.thumbnailSha256 : item.assetSha256]
     }
 
@@ -120,7 +118,6 @@ public final class LifeIllustrationStore {
                 self.settings = settings
                 self.hasLoadedSettings = true
                 refreshedAt = Date()
-                guard settings.canDisplayIllustrations else { error = nil; return }
                 var snapshot = try await cache.load()
                 if cachedItems.isEmpty, !snapshot.items.isEmpty {
                     let cachedURLs = try await cache.existingAssetURLs(for: Array(snapshot.items.values))
@@ -237,18 +234,16 @@ public final class LifeIllustrationStore {
             } catch {
                 guard self.revision == revision, !AgentTransportFailure.isCancelled(error) else { return }
                 self.error = error.localizedDescription
-                // A failed capability check cannot authorize displaying a previous provider's images.
+                // Pairing/authentication failures block network sync, but do not revoke the phone's saved artifacts.
                 if case AgentClientError.http(let status, _, _, _) = error, [401, 403, 404].contains(status) {
                     self.settings = LifeIllustrationSettings()
                     self.hasLoadedSettings = false
                     try? await cache.saveSettings(nil)
                 } else if !self.hasLoadedSettings, AgentTransportFailure.isTransient(error),
                           let snapshot = try? await cache.load(),
-                          let verifiedSettings = snapshot.lastVerifiedSettings,
-                          verifiedSettings.canDisplayIllustrations,
                           let cachedURLs = try? await cache.existingAssetURLs(for: Array(snapshot.items.values)),
                           self.revision == revision {
-                    self.settings = verifiedSettings
+                    self.settings = snapshot.lastVerifiedSettings ?? LifeIllustrationSettings()
                     self.assetURLs = cachedURLs
                     self.publish(snapshot)
                 }

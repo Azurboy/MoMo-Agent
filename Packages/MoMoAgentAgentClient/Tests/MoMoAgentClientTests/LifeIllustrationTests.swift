@@ -35,7 +35,7 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(LifeIllustrationRoutePoint(latitude: 0, longitude: 0, timestamp: .infinity, kind: "visit").isValid)
     }
 
-    @MainActor func testIncrementalSyncRestoresAssetsAndHidesUnsupportedProvider() async throws {
+    @MainActor func testIncrementalSyncRestoresAssetsAcrossGenerationProviderChanges() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let route = IllustrationTransport()
@@ -74,11 +74,11 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
 
         await route.setProvider("anthropic", status: "unsupported_provider")
         await restored.refresh()
-        XCTAssertTrue(restored.items.isEmpty)
-        XCTAssertNil(restored.imageURL(for: item))
+        XCTAssertEqual(restored.items, [item])
+        XCTAssertNotNil(restored.imageURL(for: item))
         await route.setProvider("openai-codex", status: "not_signed_in")
         await restored.refresh()
-        XCTAssertTrue(restored.items.isEmpty)
+        XCTAssertEqual(restored.items, [item])
 
         await route.setProvider("openai-codex", status: "ready")
         await route.removeItem()
@@ -87,7 +87,7 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnail.path))
         let cursors = await route.cursors
-        XCTAssertEqual(cursors, ["0", "1", "1", "1"])
+        XCTAssertEqual(cursors, ["0", "1", "1", "1", "1", "1"])
     }
 
     @MainActor func testHashMismatchDoesNotAdvanceCursorAndRetriesOnlyUncachedBytes() async throws {
@@ -175,7 +175,7 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(cursors, ["0", "1"])
     }
 
-    @MainActor func testOfflineRelaunchRestoresVerifiedCachedIllustrationsUntilRevoked() async throws {
+    @MainActor func testSavedArtifactsSurviveOfflineRelaunchAndAuthenticationExpiry() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let route = IllustrationTransport()
@@ -195,18 +195,25 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(relaunched.items, [cachedItem])
         XCTAssertNotNil(relaunched.imageURL(for: cachedItem))
 
-        // Once connection returns with HTTP 401, cached authorization must be revoked immediately.
+        // Authentication expiry stops sync but does not erase or hide previously downloaded artifacts.
         await route.setOffline(false)
         await route.setUnauthorized(true)
         await relaunched.refresh()
-        XCTAssertTrue(relaunched.items.isEmpty)
-        XCTAssertNil(relaunched.imageURL(for: cachedItem))
+        XCTAssertEqual(relaunched.items, [cachedItem])
+        XCTAssertNotNil(relaunched.imageURL(for: cachedItem))
 
-        // After revocation, relaunching offline must not resurrect revoked cached illustrations.
+        // Restoring the same workspace still reads its saved artifacts without a network request.
         await route.setOffline(true)
         let afterRevocation = try makeStore(directory, route: route)
         await afterRevocation.waitForCacheHydration()
-        XCTAssertTrue(afterRevocation.items.isEmpty)
+        XCTAssertEqual(afterRevocation.items, [cachedItem])
+        XCTAssertNotNil(afterRevocation.imageURL(for: cachedItem))
+
+        let client = try AgentClient(baseURL: URL(string: "http://127.0.0.1:8769")!, credential: "other-credential",
+                                     assistantID: UUID(), transport: route)
+        afterRevocation.configure(client: client, scope: "other-workspace")
+        await afterRevocation.waitForCacheHydration()
+        XCTAssertTrue(afterRevocation.items.isEmpty, "Saved artifacts must remain isolated to their workspace.")
     }
 
     func testPendingTranscriptionMetadataDoesNotChangeTextIdentity() throws {

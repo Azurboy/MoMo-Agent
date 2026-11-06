@@ -100,11 +100,11 @@ class IllustrationTests(unittest.TestCase):
         self.assertEqual(dt.datetime(2026, 10, 31, 23, tzinfo=zone).timestamp(), window['window_start'])
         self.assertEqual(dt.datetime(2026, 11, 1, 2, tzinfo=zone).timestamp(), window['window_end'])
 
-    def test_no_history_and_wait_ten_minutes(self):
+    def test_no_history_and_wait_ten_minutes_after_conversation(self):
         old = copy.deepcopy(self.payload); old['session_id'] = str(uuid.uuid4())
         old['spans'][0]['recorded_at'] = self.start - 3600
         self.context.sync_source(old)
-        self.queue.scan(self.context, self.start + 3 * 3600 + 599)
+        self.queue.scan(self.context, self.start + 60 + min(60, len(TEXT) * 0.22) + 599)
         self.assertIsNone(self.row())
         self.scan(); self.assertEqual(1, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
 
@@ -223,7 +223,7 @@ class IllustrationTests(unittest.TestCase):
         self.assertEqual('{}', self.row()['evidence'])
         with self.assertRaises(ValueError): self.queue.asset('../state.sqlite')
 
-    def test_punctuation_is_stable_but_corrections_and_source_deletion_withdraw(self):
+    def test_saved_artifact_survives_punctuation_content_and_owner_updates(self):
         self.generate()
         changed = copy.deepcopy(self.payload); changed['version'] += 1
         changed['spans'][0]['text'] = TEXT.replace('。', '！')
@@ -237,7 +237,14 @@ class IllustrationTests(unittest.TestCase):
         )
         changed['text_sha256'] = digest(changed['spans'][0]['text'])
         self.context.sync_source(changed); self.queue.reconcile(self.context)
-        self.assertEqual('invalid', self.row()['state']); self.assertTrue(self.queue.manifest()['items'][-1]['deleted'])
+        self.assertEqual('ready', self.row()['state'])
+        self.assertFalse(self.queue.manifest()['items'][-1]['deleted'])
+        self.assertTrue(self.queue.asset(self.row()['asset_sha256']))
+        changed['spans'][0]['is_owner'] = False
+        self.context.sync_source(changed); self.queue.reconcile(self.context)
+        self.assertEqual('ready', self.row()['state'])
+        self.scan(); self.queue.advance(self.generator, self.context)
+        self.assertEqual(1, len(self.generator.generated))
 
     def test_later_window_append_does_not_invalidate_first(self):
         self.generate()
@@ -247,13 +254,43 @@ class IllustrationTests(unittest.TestCase):
         self.context.sync_source(changed); self.queue.reconcile(self.context)
         self.assertEqual('ready', self.row()['state'])
 
-    def test_deleted_original_withdraws_and_source_ownership_correction_withdraws(self):
+    def test_explicit_source_deletion_removes_artifact_but_owner_correction_preserves_it(self):
         self.generate()
         changed = copy.deepcopy(self.payload); changed['spans'][0]['is_owner'] = False
         self.context.sync_source(changed); self.queue.reconcile(self.context)
-        self.assertEqual('invalid', self.row()['state'])
+        self.assertEqual('ready', self.row()['state'])
         changed.update(generation=1, version=0, deleted=True, spans=[], text_sha256=digest(''))
         self.context.sync_source(changed); self.scan()
+        self.assertEqual(1, len(self.generator.generated))
+        self.assertEqual('deleted', self.row()['state'])
+        self.assertFalse(list(self.queue.assets.glob('*.png')))
+
+    def test_preparing_refreshes_evidence_without_becoming_permanently_invalid(self):
+        self.scan()
+        changed = copy.deepcopy(self.payload)
+        changed['spans'][0]['is_owner'] = True
+        self.context.sync_source(changed)
+        self.queue.reconcile(self.context)
+        self.assertEqual('pending', self.row()['state'])
+        self.queue.advance(self.generator, self.context)
+        self.assertEqual('ready', self.row()['state'])
+        self.assertTrue(self.generator.prepared[0]['passages'][0]['spans'][0]['is_owner'])
+        self.assertEqual(1, len(self.generator.generated))
+
+    def test_source_refresh_during_accepted_image_request_preserves_result(self):
+        generate = self.generator.generate
+        def refresh_then_generate(*args):
+            changed = copy.deepcopy(self.payload)
+            changed['spans'][0]['is_owner'] = False
+            self.context.sync_source(changed)
+            self.queue.reconcile(self.context)
+            self.assertEqual('submitting', self.row()['state'])
+            return generate(*args)
+        self.generator.generate = refresh_then_generate
+        self.generate()
+        self.assertEqual('ready', self.row()['state'])
+        self.assertTrue(self.queue.asset(self.row()['asset_sha256']))
+        self.scan(); self.queue.advance(self.generator, self.context)
         self.assertEqual(1, len(self.generator.generated))
 
     def test_low_value_evidence_skips_and_late_pending_blocks_image_call(self):
@@ -363,9 +400,9 @@ class IllustrationTests(unittest.TestCase):
         self.assertEqual('在工作室用积木讨论模块交接，方案还没确定', item['summary'])
         self.assertEqual(('工作室', 39.9982, 116.4796), (item['place'], item['latitude'], item['longitude']))
         self.assertEqual(self.start, item['place_start'])
-        self.assertEqual(['visit', 'waypoint'], [point['kind'] for point in item['route_points']])
+        self.assertEqual(['visit'], [point['kind'] for point in item['route_points']])
         self.assertNotIn('device_id', item['route_points'][0])
-        self.assertEqual(2, len(json.loads(self.row()['evidence'])['trajectory']))
+        self.assertEqual(1, len(json.loads(self.row()['evidence'])['trajectory']))
 
     def test_transit_alone_never_attributes_a_stay(self):
         snapshot = self.install_journey()
@@ -374,33 +411,22 @@ class IllustrationTests(unittest.TestCase):
         self.generate()
         self.assertIsNone(self.row()['place'])
         self.assertIsNone(self.row()['latitude'])
-        self.assertEqual('waypoint', json.loads(self.row()['route_points'])[0]['kind'])
+        self.assertEqual([], json.loads(self.row()['route_points']))
 
-    def test_transit_revocation_erases_locations_summaries_assets_and_history(self):
+    def test_saved_artifact_survives_location_snapshot_refresh_and_permission_changes(self):
         snapshot = self.install_journey()
         self.generate()
-        snapshot['records'].pop()
-        self.context.db.execute('UPDATE phone_source_snapshots SET revision=2,payload=?', (json.dumps(snapshot),))
-        self.queue.reconcile(self.context)
-        self.assertEqual('invalid', self.row()['state'])
-        for key in ('summary', 'place', 'latitude', 'longitude', 'place_start', 'place_end'):
-            self.assertIsNone(self.row()[key])
-        self.assertEqual('[]', self.row()['route_points'])
-        self.assertFalse(list(self.queue.assets.glob('*.png')))
-        self.assertTrue(all(item['deleted'] for item in self.queue.manifest()['items']))
-        self.assertNotIn('route_points', self.queue.db.execute('SELECT payload FROM changes LIMIT 1').fetchone()[0])
-
-    def test_disabled_or_deleted_snapshot_withdraws_and_aging_does_not(self):
-        snapshot = self.install_journey()
-        self.generate()
-        snapshot.update(records=[], window_start=self.start + 20000, window_end=self.start + 30000)
-        self.context.db.execute('UPDATE phone_source_snapshots SET revision=2,payload=?', (json.dumps(snapshot),))
-        self.queue.reconcile(self.context)
-        self.assertEqual('ready', self.row()['state'])
-        snapshot['state'] = 'needs_permission'
-        self.context.db.execute('UPDATE phone_source_snapshots SET revision=3,payload=?', (json.dumps(snapshot),))
-        self.queue.reconcile(self.context)
-        self.assertEqual('invalid', self.row()['state'])
+        before = dict(self.row())
+        image = self.queue.asset(before['asset_sha256'])
+        for revision, state in [(2, 'enabled'), (3, 'needs_permission')]:
+            snapshot.update(state=state, records=[], window_start=self.start + 20000, window_end=self.start + 30000)
+            self.context.db.execute("UPDATE phone_source_snapshots SET revision=?,payload=?", (revision, json.dumps(snapshot)))
+            self.queue.reconcile(self.context)
+            self.assertEqual('ready', self.row()['state'])
+            self.assertEqual(before['summary'], self.row()['summary'])
+            self.assertEqual(before['route_points'], self.row()['route_points'])
+            self.assertEqual(image, self.queue.asset(before['asset_sha256']))
+        self.assertTrue(all(not item['deleted'] for item in self.queue.manifest()['items']))
 
     def test_bounded_trajectory_keeps_stays_and_rejects_nonfinite_coordinates(self):
         snapshot = self.install_journey()
@@ -424,7 +450,7 @@ class IllustrationTests(unittest.TestCase):
         self.generate()
         self.assertEqual('ready', self.row()['state'])
 
-    def test_visit_becoming_unreliable_withdraws_existing_picture(self):
+    def test_visit_becoming_unreliable_preserves_saved_picture(self):
         visit = dict(id='visit', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
                      title='河边', latitude=31, longitude=121, accuracy=20)
         snapshot = dict(state='enabled', records=[visit], window_start=self.start, window_end=self.start + 3*3600)
@@ -434,7 +460,8 @@ class IllustrationTests(unittest.TestCase):
         visit['accuracy'] = 900
         self.context.db.execute("UPDATE phone_source_snapshots SET revision=2,payload=? WHERE kind='visits'", (json.dumps(snapshot),))
         self.queue.reconcile(self.context)
-        self.assertEqual('invalid', self.row()['state'])
+        self.assertEqual('ready', self.row()['state'])
+        self.assertTrue(self.queue.asset(self.row()['asset_sha256']))
 
     def test_incremental_manifest_paginates_without_losing_tombstones(self):
         self.generate(); self.queue.delete(self.row()['id'])
@@ -467,7 +494,7 @@ class IllustrationTests(unittest.TestCase):
         queue.scan(ctx, self.start + 4 * 3600)
         self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
 
-    def test_batch_interval_admits_multiple_dense_conversations_beyond_eight_per_day(self):
+    def test_finished_conversations_are_admitted_before_batch_boundary(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         data = Path(tmp.name)
         ctx = ContextStore(data / 'context'); self.addCleanup(ctx.close)
@@ -485,11 +512,8 @@ class IllustrationTests(unittest.TestCase):
             generation=0, version=1, deleted=False, recorded_at=self.start + 600,
             spans=spans, text_sha256=digest(body),
         ))
-        # Before the first 3h batch (08:00-11:00) settles, nothing is queued even though episodes 1-3 finished >1h ago.
-        queue.scan(ctx, self.start + 3 * 3600 + 599)
-        self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
-        # Once the first 3h batch settles at 11:10, all 3 morning episodes enter together as a batch.
-        queue.scan(ctx, self.start + 3 * 3600 + 600)
+        # All three morning conversations are ready after their own quiet period, before the 11:00 checkpoint.
+        queue.scan(ctx, self.start + 2 * 3600)
         self.assertEqual(3, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
         # After all batches of the day settle, all 10 dense conversations (> 24/3 = 8) become individual illustrations.
         now = self.start + 16 * 3600
@@ -519,8 +543,8 @@ class IllustrationTests(unittest.TestCase):
         # At 11:10 (first batch settle), the ongoing conversation is NOT cut at 11:00.
         queue.scan(ctx, self.start + 3 * 3600 + 600)
         self.assertEqual(0, queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
-        # At 14:10 (second batch settle), the entire cross-boundary conversation enters as a single uncut episode.
-        queue.scan(ctx, self.start + 6 * 3600 + 600)
+        # Ten minutes after the last speech ends, the whole conversation is eligible without waiting until 14:10.
+        queue.scan(ctx, self.start + times[-1] + min(60, len(TEXT) * 0.22) + 600)
         rows = queue.db.execute('SELECT * FROM slots').fetchall()
         self.assertEqual(1, len(rows))
         self.assertEqual(self.start + times[0], rows[0]['window_start'])
@@ -552,6 +576,16 @@ class IllustrationTests(unittest.TestCase):
                                                  data=b'{"interval_hours":4}')
                 with urllib.request.urlopen(request) as response:
                     self.assertEqual(4, json.load(response)['interval_hours'])
+            # Reading a saved image requires device authentication, not an active image-generation subscription.
+            with patch.object(CodexIllustrationGenerator, 'availability', return_value=dict(
+                    provider='anthropic', supported=False, service_status='unsupported_provider')):
+                for suffix in ('manifest', 'assets/' + sha):
+                    request = urllib.request.Request(base + suffix, headers={'Authorization': 'Bearer test-key'})
+                    with urllib.request.urlopen(request) as response:
+                        if suffix == 'manifest':
+                            self.assertFalse(json.load(response)['items'][0]['deleted'])
+                        else:
+                            self.assertEqual(self.queue.asset(sha), response.read())
         finally:
             service.server.shutdown(); service.server.server_close(); thread.join()
 

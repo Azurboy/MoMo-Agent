@@ -56935,6 +56935,34 @@
           }
         }
       }
+    },
+    "对话结束约 10 分钟、转录完成后自动生成。已保存的插画会保留。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generated automatically about 10 minutes after a conversation ends and transcription finishes. Saved illustrations are kept."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话结束约 10 分钟、转录完成后自动生成。已保存的插画会保留。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話終了から約10分後、文字起こしが完了すると自動生成します。保存済みのイラストは保持されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화가 끝난 후 약 10분이 지나고 받아쓰기가 완료되면 자동으로 생성됩니다. 저장된 일러스트는 유지됩니다."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
