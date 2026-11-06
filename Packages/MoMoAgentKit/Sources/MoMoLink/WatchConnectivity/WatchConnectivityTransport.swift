@@ -198,22 +198,32 @@ private struct FileQueueDiagnostic: Encodable {
 
     /// At most one stalled candidate is offered. The recording owner must validate its original first.
     public func stalledFileAttempt(maximumValidationBytes: Int64,
+                                   allowAudioBlockRecovery: Bool = false,
                                    allowInteractiveFastPath: Bool = false) throws -> (FileTransferAttempt, ManifestEnvelope)? {
         let transfers = try refreshOutstanding()
         let eligible = Set(transfers.filter { $0.1.manifest.byteCount <= maximumValidationBytes }.map { $0.1.manifest.chunkID })
-        let fastLease: TimeInterval? = (allowInteractiveFastPath && session.isReachable) ? FileAttemptLedger.interactiveZeroProgressLease : nil
+        let blockRecoveryReady = allowAudioBlockRecovery && session.isReachable && peerState == .available
+        let stallLease = blockRecoveryReady ? FileAttemptLedger.lease : FileAttemptLedger.backgroundLease
+        let fastLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
+            ? FileAttemptLedger.interactiveZeroProgressLease : nil
         guard let candidate = fileAttempts.stalledCandidate(now: Date(), eligibleChunkIDs: eligible,
+                                                            stallLease: stallLease,
                                                             interactiveZeroProgressLease: fastLease),
               let envelope = transfers.first(where: { $0.1.manifest.chunkID == candidate.chunkID })?.1 else { return nil }
         return (candidate, envelope)
     }
 
     public func retireStalledFileAttempt(_ candidate: FileTransferAttempt,
+                                         allowAudioBlockRecovery: Bool = false,
                                          allowInteractiveFastPath: Bool = false) throws {
         let transfers = try refreshOutstanding()
-        let fastLease: TimeInterval? = (allowInteractiveFastPath && session.isReachable) ? FileAttemptLedger.interactiveZeroProgressLease : nil
+        let blockRecoveryReady = allowAudioBlockRecovery && session.isReachable && peerState == .available
+        let stallLease = blockRecoveryReady ? FileAttemptLedger.lease : FileAttemptLedger.backgroundLease
+        let fastLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
+            ? FileAttemptLedger.interactiveZeroProgressLease : nil
         var next = fileAttempts
-        guard next.requestCancellation(candidate, now: Date(), interactiveZeroProgressLease: fastLease) else { return } // Progress may have advanced during validation.
+        guard next.requestCancellation(candidate, now: Date(), stallLease: stallLease,
+                                       interactiveZeroProgressLease: fastLease) else { return } // Progress may have advanced during validation.
         try saveAttempts(next)
         submissions.retireFileAttempt(chunkID: candidate.chunkID)
         for (transfer, envelope) in transfers where envelope.manifest.chunkID == candidate.chunkID {

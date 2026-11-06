@@ -706,6 +706,7 @@ final class WatchRuntime {
         case .selectedWatchChanged, .selectedWatchStatusReceived, .selectedWatchStatusFailed: return // iPhone-local selection events.
         case .statusReceived(let snapshot, _):
             guard case .phone = snapshot.payload else { return }
+            var unlockedAudioBlockRecovery = false
             do {
                 if let receiver = try await store.boundReceiver() {
                     phoneStatuses.bind(deviceID: receiver.deviceID, libraryInstanceID: receiver.libraryInstanceID)
@@ -713,14 +714,30 @@ final class WatchRuntime {
                 if let pendingReceiver {
                     phoneStatuses.expectReceiver(deviceID: pendingReceiver.receiverDeviceID, libraryInstanceID: pendingReceiver.libraryInstanceID)
                 }
+                let hadAudioBlockSupport: Bool = {
+                    guard case .phone(let payload) = phoneStatus?.payload else { return false }
+                    return payload.audioBlockVersion == AudioBlock.version
+                }()
                 try phoneStatuses.receive(snapshot)
                 phoneStatus = phoneStatuses.boundStatus
-                if !connectivityGrant, pendingReceiver == nil { try await submitAudioBlockCopy() }
+                let hasAudioBlockSupport: Bool = {
+                    guard case .phone(let payload) = phoneStatus?.payload else { return false }
+                    return payload.audioBlockVersion == AudioBlock.version
+                }()
+                unlockedAudioBlockRecovery = !hadAudioBlockSupport && hasAudioBlockSupport
+                    && !connectivityGrant && pendingReceiver == nil
+                    && transport.isReachable && transport.outstandingFileCount > 0
+                if !connectivityGrant, pendingReceiver == nil, !unlockedAudioBlockRecovery {
+                    try await submitAudioBlockCopy()
+                }
             } catch {
                 transportSyncFailure = String(localized: "无法核对手机状态：\(error.localizedDescription)")
                 refreshSyncFailure()
+                return
             }
-            return // Replaceable observations never trigger a response or another reconciliation pass.
+            if !unlockedAudioBlockRecovery {
+                return // Replaceable observations never trigger a response or another reconciliation pass.
+            }
         }
         await reconcile()
     }
@@ -1378,25 +1395,30 @@ final class WatchRuntime {
                         if connectivityGrant { grantLeaseChecked = true }
                         let maximumBytes: Int64 = connectivityGrant ? 1_048_576 : 64 * 1_048_576
                         let boundReceiver = try await store.boundReceiver()
-                        let interactiveFastPath: Bool = {
+                        let audioBlockRecoveryAvailable: Bool = {
                             guard !connectivityGrant,
-                                  presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime),
                                   let receiver = boundReceiver, let status = phoneStatus,
                                   status.sourceDeviceID == receiver.deviceID,
                                   case .phone(let payload) = status.payload,
                                   payload.libraryInstanceID == receiver.libraryInstanceID else { return false }
                             return payload.audioBlockVersion == AudioBlock.version
                         }()
+                        let interactiveFastPath = audioBlockRecoveryAvailable
+                            && (presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
                         let maxRetirements = connectivityGrant ? 1 : LinkSubmissionState.maximumOutstandingFiles
                         for _ in 0..<maxRetirements {
                             guard let (attempt, envelope) = try transport.stalledFileAttempt(
                                 maximumValidationBytes: maximumBytes,
+                                allowAudioBlockRecovery: audioBlockRecoveryAvailable,
                                 allowInteractiveFastPath: interactiveFastPath) else { break }
                             let valid = try await store.originalAvailableForTransferRetry(envelope,
                                 maximumValidationBytes: maximumBytes)
                             guard grantID == startingGrant else { return }
                             guard valid else { break }
-                            try transport.retireStalledFileAttempt(attempt, allowInteractiveFastPath: interactiveFastPath)
+                            try transport.retireStalledFileAttempt(
+                                attempt,
+                                allowAudioBlockRecovery: audioBlockRecoveryAvailable,
+                                allowInteractiveFastPath: interactiveFastPath)
                             fileCursor = 0
                             fileCursorLoaded = true
                         }

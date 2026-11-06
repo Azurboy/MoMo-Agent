@@ -85,6 +85,36 @@ struct FileAttemptLedgerTests {
                                          interactiveZeroProgressLease: FileAttemptLedger.interactiveZeroProgressLease) == nil)
     }
 
+    @Test func backgroundLeasePreservesUnreachableQueueUntilLongWatchdogOrReachableFastPath() throws {
+        let queued = try envelope(), start = Date(timeIntervalSince1970: 1_000)
+        var journal = FileAttemptLedger()
+        let attemptID = try journal.begin(queued, now: start)
+
+        // Discretionary watchOS background transfers routinely sit unstarted past 15 minutes while recording.
+        let at20Minutes = start.addingTimeInterval(20 * 60)
+        #expect(journal.stalledCandidate(now: at20Minutes, stallLease: FileAttemptLedger.backgroundLease) == nil)
+
+        // Raising the wrist / opening the app immediately unlocks the 90s interactive AudioBlock handover.
+        let fastCandidate = try #require(journal.stalledCandidate(
+            now: at20Minutes,
+            stallLease: FileAttemptLedger.lease,
+            interactiveZeroProgressLease: FileAttemptLedger.interactiveZeroProgressLease))
+        #expect(fastCandidate.attemptID == attemptID)
+        let prematureCancel = journal.requestCancellation(
+            fastCandidate, now: at20Minutes, stallLease: FileAttemptLedger.backgroundLease)
+        #expect(!prematureCancel)
+
+        // If the Watch stays unreachable for the full background watchdog window, a wedged slot still self-heals.
+        let at6Hours = start.addingTimeInterval(FileAttemptLedger.backgroundLease + 1)
+        let backgroundCandidate = try #require(journal.stalledCandidate(
+            now: at6Hours,
+            stallLease: FileAttemptLedger.backgroundLease))
+        #expect(backgroundCandidate.attemptID == attemptID)
+        let watchdogCancel = journal.requestCancellation(
+            backgroundCandidate, now: at6Hours, stallLease: FileAttemptLedger.backgroundLease)
+        #expect(watchdogCancel)
+    }
+
     private func envelope() throws -> ManifestEnvelope {
         try ManifestEnvelope(manifest: ChunkManifest(sessionID: UUID(), epochID: UUID(), sourceDeviceID: UUID(),
             sourceBuild: "lease-tests", sequence: 0, frames: FrameRange(start: 0, count: 8), timebaseHz: 16_000,

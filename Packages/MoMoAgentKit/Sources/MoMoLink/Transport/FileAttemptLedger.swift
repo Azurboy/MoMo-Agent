@@ -28,6 +28,7 @@ public struct FileTransferObservation: Sendable {
 /// A small restart-safe journal. Only actual SDK byte progress renews the lease.
 public struct FileAttemptLedger: Codable, Sendable, Equatable {
     public static let lease: TimeInterval = 15 * 60
+    public static let backgroundLease: TimeInterval = 6 * 60 * 60
     public static let interactiveZeroProgressLease: TimeInterval = 90
     public static let cooldown: TimeInterval = 5 * 60
     public private(set) var controlGeneration = UUID()
@@ -169,9 +170,11 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
     }
 
     public func stalledCandidate(now: Date, eligibleChunkIDs: Set<UUID>? = nil,
+                                 stallLease: TimeInterval = Self.lease,
                                  interactiveZeroProgressLease: TimeInterval? = nil) -> FileTransferAttempt? {
-        attempts.values.filter {
-            let requiredLease = ($0.completedUnits == 0 ? interactiveZeroProgressLease.map { min(Self.lease, $0) } : nil) ?? Self.lease
+        let baseLease = max(Self.lease, stallLease)
+        return attempts.values.filter {
+            let requiredLease = ($0.completedUnits == 0 ? interactiveZeroProgressLease.map { min(baseLease, $0) } : nil) ?? baseLease
             return $0.outstanding && $0.cancellationRequestedAt == nil
                 && now.timeIntervalSince($0.lastProgressAt) >= requiredLease
                 && (eligibleChunkIDs?.contains($0.chunkID) ?? true)
@@ -183,10 +186,12 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
 
     /// Persist this decision before calling SDK cancel. Keep the slot until the SDK actually drops it.
     public mutating func requestCancellation(_ candidate: FileTransferAttempt, now: Date,
+                                             stallLease: TimeInterval = Self.lease,
                                              interactiveZeroProgressLease: TimeInterval? = nil) -> Bool {
         guard let current = attempts[candidate.chunkID], current == candidate,
               current.outstanding, current.cancellationRequestedAt == nil else { return false }
-        let requiredLease = (current.completedUnits == 0 ? interactiveZeroProgressLease.map { min(Self.lease, $0) } : nil) ?? Self.lease
+        let baseLease = max(Self.lease, stallLease)
+        let requiredLease = (current.completedUnits == 0 ? interactiveZeroProgressLease.map { min(baseLease, $0) } : nil) ?? baseLease
         guard now.timeIntervalSince(current.lastProgressAt) >= requiredLease else { return false }
         attempts[candidate.chunkID]?.cancellationRequestedAt = now
         attempts[candidate.chunkID]?.retryNotBefore = now.addingTimeInterval(Self.cooldown)
