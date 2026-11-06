@@ -60,9 +60,10 @@ class ContextService:
                     if url.path.startswith('/v1/life-illustrations/'):
                         illustrations = LifeIllustrations(service.data)
                         illustrations.reconcile(store)
-                        from life_illustration_generator import CodexIllustrationGenerator
-                        availability = CodexIllustrationGenerator(service.data).availability()
                         suffix = url.path.removeprefix('/v1/life-illustrations/')
+                        if suffix == 'settings':
+                            from life_illustration_generator import CodexIllustrationGenerator
+                            availability = CodexIllustrationGenerator(service.data).availability()
                         if self.command == 'POST':
                             size = int(self.headers.get('Content-Length', '0'))
                             if not 0 < size <= 4096:
@@ -78,11 +79,7 @@ class ContextService:
                             result = illustrations.settings(availability)
                         elif suffix == 'manifest':
                             result = illustrations.manifest(query.get('cursor', ['0'])[0], limit)
-                            if not availability['supported']:
-                                result = dict(items=[], next_cursor=query.get('cursor', ['0'])[0], has_more=False)
                         elif suffix.startswith('assets/'):
-                            if not availability['supported']:
-                                self.respond(404, {'error': {'code': 'not_found'}}); return
                             raw = illustrations.asset(suffix.removeprefix('assets/'))
                             self.send_response(200)
                             self.send_header('Content-Type', 'image/png')

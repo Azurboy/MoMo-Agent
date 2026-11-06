@@ -438,17 +438,32 @@ class LifeIllustrations:
             return
         rows = self.db.execute("SELECT * FROM slots WHERE state NOT IN ('deleted','invalid','skipped')").fetchall()
         source_entries = _preload_source_entries(context) if rows else []
+        deleted_sources = {row['id'] for row in context.db.execute('SELECT id FROM sources WHERE deleted=1')}
         for row in rows:
-            _, versions, semantic, _ = evidence_for(
+            if deleted_sources.intersection(json.loads(row['source_versions'])):
+                self.delete(row['id'], state='deleted')
+                continue
+            # A completed/accepted image is a saved artifact, not a live view of mutable transcripts or locations.
+            if row['state'] not in ('pending', 'preparing'):
+                continue
+            evidence, versions, semantic, _ = evidence_for(
                 context, row['window_start'], row['window_end'],
                 source_entries=source_entries, include_summaries=False
             )
-            evidence = json.loads(row['evidence'])
+            previous_evidence = json.loads(row['evidence'])
             invalid_visit = any(not location_evidence_is_current(context, point)
-                                for point in evidence.get('visits', []) + evidence.get('trajectory', []))
+                                for point in previous_evidence.get('visits', []) + previous_evidence.get('trajectory', []))
             if semantic != row['semantic_hash'] or invalid_visit:
-                # Any semantic correction withdraws the old picture. Never auto-charge for a replacement.
-                self.delete(row['id'], state='invalid')
+                primary = evidence['visits'][0] if evidence['visits'] else {}
+                route = [point for point in previous_evidence.get('trajectory', [])
+                         if location_evidence_is_current(context, point)]
+                evidence['trajectory'] = route
+                self.db.execute('''UPDATE slots SET state='pending',source_versions=?,evidence=?,semantic_hash=?,
+                    brief=NULL,summary=NULL,place=?,latitude=?,longitude=?,place_start=?,place_end=?,route_points=?
+                    WHERE id=? AND state IN ('pending','preparing')''',
+                    (canonical(versions), canonical(evidence), semantic, primary.get('title'),
+                     primary.get('latitude'), primary.get('longitude'), primary.get('start'), primary.get('end'),
+                     canonical(route), row['id']))
             elif canonical(versions) != row['source_versions']:
                 self.db.execute("UPDATE slots SET source_versions=? WHERE id=? AND state NOT IN ('deleted','invalid')", (canonical(versions), row['id']))
         self.db.execute("INSERT OR REPLACE INTO metadata VALUES('reconciled_sources',?)", (signature,))
@@ -502,9 +517,8 @@ class LifeIllustrations:
             start, end = episode['window_start'], episode['window_end']
             if start < settings['active_from']:
                 continue
-            # interval_hours paces batch generation checkpoints; each dense conversation in the batch gets its own slot.
-            batch = window_at(episode['last_recorded_at'], settings['interval_hours'], day_start_hour)
-            if batch['window_end'] + SETTLE_SECONDS > now or episode['speech_end'] + SETTLE_SECONDS > now:
+            # Admit a finished conversation after its quiet period, without waiting hours for a wall-clock batch.
+            if episode['speech_end'] + SETTLE_SECONDS > now:
                 continue
             if any(p_start < episode['speech_end'] + EPISODE_GAP_SECONDS and p_end > start - EPISODE_GAP_SECONDS
                    for p_start, p_end in pending_ranges):
@@ -522,7 +536,7 @@ class LifeIllustrations:
             _, zone = local_timezone(start)
             day_start = dt.datetime.combine(dt.date.fromisoformat(episode['logical_day']),
                 dt.time(day_start_hour), tzinfo=zone).timestamp()
-            route = trajectory_evidence(context, day_start, max(end, batch['window_end']))
+            route = trajectory_evidence(context, day_start, end)
             evidence['trajectory'] = route
             self.db.execute('''INSERT OR IGNORE INTO slots
                 (id,window_start,window_end,logical_day,timezone,state,source_versions,evidence,semantic_hash,

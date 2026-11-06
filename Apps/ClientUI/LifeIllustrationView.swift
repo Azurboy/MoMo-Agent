@@ -182,13 +182,8 @@ struct LifeIllustrationSettingsControls: View {
         }))
         .disabled(!store.settings.supported || saving)
         .accessibilityIdentifier("lifeIllustration.settings.enabled")
-        Picker("批量生成", selection: Binding(get: { store.settings.intervalHours }, set: {
-            save(enabled: store.settings.enabled, interval: $0)
-        })) {
-            ForEach([2, 3, 4, 6], id: \.self) { hours in Text("每 \(hours) 小时").tag(hours) }
-        }
-        .disabled(!store.settings.supported || saving)
-        .accessibilityIdentifier("lifeIllustration.settings.interval")
+        Text("对话结束约 10 分钟、转录完成后自动生成。已保存的插画会保留。")
+            .font(.footnote).foregroundStyle(.secondary)
         Text(store.settingsDetailStatus).font(.footnote).foregroundStyle(.secondary)
             .accessibilityIdentifier("lifeIllustration.settings.subscription")
             .task { await store.refresh() }
