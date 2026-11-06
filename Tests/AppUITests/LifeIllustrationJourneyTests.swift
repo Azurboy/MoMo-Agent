@@ -206,30 +206,8 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         XCTAssertFalse(app.buttons["library.earphoneStatus"].exists)
         let datePicker = app.buttons["timeline.datePicker"]
         XCTAssertTrue(datePicker.waitForExistence(timeout: 10))
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
-        let preceding = rows.matching(NSPredicate(format: "label CONTAINS %@", "坐在台灯旁喝茶")).firstMatch
-        let following = rows.matching(NSPredicate(format: "label CONTAINS %@", "明天再继续")).firstMatch
-        XCTAssertTrue(preceding.waitForExistence(timeout: 15))
-        XCTAssertTrue(preceding.isHittable)
-        XCTAssertTrue(following.isHittable)
-        XCTAssertEqual(preceding.frame.maxY, following.frame.minY, accuracy: 1)
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
-        let image = try XCTUnwrap(app.screenshot().image.cgImage)
-        let scale = CGFloat(image.width) / app.frame.width
-        let x = Int((preceding.frame.minX + 6) * scale)
-        for y in stride(from: preceding.frame.maxY - 12, through: following.frame.minY + 6, by: 3) {
-            let line = try pixel(image, x: x, y: Int(y * scale))
-            let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
-            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
-        }
         let strip = app.descendants(matching: .any)["lifeIllustration.strip"].firstMatch
-        let pager = app.scrollViews["timeline.dayPager"]
-        for _ in 0..<5 {
-            if strip.exists, strip.frame.minY >= datePicker.frame.maxY,
-               app.buttons["lifeIllustration.stamp.sample-morning"].isHittable { break }
-            pager.swipeDown()
-        }
-        XCTAssertTrue(strip.exists)
+        XCTAssertTrue(strip.waitForExistence(timeout: 15), "Journal stamp strip must be immediately visible on entry without upward scrolling.")
         XCTAssertEqual(strip.frame.minX, 24, accuracy: 1.5)
         XCTAssertEqual(strip.frame.width, app.frame.width - 48, accuracy: 2)
         XCTAssertGreaterThanOrEqual(strip.frame.height, 100)
@@ -239,7 +217,7 @@ final class LifeIllustrationJourneyTests: XCTestCase {
             app.buttons["lifeIllustration.stamp.\($0)"]
         }
         for (index, card) in cards.enumerated() {
-            XCTAssertTrue(card.isHittable)
+            XCTAssertTrue(card.isHittable, "Stamp card \(index) must be immediately hittable on initial open without scrolling.")
             XCTAssertEqual(card.frame.width, 78, accuracy: 1.5)
             XCTAssertEqual(card.frame.height, 92, accuracy: 2)
             XCTAssertEqual(card.frame.minY, cards[0].frame.minY, accuracy: 1)
@@ -250,9 +228,23 @@ final class LifeIllustrationJourneyTests: XCTestCase {
         }
         XCTAssertTrue(cards[0].label.contains("草图纸"))
         XCTAssertTrue(cards[1].label.contains("积木"))
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
         let morningRow = rows.matching(NSPredicate(format: "label CONTAINS %@", "草图纸")).firstMatch
+        let secondRow = rows.matching(NSPredicate(format: "label CONTAINS %@", "两列")).firstMatch
+        XCTAssertTrue(morningRow.waitForExistence(timeout: 10))
         XCTAssertTrue(morningRow.isHittable)
+        XCTAssertTrue(secondRow.isHittable)
         XCTAssertLessThanOrEqual(strip.frame.maxY, morningRow.frame.minY + 4)
+        XCTAssertEqual(morningRow.frame.maxY, secondRow.frame.minY, accuracy: 1)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lifeIllustration.inline.")).firstMatch.exists)
+        let image = try XCTUnwrap(app.screenshot().image.cgImage)
+        let scale = CGFloat(image.width) / app.frame.width
+        let x = Int((morningRow.frame.minX + 6) * scale)
+        for y in stride(from: morningRow.frame.maxY - 12, through: secondRow.frame.minY + 6, by: 3) {
+            let line = try pixel(image, x: x, y: Int(y * scale))
+            let canvas = try pixel(image, x: x + Int(4 * scale), y: Int(y * scale))
+            XCTAssertGreaterThan(abs(Int(line[0]) - Int(canvas[0])), 8)
+        }
     }
 
     private func assertJournalMastheadScrollsWithPage(_ app: XCUIApplication) {

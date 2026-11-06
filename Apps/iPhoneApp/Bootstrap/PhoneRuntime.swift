@@ -897,9 +897,7 @@ final class PhoneRuntime {
     }
 
     func refreshLibraryOnAppear() async {
-        Task { @MainActor [weak self] in
-            await self?.lifeIllustrations.refresh(minimumInterval: 5)
-        }
+        lifeIllustrations.requestRefresh(minimumInterval: 5)
         await library.timeline.refresh()
         if !library.hasLoadedOnce {
             await library.refresh(inspectFiles: false)
@@ -913,9 +911,7 @@ final class PhoneRuntime {
     func refresh(reconcileFiles: Bool = true) async {
         if reconcileFiles {
             remoteAgent.sourcesChanged()
-            Task { @MainActor [weak self] in
-                await self?.lifeIllustrations.refresh()
-            }
+            lifeIllustrations.requestRefresh()
         }
         refreshRequested = true
         fileReconciliationRequested = fileReconciliationRequested || reconcileFiles

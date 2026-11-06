@@ -16,6 +16,7 @@ public final class LifeIllustrationStore {
     @ObservationIgnored private var client: AgentClient?
     @ObservationIgnored private var scope: String?
     @ObservationIgnored private var revision = 0
+    @ObservationIgnored private var hydrateTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var polling: Task<Void, Never>?
     @ObservationIgnored private var refreshedAt = Date.distantPast
@@ -27,11 +28,42 @@ public final class LifeIllustrationStore {
         self.client = client
         guard self.scope != scope else { return }
         revision += 1
+        hydrateTask?.cancel(); hydrateTask = nil
         refreshTask?.cancel(); refreshTask = nil
         self.scope = scope
-        cache = LifeIllustrationCache(directory: directory.appendingPathComponent(LifeIllustrationCache.digest(Data(scope.utf8))))
+        let cache = LifeIllustrationCache(directory: directory.appendingPathComponent(LifeIllustrationCache.digest(Data(scope.utf8))))
+        self.cache = cache
         settings = LifeIllustrationSettings(); hasLoadedSettings = false; cachedItems = []; assetURLs = [:]
         refreshedAt = .distantPast; error = nil; isRefreshing = false
+        let currentRevision = revision
+        hydrateTask = Task { [weak self] in
+            await self?.hydrateCachedIllustrations(cache: cache, revision: currentRevision)
+        }
+    }
+
+    public func waitForCacheHydration() async {
+        await hydrateTask?.value
+    }
+
+    public func requestRefresh(minimumInterval: TimeInterval = 0) {
+        Task { @MainActor [weak self] in
+            await self?.refresh(minimumInterval: minimumInterval)
+        }
+    }
+
+    private func hydrateCachedIllustrations(cache: LifeIllustrationCache, revision: Int) async {
+        defer { if self.revision == revision { self.hydrateTask = nil } }
+        guard let snapshot = try? await cache.load(),
+              self.revision == revision,
+              !self.hasLoadedSettings,
+              let verifiedSettings = snapshot.lastVerifiedSettings,
+              verifiedSettings.canDisplayIllustrations else { return }
+        guard let cachedURLs = try? await cache.existingAssetURLs(for: Array(snapshot.items.values)),
+              self.revision == revision,
+              !self.hasLoadedSettings else { return }
+        self.settings = verifiedSettings
+        self.assetURLs = cachedURLs
+        self.publish(snapshot)
     }
 
     public func imageURL(for item: LifeIllustration, thumbnail: Bool = true) -> URL? {
@@ -59,6 +91,7 @@ public final class LifeIllustrationStore {
         hasLoadedSettings = false
         refreshedAt = .distantPast
         revision += 1
+        hydrateTask?.cancel(); hydrateTask = nil
         refreshTask?.cancel(); refreshTask = nil; isRefreshing = false
         let currentCache = cache
         Task { try? await currentCache?.saveSettings(nil) }
@@ -66,9 +99,11 @@ public final class LifeIllustrationStore {
 
     /// Called by app lifecycle, never to request generation from a view.
     public func refresh(minimumInterval: TimeInterval = 0) async {
-        if let refreshTask {
-            await refreshTask.value
-            if error == nil, hasLoadedSettings, Date().timeIntervalSince(refreshedAt) >= 0 { return }
+        if let hydrateTask { await hydrateTask.value }
+        if let existingTask = refreshTask {
+            let waitStartedAt = Date()
+            await existingTask.value
+            if !existingTask.isCancelled, error == nil, hasLoadedSettings, refreshedAt >= waitStartedAt { return }
         }
         guard !mutating, let client, let cache, Date().timeIntervalSince(refreshedAt) >= minimumInterval else { return }
         let revision = revision
@@ -129,32 +164,55 @@ public final class LifeIllustrationStore {
                     publish(snapshot)
                     pruneAssetURLs()
                 }
+                var assetDownloadFailure: Error?
                 if !illustrationItems.isEmpty {
                     let maxConcurrency = 4
-                    try await withThrowingTaskGroup(of: (LifeIllustration, [String: URL]).self) { group in
+                    await withTaskGroup(of: Result<(LifeIllustration, [String: URL]), Error>.self) { group in
                         var iterator = illustrationItems.makeIterator()
                         for _ in 0..<min(maxConcurrency, illustrationItems.count) {
                             if let nextItem = iterator.next() {
                                 group.addTask {
-                                    try await Self.ensureAssets(for: nextItem, client: client, cache: cache)
+                                    do {
+                                        return .success(try await Self.ensureAssets(for: nextItem, client: client, cache: cache))
+                                    } catch {
+                                        return .failure(error)
+                                    }
                                 }
                             }
                         }
-                        while let (completedItem, itemURLs) = try await group.next() {
-                            try checkCurrent(revision)
-                            snapshot = try await cache.apply([.illustration(completedItem)], keepHashes: protectedHashes)
-                            try checkCurrent(revision)
-                            assetURLs.merge(itemURLs) { _, new in new }
-                            publish(snapshot)
-                            if let nextItem = iterator.next() {
+                        while let outcome = await group.next() {
+                            if Task.isCancelled || self.revision != revision {
+                                group.cancelAll()
+                                break
+                            }
+                            switch outcome {
+                            case .success(let (completedItem, itemURLs)):
+                                do {
+                                    snapshot = try await cache.apply([.illustration(completedItem)], keepHashes: protectedHashes)
+                                    if self.revision == revision, !Task.isCancelled {
+                                        assetURLs.merge(itemURLs) { _, new in new }
+                                        publish(snapshot)
+                                    }
+                                } catch {
+                                    if assetDownloadFailure == nil { assetDownloadFailure = error }
+                                }
+                            case .failure(let itemError):
+                                if assetDownloadFailure == nil { assetDownloadFailure = itemError }
+                            }
+                            if !Task.isCancelled, self.revision == revision, let nextItem = iterator.next() {
                                 group.addTask {
-                                    try await Self.ensureAssets(for: nextItem, client: client, cache: cache)
+                                    do {
+                                        return .success(try await Self.ensureAssets(for: nextItem, client: client, cache: cache))
+                                    } catch {
+                                        return .failure(error)
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 try checkCurrent(revision)
+                if let assetDownloadFailure { throw assetDownloadFailure }
                 if cursor != snapshot.cursor || !tombstones.isEmpty {
                     snapshot = try await cache.apply([], cursor: cursor)
                 }
@@ -166,7 +224,9 @@ public final class LifeIllustrationStore {
                         else {
                             let data = try await client.lifeIllustrationAsset(sha256: hash)
                             try checkCurrent(revision)
-                            urls[hash] = try await cache.saveAsset(data, sha256: hash)
+                            let saved = try await cache.saveAsset(data, sha256: hash)
+                            urls[hash] = saved
+                            assetURLs[hash] = saved
                         }
                     }
                 }
@@ -221,8 +281,11 @@ public final class LifeIllustrationStore {
         mutating = true; defer { mutating = false }
         await cancelRefresh()
         let revision = revision
+        let currentCache = cache
         do {
             let updated = try await client.updateLifeIllustrationSettings(enabled: enabled, intervalHours: intervalHours)
+            try checkCurrent(revision)
+            try? await currentCache?.saveSettings(updated)
             try checkCurrent(revision)
             settings = updated
             hasLoadedSettings = true
@@ -248,6 +311,10 @@ public final class LifeIllustrationStore {
 
     private func cancelRefresh() async {
         revision += 1
+        let hydrating = hydrateTask
+        hydrateTask?.cancel()
+        await hydrating?.value
+        hydrateTask = nil
         let task = refreshTask
         task?.cancel()
         await task?.value

@@ -181,7 +181,7 @@ final class PhoneRemoteAgent {
             guard self.store === store else { return }
             await store.retryConnection()
             await context?.refresh()
-            await lifeIllustrations.refresh()
+            lifeIllustrations.requestRefresh()
         } catch is CancellationError { }
         catch {
             guard !AgentTransportFailure.isCancelled(error) else { return }
@@ -295,7 +295,7 @@ final class PhoneRemoteAgent {
                 else { self.network?.resume() }
                 await self.store?.retryConnection(ifNeeded: true)
                 await self.context?.refresh()
-                await self.lifeIllustrations.refresh()
+                self.lifeIllustrations.requestRefresh()
             }
         }
         monitor.start(queue: DispatchQueue(label: "com.momoagent.remote.path"))
@@ -358,7 +358,7 @@ final class PhoneRemoteAgent {
         tasks.onConnectionRestored = { [weak self] in
             self?.failure = nil
             self?.resumeConnectionReadyWaiters()
-            Task { @MainActor [weak self] in await self?.lifeIllustrations.refresh() }
+            self?.lifeIllustrations.requestRefresh()
         }
         sync.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
         sync.recordingSummaries?.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }

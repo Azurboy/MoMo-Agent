@@ -58,8 +58,16 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         let downloads = await route.assetRequests
         XCTAssertEqual(downloads, 2)
         let restored = try makeStore(directory, route: route)
-        XCTAssertTrue(restored.items.isEmpty, "A disk cache cannot assert a signed-in Codex account.")
+        let requestsBeforeHydration = await route.requests.count
+        await restored.waitForCacheHydration()
+        let requestsAfterHydration = await route.requests.count
+        XCTAssertEqual(requestsAfterHydration, requestsBeforeHydration, "Local cache hydration must never issue network requests.")
+        XCTAssertFalse(restored.hasLoadedSettings)
+        XCTAssertEqual(restored.items, [item])
+        XCTAssertNotNil(restored.imageURL(for: item))
+        XCTAssertNotNil(restored.imageURL(for: item, thumbnail: false))
         await restored.refresh()
+        XCTAssertTrue(restored.hasLoadedSettings)
         XCTAssertEqual(restored.items, [item])
         let restoredDownloads = await route.assetRequests
         XCTAssertEqual(restoredDownloads, 2)
@@ -178,7 +186,10 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         // Simulate app relaunch while Tailscale DERP / cellular is temporarily unreachable.
         await route.setOffline(true)
         let relaunched = try makeStore(directory, route: route)
-        XCTAssertTrue(relaunched.items.isEmpty)
+        await relaunched.waitForCacheHydration()
+        XCTAssertFalse(relaunched.hasLoadedSettings)
+        XCTAssertEqual(relaunched.items, [cachedItem])
+        XCTAssertNotNil(relaunched.imageURL(for: cachedItem))
         await relaunched.refresh()
         XCTAssertFalse(relaunched.hasLoadedSettings)
         XCTAssertEqual(relaunched.items, [cachedItem])
@@ -190,6 +201,12 @@ final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
         await relaunched.refresh()
         XCTAssertTrue(relaunched.items.isEmpty)
         XCTAssertNil(relaunched.imageURL(for: cachedItem))
+
+        // After revocation, relaunching offline must not resurrect revoked cached illustrations.
+        await route.setOffline(true)
+        let afterRevocation = try makeStore(directory, route: route)
+        await afterRevocation.waitForCacheHydration()
+        XCTAssertTrue(afterRevocation.items.isEmpty)
     }
 
     func testPendingTranscriptionMetadataDoesNotChangeTextIdentity() throws {

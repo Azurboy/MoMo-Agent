@@ -1,20 +1,48 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 actor LifeIllustrationCache {
+    struct FileStamp: Codable, Equatable, Sendable {
+        let size: Int64
+        let inode: UInt64
+        let mtimeSec: Int
+        let mtimeNsec: Int
+    }
+
     struct Snapshot: Codable, Sendable {
         var cursor = "0"
         var items: [String: LifeIllustration] = [:]
         var lastVerifiedSettings: LifeIllustrationSettings?
+        var verifiedStamps: [String: FileStamp] = [:]
+
+        init(
+            cursor: String = "0",
+            items: [String: LifeIllustration] = [:],
+            lastVerifiedSettings: LifeIllustrationSettings? = nil,
+            verifiedStamps: [String: FileStamp] = [:]
+        ) {
+            self.cursor = cursor
+            self.items = items
+            self.lastVerifiedSettings = lastVerifiedSettings
+            self.verifiedStamps = verifiedStamps
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case cursor, items, lastVerifiedSettings, verifiedStamps
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            cursor = try container.decodeIfPresent(String.self, forKey: .cursor) ?? "0"
+            items = try container.decodeIfPresent([String: LifeIllustration].self, forKey: .items) ?? [:]
+            lastVerifiedSettings = try container.decodeIfPresent(LifeIllustrationSettings.self, forKey: .lastVerifiedSettings)
+            verifiedStamps = try container.decodeIfPresent([String: FileStamp].self, forKey: .verifiedStamps) ?? [:]
+        }
     }
 
     let directory: URL
     private var verified: [String: FileStamp] = [:]
-
-    private struct FileStamp: Equatable {
-        let size: Int
-        let modified: Date?
-    }
 
     init(directory: URL) { self.directory = directory }
 
@@ -27,17 +55,17 @@ actor LifeIllustrationCache {
         guard FileManager.default.fileExists(atPath: file.path) else { return Snapshot() }
         let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: file))
         for item in snapshot.items.values { try item.validate() }
+        verified.merge(snapshot.verifiedStamps) { current, _ in current }
         return snapshot
     }
 
     func verifiedURL(sha256: String) throws -> URL? {
         guard LifeIllustration.isSHA256(sha256) else { throw LifeIllustrationError.assetIntegrity }
         let url = directory.appendingPathComponent(sha256 + ".png")
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let stamp = try fileStamp(url)
+        guard let stamp = fileStamp(url) else { return nil }
         if verified[sha256] == stamp { return url }
         guard Self.digest(try Data(contentsOf: url)) == sha256 else {
-            try FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url)
             verified.removeValue(forKey: sha256)
             return nil
         }
@@ -50,19 +78,21 @@ actor LifeIllustrationCache {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(sha256 + ".png")
         try data.write(to: url, options: .atomic)
-        verified[sha256] = try fileStamp(url)
+        guard let stamp = fileStamp(url) else { throw LifeIllustrationError.assetIntegrity }
+        verified[sha256] = stamp
         return url
     }
 
     func saveSettings(_ settings: LifeIllustrationSettings?) throws {
         var snapshot = (try? load()) ?? Snapshot()
-        guard snapshot.lastVerifiedSettings != settings else { return }
+        guard snapshot.lastVerifiedSettings != settings || snapshot.verifiedStamps != verified else { return }
         snapshot.lastVerifiedSettings = settings
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+        snapshot.verifiedStamps = verified
+        try writeManifest(snapshot)
     }
 
     func existingAssetURLs(for items: [LifeIllustration]) throws -> [String: URL] {
+        let previousVerified = verified
         var urls: [String: URL] = [:]
         for item in items {
             for hash in Set([item.thumbnailSha256, item.assetSha256]) where urls[hash] == nil {
@@ -70,6 +100,10 @@ actor LifeIllustrationCache {
                     urls[hash] = url
                 }
             }
+        }
+        if verified != previousVerified, var snapshot = try? load(), snapshot.verifiedStamps != verified {
+            snapshot.verifiedStamps = verified
+            try? writeManifest(snapshot)
         }
         return urls
     }
@@ -87,20 +121,36 @@ actor LifeIllustrationCache {
             }
         }
         if let cursor { snapshot.cursor = cursor }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
         let referenced = Set(snapshot.items.values.flatMap { [$0.assetSha256, $0.thumbnailSha256] }).union(keepHashes)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         where url.pathExtension == "png" && !referenced.contains(url.deletingPathExtension().lastPathComponent) {
             try FileManager.default.removeItem(at: url)
             verified.removeValue(forKey: url.deletingPathExtension().lastPathComponent)
         }
+        verified = verified.filter { referenced.contains($0.key) }
+        snapshot.verifiedStamps = verified
+        try writeManifest(snapshot)
         return snapshot
     }
 
-    private func fileStamp(_ url: URL) throws -> FileStamp {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        guard let size = values.fileSize else { throw LifeIllustrationError.assetIntegrity }
-        return FileStamp(size: size, modified: values.contentModificationDate)
+    private func writeManifest(_ snapshot: Snapshot) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+    }
+
+    private func fileStamp(_ url: URL) -> FileStamp? {
+        var info = Darwin.stat()
+        let ok = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            return stat(path, &info) == 0
+        }
+        guard ok, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return FileStamp(
+            size: info.st_size,
+            inode: info.st_ino,
+            mtimeSec: info.st_mtimespec.tv_sec,
+            mtimeNsec: info.st_mtimespec.tv_nsec
+        )
     }
 }
