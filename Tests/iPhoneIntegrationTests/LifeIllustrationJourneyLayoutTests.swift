@@ -4,6 +4,44 @@ import XCTest
 @testable import MoMoAgent
 
 final class LifeIllustrationJourneyLayoutTests: XCTestCase {
+    func testCalloutsStayFixedThroughoutZoomAndUpdateOnceCameraSettles() {
+        let items = (0..<3).map { item(index: $0) }
+        let size = CGSize(width: 402, height: 677)
+        let pins = [items[0].id: CGPoint(x: 274, y: 162), items[1].id: CGPoint(x: 238, y: 318),
+                    items[2].id: CGPoint(x: 137, y: 369)]
+        var snapshot = JourneyCalloutProjection()
+        snapshot.update(pins: pins, cameraCustomized: false, cameraMoving: false)
+        let baseline = JourneyCallout.layout(items: items, allItems: items, pins: snapshot.pins, size: size)
+        var lastPins = pins
+        // Zoom in, reverse mid-gesture, and move pins across viewport/avoidance thresholds.
+        for frame in 0..<180 {
+            let amount = CGFloat(sin(Double(frame) / 12) * 400)
+            lastPins = pins.mapValues { CGPoint(x: $0.x + amount, y: $0.y + amount * 0.7) }
+            snapshot.update(pins: lastPins, cameraCustomized: true, cameraMoving: true)
+            XCTAssertEqual(snapshot.pins, pins)
+            XCTAssertFalse(snapshot.cameraCustomized)
+            let cards = JourneyCallout.layout(items: items, allItems: items, pins: snapshot.pins, size: size)
+            XCTAssertEqual(cards.map(\.id), baseline.map(\.id))
+            XCTAssertEqual(cards.map(\.frame), baseline.map(\.frame))
+            XCTAssertEqual(cards.map(\.compact), baseline.map(\.compact))
+        }
+        snapshot.update(pins: lastPins, cameraCustomized: true, cameraMoving: false)
+        XCTAssertEqual(snapshot.pins, lastPins)
+        XCTAssertTrue(snapshot.cameraCustomized)
+    }
+
+    func testFirstProjectionCanSeedDuringMotionAndFitAllCommitsItsVisibilityMode() {
+        let initial = ["stop": CGPoint(x: 100, y: 200)]
+        var snapshot = JourneyCalloutProjection()
+        snapshot.update(pins: initial, cameraCustomized: true, cameraMoving: true)
+        XCTAssertEqual(snapshot.pins, initial)
+        snapshot.update(pins: ["stop": CGPoint(x: 300, y: 400)], cameraCustomized: false, cameraMoving: true)
+        XCTAssertEqual(snapshot.pins, initial)
+        XCTAssertTrue(snapshot.cameraCustomized)
+        snapshot.update(pins: initial, cameraCustomized: false, cameraMoving: false)
+        XCTAssertFalse(snapshot.cameraCustomized)
+    }
+
     func testBeijingCardsLeaveEveryPinExposed() {
         let items = (0..<3).map { item(index: $0) }
         let pins = [items[0].id: CGPoint(x: 274, y: 162), items[1].id: CGPoint(x: 238, y: 318),

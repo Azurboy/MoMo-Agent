@@ -3,6 +3,33 @@ import UIKit
 
 @MainActor
 final class LifeIllustrationJourneyTests: XCTestCase {
+    func testMapRepeatedZoomPinchPanAndReset() throws {
+        continueAfterFailure = false
+        let app = launch(appearance: .light)
+        defer { app.terminate() }
+        app.buttons["lifeIllustration.stamp.sample-morning"].tap()
+        assertMap(app)
+        let surface = app.descendants(matching: .any)["lifeIllustration.map.surface"].firstMatch
+        XCTAssertTrue(surface.exists)
+        for _ in 0..<3 {
+            app.buttons["lifeIllustration.map.zoomIn"].tap()
+            app.buttons["lifeIllustration.map.zoomOut"].tap()
+            surface.pinch(withScale: 1.3, velocity: 1)
+            surface.pinch(withScale: 0.8, velocity: -1)
+            let fitAll = app.buttons["lifeIllustration.map.fitAll"]
+            XCTAssertTrue(fitAll.waitForExistence(timeout: 5))
+            fitAll.tap()
+            let reset = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: fitAll)
+            XCTAssertEqual(XCTWaiter.wait(for: [reset], timeout: 5), .completed)
+            assertMap(app)
+        }
+        surface.swipeLeft()
+        XCTAssertTrue(app.buttons["lifeIllustration.map.fitAll"].waitForExistence(timeout: 5))
+        app.buttons["lifeIllustration.map.fitAll"].tap()
+        assertMap(app)
+        attach(app, name: "map_repeated_zoom_pinch_reset")
+    }
+
     func testRealGeneratedImagesInTimelineViewerAndSettings() throws {
         continueAfterFailure = false
         let app = launch(appearance: .light)

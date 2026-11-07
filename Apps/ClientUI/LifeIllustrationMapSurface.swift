@@ -4,8 +4,10 @@ import SwiftUI
 
 #if os(iOS)
 private typealias JourneyMapRepresentable = UIViewRepresentable
+private typealias JourneyNativeView = UIView
 #else
 private typealias JourneyMapRepresentable = NSViewRepresentable
+private typealias JourneyNativeView = NSView
 #endif
 
 struct LifeIllustrationMapSurface: JourneyMapRepresentable {
@@ -30,6 +32,7 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
         map.isRotateEnabled = false
         map.isPitchEnabled = false
         map.delegate = coordinator
+        map.cameraDidInteract = { [weak coordinator] in coordinator?.cameraDidInteract() }
         map.didLayout = { [weak coordinator, weak map] in
             guard let coordinator, let map else { return }
             coordinator.layout(map)
@@ -49,10 +52,27 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
 
     final class JourneyMapView: MKMapView {
         var didLayout: (() -> Void)?
+        var cameraDidInteract: (() -> Void)?
+        var hasActiveCameraGesture: Bool { Self.hasActiveGesture(in: self) }
+
+        private static func hasActiveGesture(in view: JourneyNativeView) -> Bool {
+            #if os(iOS)
+            let gestures = view.gestureRecognizers ?? []
+            #else
+            let gestures = view.gestureRecognizers
+            #endif
+            return gestures.contains { $0.state == .began || $0.state == .changed }
+                || view.subviews.contains { hasActiveGesture(in: $0) }
+        }
         #if os(iOS)
         override func layoutSubviews() { super.layoutSubviews(); didLayout?() }
         #else
         override func layout() { super.layout(); didLayout?() }
+        override func scrollWheel(with event: NSEvent) {
+            // AppKit wheel scrolling can move MapKit without an active gesture recognizer.
+            cameraDidInteract?()
+            super.scrollWheel(with: event)
+        }
         #endif
     }
 
@@ -61,10 +81,10 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
         private var signature = ""
         private var lastCommandID: Int?
         private var size = CGSize.zero
-        private var fittedRect = MKMapRect.null
         private var cameraCustomized = false
+        private var cameraMoving = false
+        private var calloutProjection = JourneyCalloutProjection()
         private var isUpdating = false
-        private var suppressCustomizationUntil: ContinuousClock.Instant = .now
         private var fitted: [String: [CLLocationCoordinate2D]] = [:]
         private var task: Task<Void, Never>?
         private var graceTask: Task<Void, Never>?
@@ -75,6 +95,8 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
         private var mapFailed = false
 
         init(parent: LifeIllustrationMapSurface) { self.parent = parent }
+
+        func cameraDidInteract() { cameraCustomized = true }
 
         func cancel() {
             task?.cancel()
@@ -94,6 +116,8 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
                 fitted = [:]
                 routesResolved = parent.legs.isEmpty
                 cameraCustomized = false
+                cameraMoving = false
+                calloutProjection = JourneyCalloutProjection()
                 size = .zero
                 layout(map)
                 if !parent.legs.isEmpty {
@@ -179,9 +203,7 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
             #else
             let padding = NSEnginePadding(top: 56, left: map.bounds.width * 0.22, bottom: 96, right: map.bounds.width * 0.22)
             #endif
-            suppressCustomizationUntil = .now + .milliseconds(animated ? 700 : 120)
             cameraCustomized = false
-            fittedRect = map.mapRectThatFits(rect, edgePadding: padding)
             map.setVisibleMapRect(rect, edgePadding: padding, animated: animated)
             project(map)
         }
@@ -190,6 +212,7 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
             guard map.bounds.width > 0, map.bounds.height > 0 else { return }
             if size != map.bounds.size {
                 size = map.bounds.size
+                calloutProjection = JourneyCalloutProjection()
                 if !cameraCustomized {
                     fitAll(map, animated: false)
                     return
@@ -204,16 +227,19 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
         }
         #endif
 
+        func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
+            cameraMoving = true
+            if (mapView as? JourneyMapView)?.hasActiveCameraGesture == true { cameraCustomized = true }
+            project(mapView)
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            cameraMoving = (mapView as? JourneyMapView)?.hasActiveCameraGesture == true
+            project(mapView)
+        }
+
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-            if ContinuousClock.now >= suppressCustomizationUntil, !fittedRect.isNull {
-                let current = mapView.visibleMapRect
-                let scaleRatio = current.size.width / max(1, fittedRect.size.width)
-                let dx = abs(current.midX - fittedRect.midX) / max(1, fittedRect.size.width)
-                let dy = abs(current.midY - fittedRect.midY) / max(1, fittedRect.size.height)
-                if scaleRatio < 0.84 || scaleRatio > 1.19 || dx > 0.14 || dy > 0.14 {
-                    cameraCustomized = true
-                }
-            }
+            if (mapView as? JourneyMapView)?.hasActiveCameraGesture == true { cameraCustomized = true }
             project(mapView)
         }
 
@@ -240,6 +266,8 @@ struct LifeIllustrationMapSurface: JourneyMapRepresentable {
             projection.mapLoaded = tilesLoaded && routesResolved
             projection.mapFailed = mapFailed
             projection.cameraCustomized = cameraCustomized
+            calloutProjection.update(pins: projection.pins, cameraCustomized: cameraCustomized, cameraMoving: cameraMoving)
+            projection.callouts = calloutProjection
             projectionTask?.cancel()
             if !isUpdating {
                 parent.project(projection)

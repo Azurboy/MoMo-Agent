@@ -509,14 +509,13 @@ class LifeIllustrations:
         now = time.time() if now is None else now
         self.reconcile(context)
         settings = self.db.execute('SELECT * FROM settings WHERE id=1').fetchone()
-        if not settings['enabled'] or settings['active_from'] is None:
+        if not settings['enabled']:
             return
         day_start_hour = read_day_start_hour(self.data)
         episodes, pending_ranges = self._episodes(context, day_start_hour)
         for episode in episodes:
             start, end = episode['window_start'], episode['window_end']
-            if start < settings['active_from']:
-                continue
+            # Enabling generation also resumes never-generated history; existing slots still prevent replay.
             # Admit a finished conversation after its quiet period, without waiting hours for a wall-clock batch.
             if episode['speech_end'] + SETTLE_SECONDS > now:
                 continue
@@ -629,7 +628,7 @@ class LifeIllustrations:
         if not generator.availability()['supported'] or not self.db.execute('SELECT enabled FROM settings WHERE id=1').fetchone()[0]:
             return False
         row, evidence = None, None
-        for candidate in self.db.execute("SELECT * FROM slots WHERE state='pending' AND retry_at<=? ORDER BY window_start", (now,)).fetchall():
+        for candidate in self.db.execute("SELECT * FROM slots WHERE state='pending' AND retry_at<=? ORDER BY window_start DESC", (now,)).fetchall():
             cand_evidence, _, _, pending = evidence_for(context, candidate['window_start'], candidate['window_end'])
             if not pending:
                 cand_evidence['visits'] = json.loads(candidate['evidence']).get('visits', [])

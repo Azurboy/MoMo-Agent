@@ -150,11 +150,24 @@ struct JourneyMapCommand: Equatable {
 
 struct JourneyProjection: Equatable {
     var pins: [String: CGPoint] = [:]
+    var callouts = JourneyCalloutProjection()
     var routes: [String: [CGPoint]] = [:]
     var fitted: Set<String> = []
     var mapLoaded = false
     var mapFailed = false
     var cameraCustomized = false
+}
+
+struct JourneyCalloutProjection: Equatable {
+    private(set) var pins: [String: CGPoint] = [:]
+    private(set) var cameraCustomized = false
+
+    mutating func update(pins: [String: CGPoint], cameraCustomized: Bool, cameraMoving: Bool) {
+        // Re-solving collision avoidance at every camera frame makes cards jump between valid arrangements.
+        guard !cameraMoving || self.pins.isEmpty else { return }
+        self.pins = pins
+        self.cameraCustomized = cameraCustomized
+    }
 }
 
 struct JourneyCallout: Identifiable {
