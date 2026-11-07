@@ -100,13 +100,32 @@ class IllustrationTests(unittest.TestCase):
         self.assertEqual(dt.datetime(2026, 10, 31, 23, tzinfo=zone).timestamp(), window['window_start'])
         self.assertEqual(dt.datetime(2026, 11, 1, 2, tzinfo=zone).timestamp(), window['window_end'])
 
-    def test_no_history_and_wait_ten_minutes_after_conversation(self):
+    def test_never_generated_history_resumes_without_waiting_for_new_recordings(self):
         old = copy.deepcopy(self.payload); old['session_id'] = str(uuid.uuid4())
         old['spans'][0]['recorded_at'] = self.start - 3600
         self.context.sync_source(old)
         self.queue.scan(self.context, self.start + 60 + min(60, len(TEXT) * 0.22) + 599)
-        self.assertIsNone(self.row())
-        self.scan(); self.assertEqual(1, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        self.assertEqual(1, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        self.assertEqual(self.start - 3600, self.row()['window_start'])
+        self.scan(); self.assertEqual(2, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+        self.queue.advance(self.generator, self.context)
+        self.assertEqual(self.start + 60, self.generator.prepared[0]['passages'][0]['spans'][0]['recorded_at'])
+
+    def test_historical_backfill_preserves_completed_deleted_and_unknown_attempts(self):
+        self.generate()
+        identity = self.row()['id']
+        for state in ['ready', 'invalid', 'deleted', 'needs_review']:
+            with self.subTest(state=state):
+                self.queue.db.execute('UPDATE slots SET state=? WHERE id=?', (state, identity))
+                self.scan(); self.queue.advance(self.generator, self.context)
+                self.assertEqual(state, self.row()['state'])
+                self.assertEqual(1, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
+                self.assertEqual(1, len(self.generator.generated))
+        self.queue.update_settings({'enabled': False}, READY)
+        old = copy.deepcopy(self.payload); old['session_id'] = str(uuid.uuid4())
+        old['spans'][0]['recorded_at'] = self.start - 86400
+        self.context.sync_source(old); self.scan()
+        self.assertEqual(1, self.queue.db.execute('SELECT COUNT(*) FROM slots').fetchone()[0])
 
     def test_pending_empty_source_defers_and_same_revision_can_clear_it(self):
         pending = copy.deepcopy(self.payload); pending['session_id'] = str(uuid.uuid4())
@@ -523,7 +542,7 @@ class IllustrationTests(unittest.TestCase):
             pass
         items = [item for item in queue.manifest()['items'] if not item['deleted']]
         self.assertEqual(10, len(items))
-        self.assertEqual([self.start + offset for offset in offsets], [item['window_start'] for item in items])
+        self.assertEqual([self.start + offset for offset in offsets], sorted(item['window_start'] for item in items))
 
     def test_conversation_crossing_batch_boundary_stays_uncut(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)

@@ -153,10 +153,11 @@ struct LifeIllustrationJourneyMapView: View {
         mapCommand = JourneyMapCommand(id: (mapCommand?.id ?? 0) + 1, action: action)
     }
 
-    private func visibleStops(in size: CGSize, pins: [String: CGPoint]) -> [IllustrationJourneyStop] {
+    private func visibleStops(in size: CGSize, callouts: JourneyCalloutProjection) -> [IllustrationJourneyStop] {
+        let pins = callouts.pins
         let viewport = CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24)
         let candidates: [IllustrationJourneyStop]
-        if projection.cameraCustomized, !pins.isEmpty {
+        if callouts.cameraCustomized, !pins.isEmpty {
             candidates = stops.filter { stop in
                 guard let pin = pins[stop.id] else { return false }
                 return viewport.contains(pin)
@@ -206,13 +207,18 @@ struct LifeIllustrationJourneyMapView: View {
         } else {
             let legs = IllustrationJourneyLeg.make(stops: stops, allItems: items)
             let pins = projection.pins
-            let visible = visibleStops(in: size, pins: pins)
-            let cards = JourneyCallout.layout(stops: visible, allStops: stops, pins: pins, size: size)
+            let visible = visibleStops(in: size, callouts: projection.callouts)
+            let cards = JourneyCallout.layout(stops: visible, allStops: stops, pins: projection.callouts.pins, size: size)
             let cardIDs = Set(cards.map(\.id))
             ZStack {
                 LifeIllustrationMapSurface(stops: stops, legs: legs, command: mapCommand) { value in
-                    if projection != value { projection = value }
+                    if projection != value {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { projection = value }
+                    }
                 }
+                .accessibilityIdentifier("lifeIllustration.map.surface")
                 .brightness(colorScheme == .dark ? 0.03 : 0)
                 JourneyInkLayer(allStops: stops, cards: cards, pins: pins, projection: projection, legs: legs, geographic: true)
                     .allowsHitTesting(false).accessibilityHidden(true)
