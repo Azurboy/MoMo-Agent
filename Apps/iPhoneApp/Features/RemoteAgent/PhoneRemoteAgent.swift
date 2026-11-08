@@ -47,6 +47,23 @@ final class PhoneRemoteAgent {
     @ObservationIgnored private var connectionReadyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathSignature: String?
+    @ObservationIgnored lazy var contextDelivery = PhoneContextDelivery(
+        needsDelivery: { [weak self] in
+            self?.context?.needsDelivery == true && self?.store?.canContactServer != false
+        }, deliver: { [weak self] in
+            guard let self, let context = self.context else { throw CancellationError() }
+            try await context.synchronize(includeMemories: false)
+        }, prepare: { [weak self] in
+            guard let self else { return }
+            if self.connection?.network == "tailscale" {
+                self.tailnet.prepareForForeground(peer: self.connection?.baseURL.host)
+            } else { self.network?.resume() }
+        }, suspend: { [weak self] in self?.suspendTransportIfIdle() },
+        cancel: { [weak self] in
+            guard let self, !self.active else { return }
+            self.context?.cancelSynchronization()
+        },
+        schedule: { PhoneContextDeliveryScheduler.schedule(pending: $0) })
     @ObservationIgnored private lazy var replyContinuation = PhoneReplyContinuation(
         pending: { [weak self] in
             self?.store.map { $0.hasActiveTask || $0.waitingForReply } ?? false
@@ -54,8 +71,7 @@ final class PhoneRemoteAgent {
         suspend: { [weak self] in
             self?.ancillaryStartupTask?.cancel(); self?.ancillaryStartupTask = nil
             self?.resumeConnectionReadyWaiters()
-            self?.context?.background(); self?.store?.background(); self?.network?.suspend()
-            self?.tailnet.suspendSessions()
+            self?.suspendTransportIfIdle()
         })
 
     init(directory: URL, archive: ArchiveStore, deviceID: UUID) throws {
@@ -131,12 +147,14 @@ final class PhoneRemoteAgent {
                 if let previousKey { try Self.writeKey(previousKey, id: proposed.instanceID) }
                 throw error
             }
+            contextDelivery.expire()
             store?.background(); context?.background(); health?.background(); sources?.background(); network?.suspend()
             connection = proposed; store = restored.tasks; context = restored.sync; health = restored.health; sources = restored.sources; network = restored.network; desktopClient = restored.desktop; failure = nil
             desktopClientID = UUID()
             notifications.start(); notifications.foreground()
             if active { network?.resume(); context?.foreground(); health?.foreground(); sources?.foreground(); restored.tasks.foreground(); lifeIllustrations.startPolling() }
             onSummariesChanged?()
+            sourcesChanged()
         } catch {
             failure = AgentTransportFailure.isTransient(error) ? String(localized: "暂时无法连接 Mac，请重试，无需重新扫码。") : error.localizedDescription
         }
@@ -242,8 +260,15 @@ final class PhoneRemoteAgent {
         context?.stopPolling(); health?.background(); sources?.background(); notifications.background()
         lifeIllustrations.stopPolling()
         replyContinuation.leavingForeground()
+        contextDelivery.request()
     }
     func background() { replyContinuation.background() }
+
+    private func suspendTransportIfIdle() {
+        guard !active, !replyContinuation.isActive, !contextDelivery.isActive else { return }
+        context?.background(); store?.background(); network?.suspend()
+        tailnet.suspendSessions()
+    }
 
     private func resumeConnectionReadyWaiters() {
         let waiters = connectionReadyWaiters
@@ -273,8 +298,13 @@ final class PhoneRemoteAgent {
         }
     }
     func sourcesChanged() {
-        guard active, store?.canContactServer != false, let context else { return }
-        PhoneConnectivityTask.run { await context.refresh() }
+        guard store?.canContactServer != false, let context else { return }
+        do { try context.markSourcesChanged() }
+        catch {
+            failure = String(localized: "同步进度暂时无法保存，录音原文仍保留在手机。")
+            return
+        }
+        contextDelivery.request()
     }
 
     private func startPathMonitor() {

@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).transcription.processing</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).context.delivery</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).transcription.continued.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>

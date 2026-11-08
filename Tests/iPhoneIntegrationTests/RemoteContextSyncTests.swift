@@ -7,6 +7,53 @@ import MoMoContracts
 
 @MainActor
 final class RemoteContextSyncTests: XCTestCase {
+    func testChangeDuringUploadRemainsPendingAfterTheEarlierReceipt() async throws {
+        let (sync, root, archive, connection) = try fixture()
+        _ = try await summaryWindow(archive: archive, root: root)
+        try sync.markSourcesChanged()
+        let received = expectation(description: "Mac received source, receipt still in flight")
+        MemoryResponse.state.holdNextSource(received)
+        defer { MemoryResponse.state.releaseSource() }
+        let upload = Task { try await sync.synchronize(includeMemories: false) }
+        await fulfillment(of: [received], timeout: 5)
+        try sync.markSourcesChanged()
+        MemoryResponse.state.releaseSource()
+        try await upload.value
+        XCTAssertTrue(sync.needsDelivery, "The earlier receipt cannot acknowledge a newer archive change")
+        let restored = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection,
+                                           key: "fixture", configuration: configuration())
+        XCTAssertTrue(restored.needsDelivery)
+        let acknowledged = MemoryResponse.state.syncedSourceIDs
+        try await restored.synchronize(includeMemories: false)
+        XCTAssertFalse(restored.needsDelivery)
+        XCTAssertEqual(MemoryResponse.state.syncedSourceIDs, acknowledged)
+    }
+
+    func testOfflineBackgroundOutboxSurvivesRestartAndAcknowledgedSourceIsNotReplayed() async throws {
+        let (sync, root, archive, connection) = try fixture()
+        _ = try await summaryWindow(archive: archive, root: root)
+        try sync.markSourcesChanged()
+        MemoryResponse.state.rejectSources = true
+        do {
+            try await sync.synchronize(includeMemories: false)
+            XCTFail("The offline source must remain pending")
+        } catch { }
+        XCTAssertTrue(sync.needsDelivery)
+        let restored = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection,
+                                           key: "fixture", configuration: configuration())
+        XCTAssertTrue(restored.needsDelivery)
+        MemoryResponse.state.rejectSources = false
+        try await restored.synchronize(includeMemories: false)
+        XCTAssertFalse(restored.needsDelivery)
+        XCTAssertTrue(restored.memories.isEmpty, "Background delivery does not refresh the memory UI")
+        let acknowledged = MemoryResponse.state.syncedSourceIDs
+        try await restored.synchronize(includeMemories: false)
+        XCTAssertEqual(MemoryResponse.state.syncedSourceIDs, acknowledged)
+        let reopened = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection,
+                                           key: "fixture", configuration: configuration())
+        XCTAssertFalse(reopened.needsDelivery)
+    }
+
     func testMemoryExcerptOnlyMovesRecognizedSourcePrefix() {
         let stamped = "10/29–30 录音 0fcdf941-b14c-4087-ad0e-a3eab9495fe2 v78 (归属/执行未核)：保留这段内容。"
         let preview = MemoryPreview(text: stamped)
@@ -165,8 +212,11 @@ private final class MemoryResponse: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let (code, body) = Self.state.receive(request)
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(body.utf8)); client?.urlProtocolDidFinishLoading(self)
+        let respond: @Sendable () -> Void = { [self] in
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8)); client?.urlProtocolDidFinishLoading(self)
+        }
+        if !Self.state.holdResponse(request, respond: respond) { respond() }
     }
     override func stopLoading() {}
 }
@@ -175,10 +225,31 @@ private final class MemoryResponses: @unchecked Sendable {
     private var workspace = UUID(), count = 0, synced: [String] = []
     private var summaryRevision: String?
     private var payloads: [SourceEnvelope] = []
+    private var rejected = false
+    private var waitingForSource: XCTestExpectation?
+    private var heldResponse: (@Sendable () -> Void)?
+    func holdNextSource(_ waiting: XCTestExpectation) { lock.withLock { waitingForSource = waiting } }
+    func holdResponse(_ request: URLRequest, respond: @escaping @Sendable () -> Void) -> Bool {
+        guard request.url?.path == "/v1/sources", request.httpMethod == "POST" else { return false }
+        return lock.withLock {
+            guard let waitingForSource else { return false }
+            self.waitingForSource = nil; heldResponse = respond
+            waitingForSource.fulfill()
+            return true
+        }
+    }
+    func releaseSource() {
+        let response = lock.withLock { let response = heldResponse; heldResponse = nil; return response }
+        response?()
+    }
+    var rejectSources: Bool {
+        get { lock.withLock { rejected } }
+        set { lock.withLock { rejected = newValue } }
+    }
     var requests: Int { lock.withLock { count } }
     var syncedSourceIDs: [String] { lock.withLock { synced } }
     var sourcePayloads: [SourceEnvelope] { lock.withLock { payloads } }
-    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; payloads = []; summaryRevision = nil } }
+    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; payloads = []; summaryRevision = nil; rejected = false } }
     func receive(_ request: URLRequest) -> (Int, String) {
         lock.withLock {
             count += 1
@@ -195,6 +266,7 @@ private final class MemoryResponses: @unchecked Sendable {
             if request.url?.path == "/v1/status" {
                 return (200, "{\"workspace_id\":\"\(workspace)\",\"source_sync\":true,\"memory_writer\":\"Hermes\"}")
             }
+            if request.url?.path == "/v1/sources", rejected { return (503, "{}") }
             if request.url?.path == "/v1/sources", request.httpMethod == "POST",
                let body = request.BodyData,
                let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],

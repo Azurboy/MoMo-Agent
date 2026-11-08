@@ -14,6 +14,7 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         bootstrap.background.register()
+        PhoneContextDeliveryScheduler.register(bootstrap: bootstrap)
         // WatchConnectivity can launch the process without creating a SwiftUI scene.
         bootstrap.launch()
         bootstrap.runtime?.remoteAgent.notifications.start()
