@@ -77,14 +77,14 @@ actor LifeIllustrationCache {
         guard LifeIllustration.isSHA256(sha256), Self.digest(data) == sha256 else { throw LifeIllustrationError.assetIntegrity }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(sha256 + ".png")
-        try data.write(to: url, options: .atomic)
+        try write(data, to: url)
         guard let stamp = fileStamp(url) else { throw LifeIllustrationError.assetIntegrity }
         verified[sha256] = stamp
         return url
     }
 
     func saveSettings(_ settings: LifeIllustrationSettings?) throws {
-        var snapshot = (try? load()) ?? Snapshot()
+        var snapshot = try load()
         guard snapshot.lastVerifiedSettings != settings || snapshot.verifiedStamps != verified else { return }
         snapshot.lastVerifiedSettings = settings
         snapshot.verifiedStamps = verified
@@ -136,7 +136,15 @@ actor LifeIllustrationCache {
 
     private func writeManifest(_ snapshot: Snapshot) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(snapshot).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+        try write(JSONEncoder().encode(snapshot), to: directory.appendingPathComponent("manifest.json"))
+    }
+
+    private func write(_ data: Data, to url: URL) throws {
+        #if os(iOS)
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        #else
+        try data.write(to: url, options: .atomic)
+        #endif
     }
 
     private func fileStamp(_ url: URL) -> FileStamp? {

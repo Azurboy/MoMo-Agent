@@ -110,7 +110,8 @@ import UIKit
         systemCompletions = [:]
         schedule(needsDelivery())
         suspend()
-        for completion in completions { completion(success && !needsDelivery()) }
+        // A successful pass may schedule future Mac results; that is not a failed OS task.
+        for completion in completions { completion(success) }
     }
 }
 
@@ -133,22 +134,29 @@ import UIKit
         if !registered { logger.error("Background context delivery registration failed") }
     }
 
-    static func schedule(pending: Bool) {
+    static func schedule(pending: Bool, minimumDelay: TimeInterval = 5 * 60) {
         scheduleRevision += 1
         let revision = scheduleRevision
         guard pending else {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
             return
         }
+        let identifier = Self.identifier
+        let earliest = Date().addingTimeInterval(minimumDelay)
         BGTaskScheduler.shared.getPendingTaskRequests { requests in
-            let pendingIdentifiers = requests.map(\.identifier)
+            let existing = requests.first { $0.identifier == identifier }
+            let hasExisting = existing != nil
+            let existingDate = existing?.earliestBeginDate
             Task { @MainActor in
                 guard revision == scheduleRevision else { return }
                 // Continuous recording must not keep pushing an existing retry farther into the future.
-                guard !pendingIdentifiers.contains(identifier) else { return }
+                if hasExisting {
+                    guard let existingDate, existingDate > earliest else { return }
+                    BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+                }
                 let request = BGProcessingTaskRequest(identifier: identifier)
                 request.requiresNetworkConnectivity = true
-                request.earliestBeginDate = Date().addingTimeInterval(5 * 60)
+                request.earliestBeginDate = earliest
                 do { try BGTaskScheduler.shared.submit(request) }
                 catch { logger.error("Background context delivery scheduling failed: \(String(describing: type(of: error)), privacy: .public)") }
             }

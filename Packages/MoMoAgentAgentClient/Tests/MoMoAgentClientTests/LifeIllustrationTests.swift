@@ -3,6 +3,108 @@ import XCTest
 @testable import MoMoAgentClient
 
 final class LifeIllustrationTests: XCTestCase, @unchecked Sendable {
+    func testSettingsRefreshNeverReplacesUnreadableManifestOrDeletesItsSavedImage() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = LifeIllustrationCache(directory: directory)
+        let bytes = Data("previously saved original".utf8)
+        let saved = try await cache.saveAsset(bytes, sha256: LifeIllustrationCache.digest(bytes))
+        let unreadable = Data("preserve this unreadable manifest".utf8)
+        let manifest = directory.appendingPathComponent("manifest.json")
+        try unreadable.write(to: manifest)
+        do { try await cache.saveSettings(LifeIllustrationSettings()); XCTFail("An unreadable index is not an empty library") }
+        catch { }
+        XCTAssertEqual(try Data(contentsOf: manifest), unreadable)
+        XCTAssertEqual(try Data(contentsOf: saved), bytes)
+    }
+
+    @MainActor func testSettingsMutationCannotAcknowledgeInterruptedBackgroundImages() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let route = IllustrationTransport()
+        let gate = AsyncStream<Void>.makeStream()
+        let started = expectation(description: "Background download started")
+        await route.holdAsset(number: 1, stream: gate.stream) { started.fulfill() }
+        let store = try makeStore(directory, route: route)
+        let sync = Task { try await store.synchronize() }
+        await fulfillment(of: [started], timeout: 5)
+        try await store.updateSettings(enabled: false, intervalHours: 3)
+        do { try await sync.value; XCTFail("A newer settings response does not acknowledge interrupted files") }
+        catch { XCTAssertTrue(AgentTransportFailure.isCancelled(error)) }
+        gate.continuation.finish()
+        try await store.synchronize()
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertNotNil(store.imageURL(for: store.items[0], thumbnail: false))
+    }
+
+    @MainActor func testLeavingForegroundDoesNotCancelBackgroundImageCommitAndBothFilesSurviveOfflineRelaunch() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let route = IllustrationTransport()
+        let gate = AsyncStream<Void>.makeStream()
+        let started = expectation(description: "Original or thumbnail download started")
+        await route.holdAsset(number: 1, stream: gate.stream) { started.fulfill() }
+        let store = try makeStore(directory, route: route)
+        let sync = Task { try await store.synchronize() }
+        await fulfillment(of: [started], timeout: 5)
+        store.stopPolling()
+        gate.continuation.finish()
+        try await sync.value
+        let item = try XCTUnwrap(store.items.first)
+        let original = try XCTUnwrap(store.imageURL(for: item, thumbnail: false))
+        let thumbnail = try XCTUnwrap(store.imageURL(for: item))
+        XCTAssertEqual(LifeIllustrationCache.digest(try Data(contentsOf: original)), item.assetSha256)
+        XCTAssertEqual(LifeIllustrationCache.digest(try Data(contentsOf: thumbnail)), item.thumbnailSha256)
+        await route.setOffline(true)
+        let restored = try makeStore(directory, route: route)
+        await restored.waitForCacheHydration()
+        XCTAssertEqual(restored.items, [item])
+        XCTAssertNotNil(restored.imageURL(for: item, thumbnail: false))
+        XCTAssertNotNil(restored.imageURL(for: item))
+        let requests = await route.requests
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" }, "Downloading an existing artifact never requests generation")
+    }
+
+    @MainActor func testExpiredBackgroundDownloadKeepsCursorAndRetriesOnlyMissingFile() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let route = IllustrationTransport()
+        let gate = AsyncStream<Void>.makeStream()
+        let started = expectation(description: "One file saved; second download in flight")
+        await route.holdAsset(number: 2, stream: gate.stream) { started.fulfill() }
+        let store = try makeStore(directory, route: route)
+        let sync = Task { try await store.synchronize() }
+        await fulfillment(of: [started], timeout: 5)
+        store.cancelSynchronization()
+        do { try await sync.value; XCTFail("An expired transfer must not acknowledge a complete image") }
+        catch { XCTAssertTrue(AgentTransportFailure.isCancelled(error)) }
+        XCTAssertTrue(store.items.isEmpty)
+        gate.continuation.finish()
+        try await store.synchronize()
+        let requests = await route.assetRequests
+        let cursors = await route.cursors
+        XCTAssertEqual(requests, 3, "Reuse the verified file saved before suspension")
+        XCTAssertEqual(cursors, ["0", "0"])
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertNotNil(store.imageURL(for: store.items[0], thumbnail: false))
+        XCTAssertNotNil(store.imageURL(for: store.items[0]))
+    }
+
+    @MainActor func testBackgroundAuthenticationFailureIsReportedWithoutRemovingSavedImages() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let route = IllustrationTransport()
+        let store = try makeStore(directory, route: route)
+        try await store.synchronize()
+        let saved = try XCTUnwrap(store.items.first)
+        await route.setUnauthorized(true)
+        do { try await store.synchronize(); XCTFail("The background owner must see the authentication failure") }
+        catch AgentClientError.http(let status, _, _, _) { XCTAssertEqual(status, 401) }
+        XCTAssertEqual(store.items, [saved])
+        XCTAssertNotNil(store.imageURL(for: saved, thumbnail: false))
+        XCTAssertNotNil(store.imageURL(for: saved))
+    }
+
     func testJourneyDecodingValidationAndLegacyCache() throws {
         var payload: [String: Any] = ["id": "test", "window_start": 100, "window_end": 200,
             "logical_day": "2026-11-05", "timezone": "Asia/Shanghai", "place": "工作室",
@@ -256,6 +358,10 @@ private actor IllustrationTransport: AgentTransport {
     var deletedHistory = false
     var offline = false
     var unauthorized = false
+    private var assetBarrier: (number: Int, stream: AsyncStream<Void>, started: @Sendable () -> Void)?
+    func holdAsset(number: Int, stream: AsyncStream<Void>, started: @escaping @Sendable () -> Void) {
+        assetBarrier = (number, stream, started)
+    }
 
     init() {
         var settings = LifeIllustrationSettings()
@@ -314,6 +420,12 @@ private actor IllustrationTransport: AgentTransport {
             data = try encode(LifeIllustrationTombstone(id: "illustration-1", deleted: true, updatedAt: 200))
         default:
             assetRequests += 1
+            if let barrier = assetBarrier, barrier.number == assetRequests {
+                assetBarrier = nil
+                barrier.started()
+                for await _ in barrier.stream { break }
+                try Task.checkCancellation()
+            }
             data = corruptAssets ? Data("wrong bytes".utf8) : url.lastPathComponent == LifeIllustrationCache.digest(original) ? original : thumbnail
         }
         return AgentByteStream(status: 200, contentType: "application/json", chunks: AsyncThrowingStream { continuation in
