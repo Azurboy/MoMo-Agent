@@ -49,10 +49,20 @@ final class PhoneRemoteAgent {
     @ObservationIgnored private var lastPathSignature: String?
     @ObservationIgnored lazy var contextDelivery = PhoneContextDelivery(
         needsDelivery: { [weak self] in
-            self?.context?.needsDelivery == true && self?.store?.canContactServer != false
+            guard let self, self.store?.canContactServer != false else { return false }
+            return self.context?.needsDelivery == true || self.context?.needsIllustrationRefresh == true
         }, deliver: { [weak self] in
             guard let self, let context = self.context else { throw CancellationError() }
-            try await context.synchronize(includeMemories: false)
+            if context.needsDelivery { try await context.synchronize(includeMemories: false) }
+            let sourceRevision = context.sourceChangeRevision
+            do {
+                try context.requestIllustrationRefresh()
+                try await self.lifeIllustrations.synchronize()
+                try context.didRefreshIllustrations(enabled: self.lifeIllustrations.settings.enabled, sourceRevision: sourceRevision)
+            } catch {
+                if case AgentClientError.http(401, _, _, _) = error { self.store?.recordConnectionFailure(error) }
+                throw error
+            }
         }, prepare: { [weak self] in
             guard let self else { return }
             if self.connection?.network == "tailscale" {
@@ -62,8 +72,15 @@ final class PhoneRemoteAgent {
         cancel: { [weak self] in
             guard let self, !self.active else { return }
             self.context?.cancelSynchronization()
+            self.lifeIllustrations.cancelSynchronization()
         },
-        schedule: { PhoneContextDeliveryScheduler.schedule(pending: $0) })
+        schedule: { [weak self] pending in
+            guard let self else { return }
+            let urgent = self.context?.needsDelivery == true || self.lifeIllustrations.error != nil
+                || self.context?.hasUnfinishedIllustrationDownload == true
+                || self.lifeIllustrations.settings.pendingCount > 0
+            PhoneContextDeliveryScheduler.schedule(pending: pending, minimumDelay: urgent ? 5 * 60 : 15 * 60)
+        })
     @ObservationIgnored private lazy var replyContinuation = PhoneReplyContinuation(
         pending: { [weak self] in
             self?.store.map { $0.hasActiveTask || $0.waitingForReply } ?? false
@@ -260,6 +277,10 @@ final class PhoneRemoteAgent {
         context?.stopPolling(); health?.background(); sources?.background(); notifications.background()
         lifeIllustrations.stopPolling()
         replyContinuation.leavingForeground()
+        if lifeIllustrations.settings.enabled || lifeIllustrations.isRefreshing {
+            do { try context?.requestIllustrationRefresh() }
+            catch { failure = String(localized: "同步进度暂时无法保存，已有图片仍保留在手机。") }
+        }
         contextDelivery.request()
     }
     func background() { replyContinuation.background() }
@@ -267,6 +288,7 @@ final class PhoneRemoteAgent {
     private func suspendTransportIfIdle() {
         guard !active, !replyContinuation.isActive, !contextDelivery.isActive else { return }
         context?.background(); store?.background(); network?.suspend()
+        lifeIllustrations.cancelSynchronization()
         tailnet.suspendSessions()
     }
 

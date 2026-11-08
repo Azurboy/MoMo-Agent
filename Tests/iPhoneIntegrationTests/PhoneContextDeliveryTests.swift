@@ -3,6 +3,22 @@ import XCTest
 @testable import MoMoAgent
 
 @MainActor final class PhoneContextDeliveryTests: XCTestCase {
+    func testSuccessfulPassCanKeepFutureStickerChecksScheduledWithoutSpinningOrReportingFailure() async {
+        let completed = expectation(description: "This background pass completed")
+        var calls = 0, scheduled: [Bool] = []
+        let delivery = PhoneContextDelivery(needsDelivery: { true }, deliver: { calls += 1 },
+            prepare: {}, suspend: {}, cancel: {}, schedule: { scheduled.append($0) },
+            begin: { _ in XCTFail("System supplied execution time"); return .invalid }, end: { _ in XCTFail() })
+        delivery.requestWithSystemGrant(id: UUID()) { success in
+            XCTAssertTrue(success, "Waiting for a future Mac result is not a failed OS task")
+            completed.fulfill()
+        }
+        await fulfillment(of: [completed], timeout: 5)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(scheduled, [true, true])
+        XCTAssertFalse(delivery.isActive)
+    }
+
     func testSystemWakeUsesItsOwnGrantAndCompletesExactlyOnce() async {
         let completed = expectation(description: "System task completed")
         var dirty = true, completions: [Bool] = []

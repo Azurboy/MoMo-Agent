@@ -20,6 +20,9 @@ final class PhoneContextSync {
         pendingSources > 0 || (state.sourceChangeRevision ?? 0) != (state.deliveredChangeRevision ?? 0)
     }
     var lastSourcesSent: Date? { state.lastSourcesSent }
+    var sourceChangeRevision: Int64 { state.sourceChangeRevision ?? 0 }
+    var needsIllustrationRefresh: Bool { state.illustrationRefreshPending == true }
+    var hasUnfinishedIllustrationDownload: Bool { state.illustrationDownloadIncomplete == true }
     var hasLegacyChanges: Bool { !state.forget.isEmpty }
     @ObservationIgnored var onAuthenticationRequired: ((Error) -> Void)?
     @ObservationIgnored private var authenticationRequired = false
@@ -54,6 +57,8 @@ final class PhoneContextSync {
         var lastSourcesSent: Date?
         var sourceChangeRevision: Int64?
         var deliveredChangeRevision: Int64?
+        var illustrationRefreshPending: Bool?
+        var illustrationDownloadIncomplete: Bool?
         var memoryBackend: String?
     }
     init(directory: URL, archive: ArchiveStore, deviceID: UUID, connection: AgentConnection, key: String, configuration: URLSessionConfiguration = .ephemeral, transport: (any AgentTransport)? = nil) throws {
@@ -98,6 +103,20 @@ final class PhoneContextSync {
     func markSourcesChanged() throws {
         var updated = state
         updated.sourceChangeRevision = (updated.sourceChangeRevision ?? 0) + 1
+        updated.illustrationRefreshPending = true
+        updated.illustrationDownloadIncomplete = true
+        try commit(updated)
+    }
+    func requestIllustrationRefresh() throws {
+        var updated = state; updated.illustrationRefreshPending = true
+        updated.illustrationDownloadIncomplete = true
+        try commit(updated)
+    }
+    func didRefreshIllustrations(enabled: Bool, sourceRevision: Int64) throws {
+        var updated = state
+        // Keep observing future Mac results while generation is enabled, including work not admitted yet.
+        updated.illustrationRefreshPending = enabled || sourceRevision != sourceChangeRevision
+        updated.illustrationDownloadIncomplete = sourceRevision != sourceChangeRevision
         try commit(updated)
     }
     func cancelSynchronization() { inFlight?.cancel() }

@@ -21,6 +21,7 @@ public final class LifeIllustrationStore {
     @ObservationIgnored private var polling: Task<Void, Never>?
     @ObservationIgnored private var refreshedAt = Date.distantPast
     @ObservationIgnored private var mutating = false
+    @ObservationIgnored private var synchronizationFailure: Error?
 
     public init(directory: URL) { self.directory = directory }
 
@@ -35,6 +36,7 @@ public final class LifeIllustrationStore {
         self.cache = cache
         settings = LifeIllustrationSettings(); hasLoadedSettings = false; cachedItems = []; assetURLs = [:]
         refreshedAt = .distantPast; error = nil; isRefreshing = false
+        synchronizationFailure = nil
         let currentRevision = revision
         hydrateTask = Task { [weak self] in
             await self?.hydrateCachedIllustrations(cache: cache, revision: currentRevision)
@@ -81,7 +83,18 @@ public final class LifeIllustrationStore {
 
     public func stopPolling() {
         polling?.cancel(); polling = nil
-        refreshTask?.cancel()
+    }
+
+    public func cancelSynchronization() { refreshTask?.cancel() }
+
+    /// Background owners need a confirmed disk commit, rather than a UI refresh that reports errors in state.
+    public func synchronize() async throws {
+        guard !mutating, isConfigured else { throw LifeIllustrationError.unavailable }
+        let owner = revision
+        await refresh()
+        try checkCurrent(owner)
+        if let synchronizationFailure { throw synchronizationFailure }
+        guard hasLoadedSettings, !mutating else { throw LifeIllustrationError.unavailable }
     }
 
     public func invalidateSupport() {
@@ -106,6 +119,7 @@ public final class LifeIllustrationStore {
         guard !mutating, let client, let cache, Date().timeIntervalSince(refreshedAt) >= minimumInterval else { return }
         let revision = revision
         isRefreshing = true
+        synchronizationFailure = nil
         let task = Task { [weak self] in
             guard let self else { return }
             defer { if self.revision == revision { self.isRefreshing = false; self.refreshTask = nil } }
@@ -232,7 +246,9 @@ public final class LifeIllustrationStore {
                 publish(snapshot)
                 error = nil
             } catch {
-                guard self.revision == revision, !AgentTransportFailure.isCancelled(error) else { return }
+                guard self.revision == revision else { return }
+                self.synchronizationFailure = error
+                guard !AgentTransportFailure.isCancelled(error) else { return }
                 self.error = error.localizedDescription
                 // Pairing/authentication failures block network sync, but do not revoke the phone's saved artifacts.
                 if case AgentClientError.http(let status, _, _, _) = error, [401, 403, 404].contains(status) {

@@ -7,6 +7,30 @@ import MoMoContracts
 
 @MainActor
 final class RemoteContextSyncTests: XCTestCase {
+    func testStickerObservationSurvivesSourceReceiptAndRestartUntilExplicitlyDisabled() async throws {
+        let (sync, root, archive, connection) = try fixture()
+        try sync.markSourcesChanged()
+        let firstRevision = sync.sourceChangeRevision
+        try await sync.synchronize(includeMemories: false)
+        XCTAssertFalse(sync.needsDelivery)
+        XCTAssertTrue(sync.needsIllustrationRefresh, "Source acceptance happens before the Mac finishes generating")
+        let restored = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection,
+                                           key: "fixture", configuration: configuration())
+        XCTAssertTrue(restored.needsIllustrationRefresh)
+        XCTAssertTrue(restored.hasUnfinishedIllustrationDownload)
+        try restored.didRefreshIllustrations(enabled: true, sourceRevision: firstRevision)
+        XCTAssertTrue(restored.needsIllustrationRefresh, "An empty queue can still be in its conversation quiet period")
+        XCTAssertFalse(restored.hasUnfinishedIllustrationDownload)
+        try restored.markSourcesChanged()
+        try restored.didRefreshIllustrations(enabled: false, sourceRevision: firstRevision)
+        XCTAssertTrue(restored.needsIllustrationRefresh, "An old refresh cannot retire a newer change")
+        try restored.didRefreshIllustrations(enabled: false, sourceRevision: restored.sourceChangeRevision)
+        XCTAssertFalse(restored.needsIllustrationRefresh)
+        let reopened = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection,
+                                           key: "fixture", configuration: configuration())
+        XCTAssertFalse(reopened.needsIllustrationRefresh)
+    }
+
     func testChangeDuringUploadRemainsPendingAfterTheEarlierReceipt() async throws {
         let (sync, root, archive, connection) = try fixture()
         _ = try await summaryWindow(archive: archive, root: root)
