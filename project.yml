@@ -215,6 +215,7 @@ targets:
         UIBackgroundModes: [audio, processing]
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).transcription.processing
+          - $(PRODUCT_BUNDLE_IDENTIFIER).context.delivery
           - $(PRODUCT_BUNDLE_IDENTIFIER).transcription.continued.*
     dependencies:
       - sdk: EventKit.framework

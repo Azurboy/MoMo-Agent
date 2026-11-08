@@ -16,6 +16,9 @@ final class PhoneContextSync {
     private(set) var memoryPending = 0
     private(set) var memoryNeedsReview = 0
     var pendingSources: Int { state.sources.values.filter { $0.receipt == nil }.count }
+    var needsDelivery: Bool {
+        pendingSources > 0 || (state.sourceChangeRevision ?? 0) != (state.deliveredChangeRevision ?? 0)
+    }
     var lastSourcesSent: Date? { state.lastSourcesSent }
     var hasLegacyChanges: Bool { !state.forget.isEmpty }
     @ObservationIgnored var onAuthenticationRequired: ((Error) -> Void)?
@@ -27,6 +30,7 @@ final class PhoneContextSync {
     @ObservationIgnored private var state: State
     @ObservationIgnored private var inFlight: Task<Void, Error>?
     @ObservationIgnored private var syncRequested = false
+    @ObservationIgnored private var memoriesRequested = false
     @ObservationIgnored private var polling: Task<Void, Never>?
 
     private struct Source: Codable {
@@ -48,6 +52,8 @@ final class PhoneContextSync {
         var memories: [ContextMemory] = []
         var lastSynced: Date?
         var lastSourcesSent: Date?
+        var sourceChangeRevision: Int64?
+        var deliveredChangeRevision: Int64?
         var memoryBackend: String?
     }
     init(directory: URL, archive: ArchiveStore, deviceID: UUID, connection: AgentConnection, key: String, configuration: URLSessionConfiguration = .ephemeral, transport: (any AgentTransport)? = nil) throws {
@@ -89,15 +95,25 @@ final class PhoneContextSync {
         do { try await synchronize() }
         catch { if AgentTransportFailure.isCancelled(error) { return } }
     }
-    func synchronize() async throws {
+    func markSourcesChanged() throws {
+        var updated = state
+        updated.sourceChangeRevision = (updated.sourceChangeRevision ?? 0) + 1
+        try commit(updated)
+    }
+    func cancelSynchronization() { inFlight?.cancel() }
+
+    func synchronize(includeMemories: Bool = true) async throws {
         guard !authenticationRequired else { throw CancellationError() }
         syncRequested = true
+        memoriesRequested = memoriesRequested || includeMemories
         if let inFlight { return try await inFlight.value }
         isSyncing = true
         let task = Task {
             repeat {
                 syncRequested = false
-                try await synchronizeArchive()
+                let includeMemories = memoriesRequested
+                memoriesRequested = false
+                try await synchronizeArchive(includeMemories: includeMemories)
             } while syncRequested && !Task.isCancelled
         }
         inFlight = task
@@ -197,7 +213,7 @@ final class PhoneContextSync {
             updated.sources[source.envelope.sessionId]?.receipt = receipt; try commit(updated)
         }
     }
-    private func synchronizeArchive() async throws {
+    private func synchronizeArchive(includeMemories: Bool) async throws {
         let status = try await client.contextStatus()
         guard status.workspaceId == state.connection.workspaceID, status.sourceSync,
               ["Hermes", "SuperAgent"].contains(status.memoryWriter) else { throw SyncError.identity }
@@ -206,10 +222,11 @@ final class PhoneContextSync {
         do { try await uploadSources() }
         catch is CancellationError { throw CancellationError() }
         catch { uploadError = error }
-        try await downloadMemories()
+        if includeMemories { try await downloadMemories() }
         if let uploadError { throw uploadError }
     }
     private func uploadSources() async throws {
+        let changeRevision = state.sourceChangeRevision
         var cursor: String?
         var firstError: Error?
         var hadDeferredProjection = false
@@ -252,7 +269,10 @@ final class PhoneContextSync {
         }
         if let firstError { throw firstError }
         if !hadDeferredProjection {
-            var updated = state; updated.lastSourcesSent = Date(); try commit(updated)
+            var updated = state
+            updated.lastSourcesSent = Date()
+            updated.deliveredChangeRevision = changeRevision
+            try commit(updated)
         }
     }
     private func downloadMemories() async throws {

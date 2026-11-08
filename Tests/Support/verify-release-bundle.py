@@ -212,10 +212,11 @@ def audit(app, pinned_models=PINNED_MODELS, version_config=VERSION_CONFIG, varia
                         ["audio", "processing"], ["processing", "audio"])
                     identifiers = info.get("BGTaskSchedulerPermittedIdentifiers")
                     checks["background_identifiers_declared"] = (
-                        isinstance(identifiers, list) and len(identifiers) == 2
+                        isinstance(identifiers, list) and len(identifiers) == 3
                         and all(isinstance(value, str) for value in identifiers)
                         and set(identifiers) == {
                             phone_id + ".transcription.processing",
+                            phone_id + ".context.delivery",
                             phone_id + ".transcription.continued.*"})
                 elif role == "watch":
                     checks["watch_audio_background_declared"] = info.get("UIBackgroundModes") == ["audio"]
