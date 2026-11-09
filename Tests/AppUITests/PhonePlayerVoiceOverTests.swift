@@ -36,7 +36,7 @@ final class PhonePlayerVoiceOverTests: XCTestCase {
         isolation.lifetime = .keepAlways
         add(isolation)
 
-        let library = app.buttons["assistant.library"]
+        let library = app.tabBars.buttons["转录"]
         wait("Library entry") { library.exists && library.isHittable }
         library.tap()
         let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window.")).firstMatch

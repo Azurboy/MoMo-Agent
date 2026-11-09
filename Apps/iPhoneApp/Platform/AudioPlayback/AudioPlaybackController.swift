@@ -16,6 +16,8 @@ final class AudioPlaybackController {
     private(set) var activeTarget: AudioPlaybackTarget?
     private(set) var playbackState: AudioPlaybackState?
     private(set) var failure: String?
+    // Seeking pauses the native player temporarily without changing the user's playback intent.
+    private(set) var playbackRequested = false
     var playingSpanID: UUID? { playbackState == .playing ? activeTarget?.source?.spanID : nil }
     var playingRecordingID: UUID? {
         guard playbackState == .playing, case .recording(let id, _) = activeTarget else { return nil }
@@ -165,7 +167,7 @@ final class AudioPlaybackController {
 
     func toggle(_ target: AudioPlaybackTarget) async throws {
         if snapshot?.target == target {
-            if snapshot?.state == .playing { await pause() }
+            if playbackRequested { await pause() }
             else { try await resume() }
         } else { try await play(target) }
     }
@@ -206,10 +208,11 @@ final class AudioPlaybackController {
         return preview
     }
 
-    func play(_ target: AudioPlaybackTarget, from requestedPosition: TimeInterval? = nil) async throws {
+    func play(_ target: AudioPlaybackTarget, from requestedPosition: TimeInterval? = nil, startPaused: Bool = false) async throws {
         suspendWaveformPreparation()
         generation &+= 1
         let attempt = generation
+        playbackRequested = !startPaused
         snapshot = nil
         timeline = nil
         failure = nil
@@ -226,8 +229,12 @@ final class AudioPlaybackController {
             let position: TimeInterval
             if let requestedPosition {
                 // A mark must start at its exact sample, never at the beginning or after a missing interval.
-                guard requestedPosition.isFinite, let located = value.index(at: requestedPosition) else { throw PlaybackError.unavailable }
-                index = located
+                guard requestedPosition.isFinite else { throw PlaybackError.unavailable }
+                if let located = value.index(at: requestedPosition) { index = located }
+                else if startPaused, let duration = value.duration, requestedPosition == duration,
+                        let last = value.segments.indices.last,
+                        value.segments[last].part.audioAvailable, value.segments[last].end == duration { index = last }
+                else { throw PlaybackError.unavailable }
                 position = requestedPosition
             } else {
                 guard let first = value.segments.firstIndex(where: { $0.part.audioAvailable }) else { throw PlaybackError.unavailable }
@@ -237,7 +244,8 @@ final class AudioPlaybackController {
             // The logical starting point may follow a missing prefix. A system pause during
             // preparation must remain resumable there, rather than being stranded inside that gap.
             snapshot?.position = position
-            try await start(index: index, position: position, attempt: attempt)
+            if startPaused { try await positionSilently(index: index, position: position, attempt: attempt) }
+            else { try await start(index: index, position: position, attempt: attempt) }
             try require(attempt)
             startWaveform(value, target: target)
         } catch {
@@ -247,20 +255,23 @@ final class AudioPlaybackController {
     }
 
     func pause() async {
-        guard let current = snapshot, current.state == .playing || current.state == .loading else { return }
+        playbackRequested = false
         generation &+= 1
         let operation = generation
+        guard let current = snapshot,
+              current.state == .playing || current.state == .loading || current.state == .paused else { return }
         await pauseNative(operation: operation, wasPlaying: current.state == .playing)
     }
 
     func resume() async throws {
         suspendWaveformPreparation()
         guard let current = snapshot, let timeline else { throw PlaybackError.unavailable }
-        if current.state == .playing { return }
+        if current.state == .playing, playbackRequested { return }
         generation &+= 1
         let attempt = generation
         let requested = current.state == .ended ? timeline.segments.first(where: { $0.part.audioAvailable })?.start : current.position
         guard let requested, let index = timeline.index(at: requested) else { throw PlaybackError.unavailable }
+        playbackRequested = true
         snapshot?.state = .loading
         failure = nil
         await clearNative()
@@ -271,6 +282,11 @@ final class AudioPlaybackController {
             await handleFailure(error, attempt: attempt)
             throw error
         }
+    }
+
+    func seek(to position: Double, in target: AudioPlaybackTarget) async throws {
+        if snapshot?.target == target { try await seek(to: position) }
+        else { try await play(target, from: position, startPaused: true) }
     }
 
     func seek(to position: Double) async throws {
@@ -287,7 +303,7 @@ final class AudioPlaybackController {
         }
         generation &+= 1
         let attempt = generation
-        let wasPlaying = current.state == .playing
+        let wasPlaying = playbackRequested
         await pauseNative(operation: attempt, wasPlaying: wasPlaying)
         try require(attempt)
         let previousPosition = snapshot?.position ?? current.position
@@ -298,19 +314,14 @@ final class AudioPlaybackController {
             if position == duration {
                 snapshot?.position = duration
                 snapshot?.state = .ended
+                playbackRequested = false
             } else if let index = timeline.index(at: position) {
                 if wasPlaying {
                     snapshot?.state = .loading
                     try await start(index: index, position: position, attempt: attempt)
                 } else {
                     // Silent seek still checks the real file. It does not create/activate a native player.
-                    let part = try await acquirePartWithSpeakerRefresh(index: index)
-                    do { try await audioSession.validate(part) }
-                    catch { await release(part); throw error }
-                    await release(part)
-                    try require(attempt)
-                    snapshot?.position = position
-                    snapshot?.state = .paused
+                    try await positionSilently(index: index, position: position, attempt: attempt)
                 }
             }
             failure = nil
@@ -326,6 +337,7 @@ final class AudioPlaybackController {
     }
 
     func stop(deactivateImmediately: Bool) async {
+        playbackRequested = false
         generation &+= 1
         let operation = generation
         snapshot = nil
@@ -349,9 +361,19 @@ final class AudioPlaybackController {
     }
 
     private func pauseForInterruption() async {
-        guard snapshot?.state == .playing || snapshot?.state == .loading else { return }
+        guard playbackRequested || snapshot?.state == .loading else { return }
         await pause()
         if snapshot?.state == .paused { failure = String(localized: "回听已被系统打断。确认播放设备后，点播放继续。") }
+    }
+
+    private func positionSilently(index: Int, position: Double, attempt: UInt64) async throws {
+        let part = try await acquirePartWithSpeakerRefresh(index: index)
+        do { try await audioSession.validate(part) }
+        catch { await release(part); throw error }
+        await release(part)
+        try require(attempt)
+        snapshot?.position = position
+        snapshot?.state = position == timeline?.duration ? .ended : .paused
     }
 
     private func pauseNative(operation: UInt64, wasPlaying: Bool) async {
@@ -479,6 +501,7 @@ final class AudioPlaybackController {
                         // A missing tail is visible on the frozen ruler, but was never played.
                         snapshot?.position = segment.end
                         snapshot?.state = .ended
+                        playbackRequested = false
                         await clearNative(cancelObservation: false)
                         return
                     }
@@ -491,6 +514,7 @@ final class AudioPlaybackController {
                 if !progress.isPlaying && !progress.awaitingCompletion {
                     // An unannounced OS stop is resumable, never interpreted as successful completion.
                     snapshot?.state = .paused
+                    playbackRequested = false
                     await clearNative(cancelObservation: false)
                     return
                 }
@@ -561,6 +585,7 @@ final class AudioPlaybackController {
 
     private func handleFailure(_ error: Error, attempt: UInt64) async {
         guard generation == attempt else { return }
+        playbackRequested = false
         snapshot?.state = .failed
         waveformTask?.cancel()
         waveformGeneration = UUID()

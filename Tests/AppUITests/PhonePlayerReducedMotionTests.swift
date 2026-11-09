@@ -45,7 +45,7 @@ final class PhonePlayerReducedMotionTests: XCTestCase {
         evidence.name = "reduce-motion-system-and-fixture"
         evidence.lifetime = .keepAlways; add(evidence)
 
-        let library = app.buttons["assistant.library"]
+        let library = app.tabBars.buttons["转录"]
         try wait("Library entry") { library.exists && library.isHittable }
         library.tap()
         let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window.")).firstMatch
