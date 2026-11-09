@@ -303,6 +303,7 @@ final class WatchRuntime {
 
     func foreground() async {
         transport.allowControlReplay()
+        transport.allowAudioBlockReplay()
         controlCursors.removeAll()
         fileCursor = 0
         fileCursorLoaded = true
@@ -463,17 +464,23 @@ final class WatchRuntime {
             }
         }
         for damaged in spool.damagedFiles { signature.insert("spool.damaged:\(damaged)") }
+        let repairRoot = encoderDirectory.appendingPathComponent("Repair")
+        let repairLeaves = spool.incompleteFiles.isEmpty ? [] : relativeLeafPaths(in: repairRoot)
+        for leaf in repairLeaves {
+            signature.insert("spool.repair:\(leaf)")
+        }
         for incomplete in spool.incompleteFiles {
             if incomplete == "Repair" {
-                let repairRoot = encoderDirectory.appendingPathComponent("Repair")
-                let leaves = relativeLeafPaths(in: repairRoot)
-                if leaves.isEmpty {
+                if repairLeaves.isEmpty {
                     signature.insert("spool.repair:Repair")
-                } else {
-                    for leaf in leaves { signature.insert("spool.repair:\(leaf)") }
                 }
             } else {
-                signature.insert("spool.incomplete:\(incomplete)")
+                let matchedInRepair = repairLeaves.contains {
+                    $0.contains("/\(incomplete)@") || $0.hasPrefix("\(incomplete)@")
+                }
+                if !matchedInRepair {
+                    signature.insert("spool.incomplete:\(incomplete)")
+                }
             }
         }
         return signature
@@ -673,6 +680,9 @@ final class WatchRuntime {
             }
         case .audioBlockSourceInvalid(let chunkID):
             invalidAudioBlockSources.insert(chunkID)
+            if let chunk = try? await store.chunk(id: chunkID) {
+                _ = try? await store.originalAvailableForTransferRetry(chunk.envelope, maximumValidationBytes: Int64.max)
+            }
         case .controlTransportFinished(let message, let error):
             energyCounters.controlCompletions += 1
             if error != nil { energyCounters.transferFailures += 1 }
@@ -726,7 +736,7 @@ final class WatchRuntime {
                 }()
                 unlockedAudioBlockRecovery = !hadAudioBlockSupport && hasAudioBlockSupport
                     && !connectivityGrant && pendingReceiver == nil
-                    && transport.isReachable && transport.outstandingFileCount > 0
+                    && transport.isReachable && (transport.outstandingFileCount > 0 || pendingChunkCount > 0)
                 if !connectivityGrant, pendingReceiver == nil, !unlockedAudioBlockRecovery {
                     try await submitAudioBlockCopy()
                 }
@@ -1580,7 +1590,9 @@ final class WatchRuntime {
     }
 
     private func admitAudioBatch() async throws -> Int64 {
-        let flush = flushAudioBatch
+        let interactiveFlush = !connectivityGrant && transport.isReachable
+            && (presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
+        let flush = flushAudioBatch || interactiveFlush
         flushAudioBatch = false
         do {
             let end = try await store.audioTransferBatchEnd(force: flush)
@@ -1628,15 +1640,45 @@ final class WatchRuntime {
     }
 
     private func submitAudioBlockCopy() async throws {
-        guard transport.canTransferAudioBlocks else { return }
-        let candidates = try transport.audioBlockRecoveryCandidates()
-        guard !candidates.isEmpty, let receiver = try await store.boundReceiver(),
+        guard transport.canTransferAudioBlocks,
+              let receiver = try await store.boundReceiver(),
               let status = phoneStatus, status.sourceDeviceID == receiver.deviceID,
               case .phone(let payload) = status.payload, payload.libraryInstanceID == receiver.libraryInstanceID,
               payload.audioBlockVersion == AudioBlock.version else { return }
-        // Select from the bounded attempt journal, never scan the archive to find a stalled original.
-        for id in candidates where !invalidAudioBlockSources.contains(id) {
+        var orderedCandidates: [UUID] = []
+        var seen = Set<UUID>()
+        func appendCandidate(_ id: UUID) {
+            if !invalidAudioBlockSources.contains(id), seen.insert(id).inserted {
+                orderedCandidates.append(id)
+            }
+        }
+        if let resumable = transport.resumableAudioBlockChunk {
+            appendCandidate(resumable)
+        }
+        for id in try transport.audioBlockRecoveryCandidates() {
+            appendCandidate(id)
+        }
+        for envelope in try transport.outstandingFileEnvelopes() {
+            appendCandidate(envelope.manifest.chunkID)
+        }
+        if orderedCandidates.count < LinkSubmissionState.maximumOutstandingFiles {
+            let admittedThrough = try await admitAudioBatch()
+            let batch = try await store.pendingChunkBatch(
+                after: 0,
+                through: admittedThrough,
+                limit: LinkSubmissionState.maximumOutstandingFiles)
+            for entry in batch {
+                appendCandidate(entry.chunk.envelope.manifest.chunkID)
+            }
+        }
+        for id in orderedCandidates {
             guard let chunk = try await store.chunk(id: id), chunk.state == .ready else { continue }
+            guard try await store.originalAvailableForTransferRetry(
+                chunk.envelope,
+                maximumValidationBytes: AudioBlock.maximumFileBytes) else {
+                invalidAudioBlockSources.insert(id)
+                continue
+            }
             if try transport.transferAudioBlocks(at: chunk.audioURL, envelope: chunk.envelope,
                 receiverDeviceID: receiver.deviceID, libraryInstanceID: receiver.libraryInstanceID) { return }
         }

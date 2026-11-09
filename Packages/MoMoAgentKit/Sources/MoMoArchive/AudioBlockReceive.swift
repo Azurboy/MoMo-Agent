@@ -18,7 +18,7 @@ extension ArchiveStore {
                 throw ArchiveError.conflictingChunk(manifest.chunkID)
             }
             if row.string(3) == "expired" || row.string(3) == "expiry_pending" { throw ArchiveError.staleSource }
-            if block.payload.isEmpty, row.string(3) == "present",
+            if row.string(3) == "present",
                try validStoredAudio(rootURL.appendingPathComponent(row.requireString(2)), envelope: envelope) {
                 let receipt = try receiptForChunk(manifest.chunkID)
                 try database.execute("UPDATE receipt_outbox SET sent=0 WHERE chunk_id=?", [.text(manifest.chunkID.uuidString)])

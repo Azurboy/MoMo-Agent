@@ -4,7 +4,7 @@
 
 | 边界 | 被强杀时的真实状态 | 第一次正常恢复 |
 | --- | --- | --- |
-| J08-a | 同一真实 AAC writer 已封口 1 秒并入账；另写入 0.25 秒，活动 m4a 尚未 finish / deinit；已持久保存尾部位置的 mark | 沿 WatchRuntime 的 store.recover → CaptureSpool.recover → recoverInterruptedEpochs；旧封口片保持完整，活动尾只恢复可独立解码的范围，否则保留每个原字节与 draft 到 Repair |
+| J08-a | 同一真实 AAC writer 已封口 1 秒并入账；另写入 0.25 秒，活动 m4a 尚未 finish / deinit（含同步写入的 `.m4a.pcm` 滚动缓冲）；已持久保存尾部位置的 mark | 沿 WatchRuntime 的 store.recover → CaptureSpool.recover → recoverInterruptedEpochs；旧封口片保持完整，活动尾从 `.m4a.pcm` 重建完整封口 AAC 并校验解码帧数入账；若无 `.m4a.pcm` 且容器不可解码，则保留每个原字节与 draft 到 Repair |
 | J08-b | 暂存目录的清单与哈希已同步，音频尚未移动 | 重启后保留为未完成收件，不进入处理队列、不产生确认；全量重传后正常提交 |
 | J08-c | 正式原音与旁清单已保存，接收事务尚未开始 | processInbox 校验正式原音，登记原 chunk 和任务，产生确认 |
 | J08-d | 接收事务已提交，Inbox 尚未移除 | processInbox 返回同一稳定确认，不重复登记 |
@@ -13,7 +13,7 @@
 
 b / c / d 随后再启两个新进程。第一个执行重复投递、两次 Receipt、两次 ReceiptApplied 和原音清理。第二个从正常入口恢复并重放持久 ReceiptApplied。独立 Python 检查器使用只读 SQLite 连接，核对文件 SHA-256、WAV 帧数和 PCM 哈希、不可变清单、两端身份、任务数量、确认身份、完整性与外键。
 
-a 在强杀后、恢复后和再次重开时以系统 `afconvert` 独立解码 AAC，核对完整帧数和 PCM hash；解码输出只写到证据文件，不修改原容器。未封口 m4a 可能无法解码，这时要求真实恢复入口隔离原文件与 draft，不建立虚假尾片。已持久 mark 和中断事件同时说明“观测到的位置”和“已封口的位置”；第二次恢复必须复用原事件 ID。
+a 在强杀后、恢复后和再次重开时以系统 `afconvert` 独立解码 AAC，核对完整帧数和 PCM hash；解码输出只写到证据文件，不修改原容器。未封口 m4a 若存在 `.m4a.pcm` 滚动缓冲，真实恢复入口会据此重建封口 AAC 并核对解码帧数、清理临时缓冲；若缺乏 `.m4a.pcm` 且无法解码，则隔离原文件与 draft 到 Repair，不建立虚假尾片。已持久 mark 和中断事件同时说明“观测到的位置”和“已封口的位置”；第二次恢复必须复用原事件 ID。
 
 e / f 在强杀进程中通过正式 AnalysisTicket / commitTranscript 提交**合成空稿**，仅用于使 job=complete、无活动读取者、回放边界已满足等过期条件成立，不声称执行过 ASR。重启进程先调用 expireAudio，证明缺 ReceiptApplied 时原音仍在；补发两次相同确认后，另一个新进程执行过期，独立检查器确认音频才被删除。检查器不补写数据库、清理文件或制造业务状态。
 

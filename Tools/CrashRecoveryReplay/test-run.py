@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from run import capture_snapshot, receipt_snapshot
+from run import capture_snapshot, checked_manifest, receipt_snapshot
 
 
 class AuditChecks(unittest.TestCase):
@@ -34,16 +34,38 @@ class AuditChecks(unittest.TestCase):
     def test_changed_sealed_aac_is_rejected(self):
         root = self.copy_case("J08-a")
         before = json.loads((root / "after-kill.json").read_bytes())
-        audio = next((root / "watch/CaptureReady").glob("*/audio"))
+        fixture = json.loads((root / "capture-fixture.json").read_bytes())
+        _, manifest = checked_manifest(fixture["envelope"])
+        audio = root / "watch/CaptureReady" / manifest["chunkID"] / "audio"
         data = bytearray(audio.read_bytes())
         data[-1] ^= 1
         audio.write_bytes(data)
         with self.assertRaisesRegex(AssertionError, "prefix bytes changed"):
             capture_snapshot(root, "selftest", before)
 
+    def test_changed_recovered_tail_aac_is_rejected(self):
+        root = self.copy_case("J08-a")
+        before = json.loads((root / "after-kill.json").read_bytes())
+        after = json.loads((root / "after-final-restart.json").read_bytes())
+        if after["tailOutcome"] != "recovered-from-pcm-sidecar":
+            self.skipTest("Case did not recover tail from PCM sidecar")
+        audio = root / "watch/CaptureReady" / before["draft"]["chunkID"] / "audio"
+        data = bytearray(audio.read_bytes())
+        data[-1] ^= 1
+        audio.write_bytes(data)
+        with self.assertRaisesRegex(AssertionError, "PCM-recovered tail audio hash mismatch"):
+            capture_snapshot(root, "selftest", before)
+
     def test_lost_unprovable_tail_is_rejected(self):
         root = self.copy_case("J08-a")
         before = json.loads((root / "after-kill.json").read_bytes())
+        after = json.loads((root / "after-final-restart.json").read_bytes())
+        if after["tailOutcome"] == "recovered-from-pcm-sidecar":
+            recovered_chunk_id = before["draft"]["chunkID"]
+            (root / "watch/CaptureReady" / recovered_chunk_id / "audio").unlink()
+            with self.assertRaises(AssertionError):
+                capture_snapshot(root, "selftest", before)
+            return
         if before["activeDecode"]["decodable"]:
             self.skipTest("This observed platform produced a decodable tail; repair branch is not applicable")
         next((root / "Encoding/Repair").rglob("*.m4a")).unlink()

@@ -190,4 +190,77 @@ struct CaptureDraftRecoveryTests {
         }
         #expect(try await CaptureSpool.recover(directory: spool, store: store).recovered.isEmpty)
     }
+
+    @Test func interruptedLiveWriterWithPCMSidecarRecoversExactTailFramesIntoStore() async throws {
+        guard #available(macOS 15, iOS 18, watchOS 11, *) else { return }
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let m = fixture.envelope.manifest
+        let live = fixture.root.appendingPathComponent("live")
+        let spool = fixture.root.appendingPathComponent("snapshot")
+        let snapshot = spool.appendingPathComponent(m.sessionID.uuidString).appendingPathComponent(m.epochID.uuidString)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        let writer = try AACSegmentWriter(directory: live, sessionID: m.sessionID, epochID: m.epochID,
+                                         sourceDeviceID: m.sourceDeviceID, sourceBuild: "tests", sourceKind: .fixture,
+                                         inputSampleRate: 16_000, wallClockAnchor: m.wallClockAnchor, timezoneOffset: 0)
+        let inputSamples = (0..<4_096).map { Float(sin(Double($0) * 0.07)) * 0.25 }
+        _ = try writer.append(inputSamples)
+        var copiedChunkID: UUID?
+        writer.sealCheckpoint = { step, audio in
+            if case .beforeContainerClose = step {
+                let destination = snapshot.appendingPathComponent(audio.lastPathComponent)
+                try FileManager.default.copyItem(at: audio, to: destination)
+                let draft = try WireJSON.decode(CaptureDraft.self, from: Data(contentsOf: SealedCaptureSpool.draftURL(for: audio)))
+                var activeDraft = draft
+                activeDraft.closingFrameCount = nil // Simulate abrupt termination during append before finish() began.
+                try WireJSON.encode(activeDraft).write(to: SealedCaptureSpool.draftURL(for: destination))
+                try FileManager.default.copyItem(at: SealedCaptureSpool.pcmURL(for: audio), to: SealedCaptureSpool.pcmURL(for: destination))
+                copiedChunkID = draft.chunkID
+                throw EncoderExit.stopped
+            }
+        }
+        #expect(throws: EncoderExit.self) { try writer.finish() }
+        let chunkID = try #require(copiedChunkID)
+        let store = try fixture.store()
+        let result = try await CaptureSpool.recover(directory: spool, store: store)
+        #expect(result.recovered == [chunkID])
+        #expect(result.incompleteFiles.isEmpty)
+        #expect(result.damagedFiles.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: spool.appendingPathComponent("Repair").path))
+        #expect(try FileManager.default.contentsOfDirectory(at: snapshot, includingPropertiesForKeys: nil).isEmpty)
+
+        let stored = try #require(await store.chunk(id: chunkID))
+        #expect(stored.state == .ready)
+        #expect(stored.envelope.manifest.frames == (try FrameRange(start: 0, count: 4_096)))
+        #expect(stored.envelope.manifest.decodedFrameCount == 4_096)
+        #expect(try ContentHash.sha256(fileAt: stored.audioURL) == stored.envelope.manifest.audioSHA256)
+        #expect(try await CaptureSpool.recover(directory: spool, store: store).recovered.isEmpty)
+    }
+
+    @Test func interruptedZeroFrameOpenContainerCleansUpWithoutFalseRepairAlert() async throws {
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let m = fixture.envelope.manifest
+        let spool = fixture.root.appendingPathComponent("empty-open")
+        let epoch = spool.appendingPathComponent(m.sessionID.uuidString).appendingPathComponent(m.epochID.uuidString)
+        try FileManager.default.createDirectory(at: epoch, withIntermediateDirectories: true)
+        let chunkID = UUID()
+        let audio = epoch.appendingPathComponent(chunkID.uuidString).appendingPathExtension("m4a")
+        let draft = CaptureDraft(version: 1, sessionID: m.sessionID, epochID: m.epochID, chunkID: chunkID,
+                                 sourceDeviceID: m.sourceDeviceID, sourceBuild: "tests", sourceKind: .fixture,
+                                 sequence: 0, startFrame: 0, maximumFrames: 960_000,
+                                 sampleRate: 16_000, wallClockAnchor: m.wallClockAnchor, timezoneOffset: 0)
+        try Data(repeating: 0, count: 28).write(to: audio)
+        try SealedCaptureSpool.preserveDraft(draft, audio: audio)
+        try Data().write(to: SealedCaptureSpool.pcmURL(for: audio))
+
+        let store = try fixture.store()
+        let result = try await CaptureSpool.recover(directory: spool, store: store)
+        #expect(result.recovered.isEmpty)
+        #expect(result.incompleteFiles.isEmpty)
+        #expect(result.damagedFiles.isEmpty)
+        #expect(try await store.pendingChunks().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: spool.appendingPathComponent("Repair").path))
+        #expect(try FileManager.default.contentsOfDirectory(at: epoch, includingPropertiesForKeys: nil).isEmpty)
+    }
 }
