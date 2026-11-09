@@ -124,6 +124,13 @@ private struct FileQueueDiagnostic: Encodable {
         interactiveControls.allowReplay()
     }
 
+    public func allowAudioBlockReplay() {
+        audioBlockRetryAt = 0
+        audioBlockBackoff.reset()
+    }
+
+    public var resumableAudioBlockChunk: UUID? { resumableAudioBlockChunkID }
+
     /// A user-confirmed receiver change invalidates old-peer custody, including late callbacks.
     public func resetPeerControlState() throws {
         cancelAudioBlockTransfer()
@@ -196,6 +203,12 @@ private struct FileQueueDiagnostic: Encodable {
         return fileAttempts.allowsAudioBlockRecovery(chunkID: envelope.manifest.chunkID)
     }
 
+    func allowsInteractiveAudioBlockTransfer(_ envelope: ManifestEnvelope) throws -> Bool {
+        _ = try refreshOutstanding()
+        guard try fileAttempts.allowsInteractiveAudioBlock(for: envelope) else { return false }
+        return try submissions.allowsInteractiveAudioBlock(envelope)
+    }
+
     /// The recording owner validates each original before retiring its stalled system copy.
     public func stalledFileAttempts(maximumValidationBytes: Int64,
                                    allowAudioBlockRecovery: Bool = false,
@@ -206,8 +219,11 @@ private struct FileQueueDiagnostic: Encodable {
         let stallLease = blockRecoveryReady ? FileAttemptLedger.lease : FileAttemptLedger.backgroundLease
         let fastLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
             ? FileAttemptLedger.interactiveZeroProgressLease : nil
+        let interactiveLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
+            ? FileAttemptLedger.interactiveStallLease : nil
         return fileAttempts.stalledCandidates(now: Date(), limit: LinkSubmissionState.maximumOutstandingFiles,
-            eligibleChunkIDs: eligible, stallLease: stallLease, interactiveZeroProgressLease: fastLease).compactMap { candidate in
+            eligibleChunkIDs: eligible, stallLease: stallLease, interactiveZeroProgressLease: fastLease,
+            interactiveStallLease: interactiveLease).compactMap { candidate in
                 transfers.first(where: { $0.1.manifest.chunkID == candidate.chunkID }).map { (candidate, $0.1) }
             }
     }
@@ -220,9 +236,12 @@ private struct FileQueueDiagnostic: Encodable {
         let stallLease = blockRecoveryReady ? FileAttemptLedger.lease : FileAttemptLedger.backgroundLease
         let fastLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
             ? FileAttemptLedger.interactiveZeroProgressLease : nil
+        let interactiveLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
+            ? FileAttemptLedger.interactiveStallLease : nil
         var next = fileAttempts
         guard next.requestCancellation(candidate, now: Date(), stallLease: stallLease,
-                                       interactiveZeroProgressLease: fastLease) else { return } // Progress may have advanced during validation.
+                                       interactiveZeroProgressLease: fastLease,
+                                       interactiveStallLease: interactiveLease) else { return } // Progress may have advanced during validation.
         try saveAttempts(next)
         submissions.retireFileAttempt(chunkID: candidate.chunkID)
         for (transfer, envelope) in transfers where envelope.manifest.chunkID == candidate.chunkID {
@@ -319,6 +338,11 @@ private struct FileQueueDiagnostic: Encodable {
         guard audioBlockChunkID != envelope.manifest.chunkID else { return .alreadySubmitted }
         if session.isReachable, resumableAudioBlockChunkID == envelope.manifest.chunkID { return .retryLater }
         guard peerState == .available else { return .deferred }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            event(.audioBlockSourceInvalid(chunkID: envelope.manifest.chunkID))
+            return .alreadySubmitted
+        }
         guard try fileAttempts.canAdmit(envelope, now: Date()) else {
             return session.outstandingFileTransfers.contains { ($0.file.metadata?["chunk_id"] as? String) == envelope.manifest.chunkID.uuidString }
                 ? .alreadySubmitted : .retryLater
@@ -513,7 +537,7 @@ private struct FileQueueDiagnostic: Encodable {
             return FileTransferObservation(envelope: envelope, attemptID: attemptID,
                 completedUnits: transfer.progress.completedUnitCount)
         }
-        let preservedChunkID = audioBlockChunkID ?? (session.isReachable ? resumableAudioBlockChunkID : nil)
+        let preservedChunkID = audioBlockChunkID ?? resumableAudioBlockChunkID
         try next.reconcileSnapshot(observations, now: Date(), preservingAudioBlockChunkID: preservedChunkID)
         for (transfer, envelope) in transfers {
             if next.attempts[envelope.manifest.chunkID]?.cancellationRequestedAt != nil {
@@ -719,6 +743,7 @@ private struct FileQueueDiagnostic: Encodable {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.interactiveControls.allowReplay()
+            self.allowAudioBlockReplay()
             #if os(iOS)
             if let metadata = self.lastPublishedPhoneStatusMetadata, self.session.activationState == .activated,
                self.session.isReachable, self.peerState == .available {

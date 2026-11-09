@@ -1,5 +1,6 @@
 import AVFAudio
 import CoreAudioTypes
+import Darwin
 import Foundation
 import Synchronization
 import MoMoContracts
@@ -51,6 +52,8 @@ public final class AACSegmentWriter {
     private let splitBuffer: AVAudioPCMBuffer
     private var file: AVAudioFile?
     private var fileURL: URL?
+    private var pcmDescriptor: Int32 = -1
+    private var pcmScratch = [Int16](repeating: 0, count: 8_192)
     private var chunkID: UUID?
     private var chunkFrames: AVAudioFrameCount = 0
     private var sequence: Int64 = 0
@@ -87,6 +90,10 @@ public final class AACSegmentWriter {
         self.inputBuffer = ConverterInput(inputBuffer)
         self.conversionBuffer = conversionBuffer; self.splitBuffer = splitBuffer
         try RecordingFileProtection.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        closePCMHandle()
     }
 
     public func append(_ mono: [Float]) throws -> [EncodedChunk] {
@@ -158,8 +165,51 @@ public final class AACSegmentWriter {
     }
 
     private func writeSlice(_ slice: AVAudioPCMBuffer) throws {
-        guard let active = file else { throw AACWriterError.invalidFormat }
+        guard let active = file, let source = slice.floatChannelData?[0] else { throw AACWriterError.invalidFormat }
+        let frameCount = Int(slice.frameLength)
+        guard frameCount > 0 else { return }
+        try appendPCMSamples(source, count: frameCount)
         try active.write(from: slice)
+    }
+
+    private func appendPCMSamples(_ source: UnsafePointer<Float>, count: Int) throws {
+        guard pcmDescriptor >= 0, count <= pcmScratch.count else { throw AACWriterError.invalidFormat }
+        for index in 0..<count {
+            let sample = source[index]
+            let quantized: Int16
+            if !sample.isFinite {
+                quantized = 0
+            } else if sample <= -1.0 {
+                quantized = .min
+            } else if sample >= 1.0 {
+                quantized = .max
+            } else {
+                quantized = Int16((sample * 32_767.0).rounded())
+            }
+            pcmScratch[index] = quantized.littleEndian
+        }
+        try pcmScratch.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var remaining = count * MemoryLayout<Int16>.size
+            var offset = 0
+            while remaining > 0 {
+                let written = Darwin.write(pcmDescriptor, base.advanced(by: offset), remaining)
+                if written > 0 {
+                    offset += written
+                    remaining -= written
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
+        }
+    }
+
+    private func closePCMHandle() {
+        guard pcmDescriptor >= 0 else { return }
+        _ = Darwin.close(pcmDescriptor)
+        pcmDescriptor = -1
     }
 
     private func openChunk() throws {
@@ -175,11 +225,22 @@ public final class AACSegmentWriter {
                                  sampleRate: Self.sampleRate, wallClockAnchor: anchor, timezoneOffset: timezoneOffset)
         try SealedCaptureSpool.preserveDraft(draft, audio: url)
         self.draft = draft
-        file = try AVAudioFile(forWriting: url, settings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: Self.sampleRate,
-            AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: Self.bitRate,
-            AVEncoderBitRateStrategyKey: AVAudioBitRateStrategy_Constant
-        ], commonFormat: .pcmFormatFloat32, interleaved: false)
+        closePCMHandle()
+        let pcmURL = SealedCaptureSpool.pcmURL(for: url)
+        let descriptor = Darwin.open(pcmURL.path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        pcmDescriptor = descriptor
+        RecordingFileProtection.apply(to: pcmURL)
+        do {
+            file = try AVAudioFile(forWriting: url, settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: Self.sampleRate,
+                AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: Self.bitRate,
+                AVEncoderBitRateStrategyKey: AVAudioBitRateStrategy_Constant
+            ], commonFormat: .pcmFormatFloat32, interleaved: false)
+        } catch {
+            closePCMHandle()
+            throw error
+        }
         RecordingFileProtection.apply(to: url)
         fileURL = url; chunkID = id
     }
@@ -188,12 +249,20 @@ public final class AACSegmentWriter {
         guard let url = fileURL, chunkID != nil, var draft, chunkFrames > 0 else { throw AACWriterError.invalidFormat }
         draft.closingFrameCount = Int64(chunkFrames)
         try SealedCaptureSpool.preserveDraft(draft, audio: url)
+        if pcmDescriptor >= 0 {
+            _ = Darwin.fsync(pcmDescriptor)
+            closePCMHandle()
+        }
         try sealCheckpoint?(.beforeContainerClose, url)
         // ARC closes and finalizes the m4a before hashing, decoding, or handing it to the ledger.
         file = nil
         try sealCheckpoint?(.afterContainerClose, url)
         let chunk = EncodedChunk(audioURL: url, envelope: try draft.envelope(audioURL: url, verifyFullDecode: false))
         try SealedCaptureSpool.preserve(chunk)
+        let pcmURL = SealedCaptureSpool.pcmURL(for: url)
+        if FileManager.default.fileExists(atPath: pcmURL.path) {
+            try? FileManager.default.removeItem(at: pcmURL)
+        }
         sealedInCurrentOperation.append(chunk)
         sequence += 1; chunkFrames = 0; fileURL = nil; chunkID = nil; self.draft = nil
         return chunk

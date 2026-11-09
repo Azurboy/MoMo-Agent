@@ -144,6 +144,23 @@ struct AudioBlockReceiveTests {
         #expect(try await store.pendingReceipts().count == 1)
     }
 
+    @Test func midStreamPayloadBlockShortCircuitsWhenBackgroundTransferAlreadyCommittedChunk() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = try fixture.store(), envelope = try fixture.envelope()
+        _ = try await store.receiveAudioBlock(block(fixture, store, envelope, offset: 0, payload: fixture.audio.prefix(1000)))
+        #expect(FileManager.default.fileExists(atPath: partialDirectory(store, envelope).path))
+        guard case .accepted(let receipt) = try await store.commitReceivedChunk(fixture.deliver(envelope, to: store)) else {
+            Issue.record("Expected normal background receive"); return
+        }
+        let midStream = try block(fixture, store, envelope, offset: 1000, payload: fixture.audio.dropFirst(1000).prefix(500))
+        let reply = try await store.receiveAudioBlock(midStream)
+        #expect(reply.nextOffset == envelope.manifest.byteCount)
+        #expect(reply.receipt == receipt)
+        #expect(!FileManager.default.fileExists(atPath: partialDirectory(store, envelope).path))
+        #expect(try await store.pendingReceipts().count == 1)
+    }
+
     @Test func receiverMismatchDeletionAndForgedReceiptsCannotAuthorizeCleanup() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

@@ -318,6 +318,7 @@ def capture_snapshot(root: Path, phase: str, before: dict | None) -> dict:
             "Sealed AAC prefix did not independently decode to its exact frames")
     active = confined_file(root, fixture["activeAudioRelativePath"])
     draft_path = Path(str(active) + ".draft.json")
+    pcm_path = Path(str(active) + ".pcm")
     if before is None:
         require(len(database["chunks"]) == 1, "Active AAC tail was indexed before sealing")
         require(active.is_file() and draft_path.is_file() and not Path(str(active) + ".sealed.json").exists(),
@@ -328,23 +329,41 @@ def capture_snapshot(root: Path, phase: str, before: dict | None) -> dict:
                 "Active AAC draft was already closing or lost its source position")
         active_hash, draft_hash = sha256(active), hashlib.sha256(draft_data).hexdigest()
         active_decode = decode_aac(active, root / "after-kill-active.wav")
+        pcm_frames = pcm_path.stat().st_size // 2 if pcm_path.is_file() else 0
+        pcm_hash = sha256(pcm_path) if pcm_path.is_file() else None
         tail_outcome = "still-open-at-SIGKILL"
     else:
         active_hash, draft_hash, active_decode = before["activeSHA256"], before["draftSHA256"], before["activeDecode"]
+        pcm_frames, pcm_hash = before.get("pcmFrames", 0), before.get("pcmSHA256")
         draft = before["draft"]
         tail_rows = database["chunks"][1:]
         require(len(tail_rows) <= 1, "Crash tail created duplicate logical chunks")
         if tail_rows:
             _, recovered = checked_manifest(json.loads(tail_rows[0][1]))
-            require(active_decode["decodable"] and 0 < recovered["decodedFrameCount"] <= fixture["submittedFrames"] - 16000,
-                    "Recovery claimed tail frames not independently decodable after SIGKILL")
-            require(recovered["decodedFrameCount"] == active_decode["frames"]
-                    and recovered["frames"] == {"start": 16000, "count": active_decode["frames"]}
-                    and recovered["chunkID"] == draft["chunkID"] and recovered["audioSHA256"] == active_hash,
-                    "Recovered AAC tail changed its identity/range/hash")
             recovered_audio = root / "watch/CaptureReady" / recovered["chunkID"] / "audio"
-            require(sha256(recovered_audio) == active_hash and tail_rows[0][3] == "ready", "Recovered tail was lost")
-            tail_outcome = "independently-proven-decoded-tail"
+            recovered_decode = decode_aac(recovered_audio, root / f"{phase}-recovered-tail.wav")
+            require(recovered_decode["decodable"], "Recovered AAC tail is not independently decodable")
+            if active_decode["decodable"]:
+                require(0 < recovered["decodedFrameCount"] <= fixture["submittedFrames"] - 16000,
+                        "Recovery claimed tail frames not independently decodable after SIGKILL")
+                require(recovered["decodedFrameCount"] == active_decode["frames"] == recovered_decode["frames"]
+                        and recovered["frames"] == {"start": 16000, "count": active_decode["frames"]}
+                        and recovered["chunkID"] == draft["chunkID"] and recovered["audioSHA256"] == active_hash,
+                        "Recovered AAC tail changed its identity/range/hash")
+                require(sha256(recovered_audio) == active_hash and tail_rows[0][3] == "ready", "Recovered tail was lost")
+                tail_outcome = "independently-proven-decoded-tail"
+            else:
+                require(0 < pcm_frames <= fixture["submittedFrames"] - 16000,
+                        "Recovery claimed tail frames without either decodable AAC or PCM sidecar")
+                require(recovered["decodedFrameCount"] == pcm_frames == recovered_decode["frames"]
+                        and recovered["frames"] == {"start": 16000, "count": pcm_frames}
+                        and recovered["chunkID"] == draft["chunkID"],
+                        "PCM-recovered AAC tail changed its identity or frame range")
+                require(sha256(recovered_audio) == recovered["audioSHA256"] and tail_rows[0][3] == "ready",
+                        "PCM-recovered tail audio hash mismatch or not ready")
+                require(not active.exists() and not pcm_path.exists() and not draft_path.exists(),
+                        "PCM-recovered tail left stale active spool artifacts")
+                tail_outcome = "recovered-from-pcm-sidecar"
         else:
             repair = root / "Encoding/Repair" / manifest["sessionID"] / manifest["epochID"] / active.name
             require(sha256(repair) == active_hash and sha256(Path(str(repair) + ".draft.json")) == draft_hash,
@@ -353,7 +372,11 @@ def capture_snapshot(root: Path, phase: str, before: dict | None) -> dict:
             tail_outcome = "unprovable-tail-preserved-in-repair"
     events = [json.loads(payload) for _, payload in database["events"]]
     require(events[0] == {"captureMark": {"_0": fixture["mark"]}}, "Persisted mark changed")
-    expected_end = 16000 + (active_decode.get("frames", 0) if before and len(database["chunks"]) == 2 else 0)
+    recovered_tail_frames = 0
+    if before and len(database["chunks"]) == 2:
+        _, recovered_manifest = checked_manifest(json.loads(database["chunks"][1][1]))
+        recovered_tail_frames = recovered_manifest["decodedFrameCount"]
+    expected_end = 16000 + recovered_tail_frames
     require(database["epochs"] == [(manifest["epochID"], manifest["sessionID"], manifest["sourceDeviceID"], int(before is not None))],
             "Interrupted epoch lifecycle changed")
     if before:
@@ -365,6 +388,7 @@ def capture_snapshot(root: Path, phase: str, before: dict | None) -> dict:
         require(len(events) == 1, "The killed writer emitted a final interruption event")
     return {"phase": phase, "prefixSHA256": manifest["audioSHA256"], "prefixDecode": prefix_decode,
             "activeSHA256": active_hash, "draftSHA256": draft_hash, "draft": draft, "activeDecode": active_decode,
+            "pcmFrames": pcm_frames, "pcmSHA256": pcm_hash,
             "tailOutcome": tail_outcome, "sealedThroughFrame": expected_end,
             "events": events, "chunkCount": len(database["chunks"]), "sqliteIntegrity": "ok", "foreignKeyErrors": 0}
 

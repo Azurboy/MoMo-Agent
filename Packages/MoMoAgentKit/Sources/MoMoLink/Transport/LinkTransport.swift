@@ -233,6 +233,15 @@ public struct LinkSubmissionState: Sendable {
         requestedReplays.remove(id)
     }
 
+    public func allowsInteractiveAudioBlock(_ envelope: ManifestEnvelope) throws -> Bool {
+        let id = envelope.manifest.chunkID
+        if let known = outstanding[id]?.hash ?? submitted[id] {
+            guard known == envelope.manifestSHA256 else { throw LinkError.conflictingTransfer(id) }
+        }
+        let alreadyConfirmed = submitted[id] != nil && awaitingReceipts[id] == nil
+        return !alreadyConfirmed
+    }
+
     private mutating func waitForReceipt(chunkID: UUID, now: TimeInterval) {
         guard var wait = awaitingReceipts[chunkID], wait.deadline == nil else { return }
         // System completion alone cannot prove durable phone ingestion. Bound retries without duplicating live transfers.

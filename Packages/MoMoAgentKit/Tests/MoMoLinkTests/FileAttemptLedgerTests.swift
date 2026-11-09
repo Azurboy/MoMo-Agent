@@ -288,4 +288,77 @@ struct FileAttemptLedgerTests {
         try journal.observe(envelope: file, attemptID: nil, completedUnits: 0, now: now)
         #expect(journal.stalledCandidate(now: now.addingTimeInterval(1)) == nil)
     }
+
+    @Test func interactiveStallLeaseRetiresWedgedNonZeroProgressCopies() throws {
+        let wedged79 = try envelope(), wedged100 = try envelope(), fresh = try envelope()
+        let start = Date(timeIntervalSince1970: 1_000)
+        var journal = FileAttemptLedger()
+        let id79 = try journal.begin(wedged79, now: start)
+        let id100 = try journal.begin(wedged100, now: start.addingTimeInterval(1))
+        let idFresh = try journal.begin(fresh, now: start.addingTimeInterval(2))
+        try journal.observe(envelope: wedged79, attemptID: id79, completedUnits: 79, now: start.addingTimeInterval(3))
+        try journal.observe(envelope: wedged100, attemptID: id100, completedUnits: 100, now: start.addingTimeInterval(4))
+        try journal.observe(envelope: fresh, attemptID: idFresh, completedUnits: 50, now: start.addingTimeInterval(40))
+
+        let at50 = start.addingTimeInterval(50)
+        // Without interactiveStallLease, non-zero completedUnits wait for the 900s base lease.
+        #expect(journal.stalledCandidates(
+            now: at50,
+            limit: 4,
+            interactiveZeroProgressLease: FileAttemptLedger.interactiveZeroProgressLease
+        ).isEmpty)
+
+        // With interactiveStallLease, wedged 79% and 100% copies retire within one Watch wake window.
+        let candidates = journal.stalledCandidates(
+            now: at50,
+            limit: 4,
+            interactiveZeroProgressLease: FileAttemptLedger.interactiveZeroProgressLease,
+            interactiveStallLease: FileAttemptLedger.interactiveStallLease
+        )
+        #expect(candidates.map(\.chunkID) == [wedged79.manifest.chunkID, wedged100.manifest.chunkID])
+        for candidate in candidates {
+            let cancelled = journal.requestCancellation(
+                candidate,
+                now: at50,
+                interactiveZeroProgressLease: FileAttemptLedger.interactiveZeroProgressLease,
+                interactiveStallLease: FileAttemptLedger.interactiveStallLease
+            )
+            #expect(cancelled)
+        }
+        #expect(journal.attempts[fresh.manifest.chunkID]?.cancellationRequestedAt == nil)
+    }
+
+    @Test func interactiveAudioBlockEligibilityAllowsActiveQueueAndRejectsConfirmedOrConflictingChunks() throws {
+        let file = try envelope(), id = file.manifest.chunkID
+        var journal = FileAttemptLedger()
+        var state = LinkSubmissionState()
+        state.update(activation: .activated, isReachable: true)
+        #expect(try journal.allowsInteractiveAudioBlock(for: file))
+        #expect(try state.allowsInteractiveAudioBlock(file))
+
+        _ = try journal.begin(file, now: Date(timeIntervalSince1970: 1_000))
+        #expect(try state.reserve(file, now: 0) == .submitted)
+        // Active WCSessionFileTransfer slot must not block immediate reachable AudioBlock streaming.
+        #expect(try journal.allowsInteractiveAudioBlock(for: file))
+        #expect(try state.allowsInteractiveAudioBlock(file))
+
+        let conflicting = try ManifestEnvelope(manifest: ChunkManifest(
+            sessionID: UUID(), epochID: UUID(), chunkID: id, sourceDeviceID: UUID(),
+            sourceBuild: "lease-tests", sequence: 1, frames: FrameRange(start: 0, count: 8),
+            timebaseHz: 16_000, wallClockAnchor: Date(), timezoneOffset: 0, codec: .pcmInt16,
+            sampleRate: 16_000, channels: 1, decodedFrameCount: 8, byteCount: 16,
+            audioSHA256: ContentHash.sha256(Data(repeating: 1, count: 16)), sourceKind: .fixture))
+        #expect(throws: LinkError.conflictingTransfer(id)) {
+            try journal.allowsInteractiveAudioBlock(for: conflicting)
+        }
+        #expect(throws: LinkError.conflictingTransfer(id)) {
+            try state.allowsInteractiveAudioBlock(conflicting)
+        }
+
+        let receipt = try Receipt(receiverDeviceID: UUID(), libraryInstanceID: UUID(), chunkID: id,
+            audioSHA256: file.manifest.audioSHA256, manifestSHA256: file.manifestSHA256)
+        try state.confirmFileDelivery(receipt)
+        journal.confirm(chunkID: id)
+        #expect(try !state.allowsInteractiveAudioBlock(file))
+    }
 }

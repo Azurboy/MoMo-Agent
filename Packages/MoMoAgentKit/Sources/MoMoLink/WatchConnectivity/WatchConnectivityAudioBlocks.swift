@@ -11,11 +11,11 @@ extension WatchConnectivityTransport {
     }
     public var hasActiveAudioBlockTransfer: Bool { audioBlockTask != nil }
 
-    /// Recovery starts only after a validated stalled system copy has left the SDK queue.
+    /// Streams sealed originals directly over reachable interactive messaging and deduplicates against background transfers via durable Receipt.
     @discardableResult public func transferAudioBlocks(at file: URL, envelope: ManifestEnvelope,
         receiverDeviceID: UUID, libraryInstanceID: UUID) throws -> Bool {
         guard canTransferAudioBlocks, envelope.manifest.byteCount <= AudioBlock.maximumFileBytes,
-              try allowsAudioBlockRecovery(envelope) else { return false }
+              try allowsInteractiveAudioBlockTransfer(envelope) else { return false }
         let generation = UUID()
         audioBlockGeneration = generation; audioBlockChunkID = envelope.manifest.chunkID
         resumableAudioBlockChunkID = envelope.manifest.chunkID
@@ -62,16 +62,27 @@ extension WatchConnectivityTransport {
             if error as? AudioBlockTransferError == .budgetExhausted {
                 audioBlockRetryAt = ProcessInfo.processInfo.systemUptime + 1
                 logger.notice("Audio block slice yielded for continuation; chunk=\(chunkID.uuidString, privacy: .public), offset=\(self.audioBlockOffset)")
-                event(.controlSubmissionChanged)
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(1_050))
+                    self?.event(.controlSubmissionChanged)
+                }
                 return
             }
-            if error as? AudioBlockTransferError == .invalidSource || error as? AudioBlockTransferError == .rejected {
+            if error as? AudioBlockTransferError == .invalidSource {
+                resumableAudioBlockChunkID = nil
+                audioBlockRetryAt = 0
+                let failure = TransportFailure(error)
+                logger.error("Audio block source invalid: \(failure.domain, privacy: .public) / \(failure.code)")
+                event(.audioBlockSourceInvalid(chunkID: chunkID))
+                event(.fileTransportFinished(chunkID: chunkID, failure: failure))
+                return
+            }
+            if error as? AudioBlockTransferError == .rejected {
                 resumableAudioBlockChunkID = nil
             }
             audioBlockRetryAt = ProcessInfo.processInfo.systemUptime + audioBlockBackoff.nextDelay()
             let failure = TransportFailure(error)
             logger.error("Audio block copy paused: \(failure.domain, privacy: .public) / \(failure.code)")
-            if error as? AudioBlockTransferError == .invalidSource { event(.audioBlockSourceInvalid(chunkID: chunkID)) }
             event(.fileTransportFinished(chunkID: chunkID, failure: failure))
         }
     }

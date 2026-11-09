@@ -1,11 +1,15 @@
+import AVFAudio
+import CoreAudioTypes
 import Darwin
 import Foundation
 import MoMoContracts
 
 /// Bridges the crash window between closing an encoder file and indexing it in RecordingStore.
 enum SealedCaptureSpool {
+    static let recoveryAACBitRate = 24_000
     static func sidecar(for audio: URL) -> URL { audio.appendingPathExtension("sealed.json") }
     static func draftURL(for audio: URL) -> URL { audio.appendingPathExtension("draft.json") }
+    static func pcmURL(for audio: URL) -> URL { audio.appendingPathExtension("pcm") }
 
     static func preserveDraft(_ draft: CaptureDraft, audio: URL) throws {
         let url = draftURL(for: audio)
@@ -38,6 +42,8 @@ enum SealedCaptureSpool {
         if FileManager.default.fileExists(atPath: chunk.audioURL.path) { try FileManager.default.removeItem(at: chunk.audioURL) }
         let draft = draftURL(for: chunk.audioURL)
         if FileManager.default.fileExists(atPath: draft.path) { try FileManager.default.removeItem(at: draft) }
+        let pcm = pcmURL(for: chunk.audioURL)
+        if FileManager.default.fileExists(atPath: pcm.path) { try FileManager.default.removeItem(at: pcm) }
         try FileManager.default.removeItem(at: sidecar(for: chunk.audioURL))
         try synchronizeDirectory(chunk.audioURL.deletingLastPathComponent())
     }
@@ -71,12 +77,16 @@ public enum CaptureSpool {
                 do { draft = try WireJSON.decode(CaptureDraft.self, from: Data(contentsOf: draftURL)) }
                 catch is DecodingError { continue }
                 let audio = draftURL.deletingPathExtension().deletingPathExtension()
+                let pcm = SealedCaptureSpool.pcmURL(for: audio)
                 guard draft.version == 1, draft.sessionID == sessionID,
                       draft.epochID.uuidString == epoch.lastPathComponent,
                       audio.lastPathComponent == draft.chunkID.uuidString + ".m4a" else { continue }
                 let audioKind = try entryKind(audio)
-                guard audioKind == nil || audioKind == .regular else { continue }
+                let pcmKind = try entryKind(pcm)
+                guard (audioKind == nil || audioKind == .regular),
+                      (pcmKind == nil || pcmKind == .regular) else { continue }
                 if audioKind != nil { try FileManager.default.removeItem(at: audio) }
+                if pcmKind != nil { try FileManager.default.removeItem(at: pcm) }
                 try FileManager.default.removeItem(at: draftURL)
             }
             try SealedCaptureSpool.synchronizeDirectory(epoch)
@@ -128,7 +138,15 @@ public enum CaptureSpool {
                 // Foreground capture may already be writing while historical repair continues.
                 if excludingOpenEpochs, try await store.isCaptureEpochOpen(epochID) { continue }
                 for entry in try children(epoch) {
-                    let knownSuffix = entry.pathExtension == "m4a" || entry.lastPathComponent.hasSuffix(".m4a.draft.json") || entry.lastPathComponent.hasSuffix(".m4a.sealed.json")
+                    if entry.lastPathComponent.hasSuffix(".m4a.recovering"), try entryKind(entry) == .regular {
+                        try files.removeItem(at: entry)
+                        continue
+                    }
+                    let name = entry.lastPathComponent
+                    let knownSuffix = entry.pathExtension == "m4a"
+                        || name.hasSuffix(".m4a.draft.json")
+                        || name.hasSuffix(".m4a.sealed.json")
+                        || name.hasSuffix(".m4a.pcm")
                     if try entryKind(entry) != .regular || !knownSuffix {
                         try quarantineUnowned(entry, root: directory)
                         report.damagedFiles.append(epoch.lastPathComponent + "/" + entry.lastPathComponent)
@@ -139,7 +157,9 @@ public enum CaptureSpool {
                     try Task.checkCancellation()
                     guard try entryKind(draftURL) == .regular else { continue }
                     let audio = draftURL.deletingPathExtension().deletingPathExtension()
+                    let pcmURL = SealedCaptureSpool.pcmURL(for: audio)
                     guard try entryKind(audio) == nil || entryKind(audio) == .regular else { continue }
+                    guard try entryKind(pcmURL) == nil || entryKind(pcmURL) == .regular else { continue }
                     guard try entryKind(SealedCaptureSpool.sidecar(for: audio)) == nil else { continue }
                     do {
                         let draft = try WireJSON.decode(CaptureDraft.self, from: Data(contentsOf: draftURL))
@@ -157,19 +177,38 @@ public enum CaptureSpool {
                                         throw RecordingError.invalidAudio(draft.chunkID)
                                     }
                                 }
+                                if try entryKind(pcmURL) == .regular { try files.removeItem(at: pcmURL) }
                                 try files.removeItem(at: draftURL)
                                 try SealedCaptureSpool.synchronizeDirectory(epoch)
                                 continue
                             }
                             envelope = indexed.envelope
                         } else {
-                            envelope = try draft.envelope(audioURL: audio)
+                            do {
+                                envelope = try draft.envelope(audioURL: audio)
+                            } catch {
+                                guard isUnrecoverableDraft(error), try entryKind(pcmURL) == .regular else { throw error }
+                                guard let recovered = try recoverFromPCM(
+                                    pcmURL: pcmURL,
+                                    audioURL: audio,
+                                    draft: draft,
+                                    epochDirectory: epoch
+                                ) else {
+                                    if try entryKind(audio) == .regular { try files.removeItem(at: audio) }
+                                    if try entryKind(pcmURL) == .regular { try files.removeItem(at: pcmURL) }
+                                    try files.removeItem(at: draftURL)
+                                    try SealedCaptureSpool.synchronizeDirectory(epoch)
+                                    continue
+                                }
+                                envelope = recovered
+                            }
                         }
                         let chunk = EncodedChunk(audioURL: audio, envelope: envelope)
                         try SealedCaptureSpool.preserve(chunk)
+                        if try entryKind(pcmURL) == .regular { try files.removeItem(at: pcmURL) }
                     } catch {
                         guard isUnrecoverableDraft(error) else { throw error }
-                        try quarantine([audio, draftURL], from: epoch, root: directory)
+                        try quarantineRegularFiles([audio, draftURL, pcmURL], from: epoch, root: directory)
                         report.incompleteFiles.append(audio.lastPathComponent)
                     }
                 }
@@ -180,6 +219,7 @@ public enum CaptureSpool {
                     guard try entryKind(sidecar) == .regular else { continue }
                     let candidateAudio = sidecar.deletingPathExtension().deletingPathExtension()
                     let candidateDraft = SealedCaptureSpool.draftURL(for: candidateAudio)
+                    let candidatePCM = SealedCaptureSpool.pcmURL(for: candidateAudio)
                     do {
                         let envelope = try WireJSON.decode(ManifestEnvelope.self, from: Data(contentsOf: sidecar))
                         let manifest = envelope.manifest
@@ -205,15 +245,15 @@ public enum CaptureSpool {
                         try SealedCaptureSpool.remove(chunk)
                         report.recovered.append(manifest.chunkID)
                     } catch is DecodingError {
-                        try quarantineRegularFiles([candidateAudio, candidateDraft, sidecar], from: epoch, root: directory)
+                        try quarantineRegularFiles([candidateAudio, candidateDraft, candidatePCM, sidecar], from: epoch, root: directory)
                         report.damagedFiles.append(sidecar.lastPathComponent)
                     } catch is ContractError {
-                        try quarantineRegularFiles([candidateAudio, candidateDraft, sidecar], from: epoch, root: directory)
+                        try quarantineRegularFiles([candidateAudio, candidateDraft, candidatePCM, sidecar], from: epoch, root: directory)
                         report.damagedFiles.append(sidecar.lastPathComponent)
                     } catch let error as RecordingError {
                         switch error {
                         case .invalidAudio, .contentConflict:
-                            try quarantineRegularFiles([candidateAudio, candidateDraft, sidecar], from: epoch, root: directory)
+                            try quarantineRegularFiles([candidateAudio, candidateDraft, candidatePCM, sidecar], from: epoch, root: directory)
                             report.damagedFiles.append(sidecar.lastPathComponent)
                         default: throw error
                         }
@@ -221,13 +261,23 @@ public enum CaptureSpool {
                         report.incompleteFiles.append(sidecar.lastPathComponent)
                     }
                 }
-                for audio in entries where audio.pathExtension == "m4a" {
+                let remainingEntries = try children(epoch)
+                for audio in remainingEntries where audio.pathExtension == "m4a" {
                     guard try entryKind(audio) == .regular else { continue }
                     // Pre-draft versions cannot recover frame identity from audio alone.
                     if try entryKind(SealedCaptureSpool.sidecar(for: audio)) == nil {
                         try quarantine([audio], from: epoch, root: directory)
                     }
                     report.incompleteFiles.append(audio.lastPathComponent)
+                }
+                for pcm in try children(epoch) where pcm.lastPathComponent.hasSuffix(".m4a.pcm") {
+                    guard try entryKind(pcm) == .regular else { continue }
+                    let audio = pcm.deletingPathExtension()
+                    if try entryKind(SealedCaptureSpool.sidecar(for: audio)) == nil,
+                       try entryKind(SealedCaptureSpool.draftURL(for: audio)) == nil {
+                        try quarantine([pcm], from: epoch, root: directory)
+                        report.incompleteFiles.append(pcm.lastPathComponent)
+                    }
                 }
             }
         }
@@ -251,6 +301,92 @@ public enum CaptureSpool {
         if let cocoa = error as? CocoaError,
            [.fileReadNoSuchFile, .fileNoSuchFile, .fileReadCorruptFile].contains(cocoa.code) { return true }
         return CaptureAudioReadFailure.requiresRepair(error)
+    }
+
+    private static func recoverFromPCM(
+        pcmURL: URL,
+        audioURL: URL,
+        draft: CaptureDraft,
+        epochDirectory: URL
+    ) throws -> ManifestEnvelope? {
+        guard draft.version == 1,
+              draft.maximumFrames > 0,
+              draft.maximumFrames <= 4_800_000,
+              draft.sampleRate == 16_000 else {
+            throw AACWriterError.invalidFormat
+        }
+        var pcmStat = stat()
+        guard lstat(pcmURL.path, &pcmStat) == 0,
+              (pcmStat.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        let availableFrames = min(draft.maximumFrames, Int64(pcmStat.st_size) / 2)
+        if availableFrames <= 0 {
+            guard draft.closingFrameCount == nil else {
+                throw AACWriterError.invalidFormat
+            }
+            return nil
+        }
+        guard let pcmFormat = AVAudioFormat(standardFormatWithSampleRate: draft.sampleRate, channels: 1),
+              let floatBuffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: 8_192),
+              let channel = floatBuffer.floatChannelData?[0] else {
+            throw AACWriterError.allocationFailed
+        }
+        let tempURL = epochDirectory.appendingPathComponent("\(draft.chunkID.uuidString).m4a.recovering")
+        if FileManager.default.fileExists(atPath: tempURL.path) {
+            try FileManager.default.removeItem(at: tempURL)
+        }
+        defer {
+            if FileManager.default.fileExists(atPath: tempURL.path) {
+                try? FileManager.default.removeItem(at: tempURL)
+            }
+        }
+        do {
+            var writerFile: AVAudioFile? = try AVAudioFile(
+                forWriting: tempURL,
+                settings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: draft.sampleRate,
+                    AVNumberOfChannelsKey: 1,
+                    AVEncoderBitRateKey: SealedCaptureSpool.recoveryAACBitRate,
+                    AVEncoderBitRateStrategyKey: AVAudioBitRateStrategy_Constant
+                ],
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+            RecordingFileProtection.apply(to: tempURL)
+            let handle = try FileHandle(forReadingFrom: pcmURL)
+            defer { try? handle.close() }
+            var remaining = availableFrames
+            while remaining > 0 {
+                let batchFrames = Int(min(8_192, remaining))
+                guard let raw = try handle.read(upToCount: batchFrames * 2),
+                      raw.count == batchFrames * 2 else {
+                    throw AACWriterError.conversionFailed
+                }
+                raw.withUnsafeBytes { bytes in
+                    for index in 0..<batchFrames {
+                        let lo = UInt16(bytes[index * 2])
+                        let hi = UInt16(bytes[index * 2 + 1]) << 8
+                        let sample = Int16(bitPattern: lo | hi)
+                        channel[index] = sample == .min ? -1.0 : Float(sample) / 32_767.0
+                    }
+                }
+                floatBuffer.frameLength = AVAudioFrameCount(batchFrames)
+                try writerFile?.write(from: floatBuffer)
+                remaining -= Int64(batchFrames)
+            }
+            writerFile = nil
+        }
+        if FileManager.default.fileExists(atPath: audioURL.path) {
+            _ = try FileManager.default.replaceItemAt(audioURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: audioURL)
+        }
+        RecordingFileProtection.apply(to: audioURL)
+        var recoveredDraft = draft
+        recoveredDraft.closingFrameCount = availableFrames
+        return try recoveredDraft.envelope(audioURL: audioURL, verifyFullDecode: true)
     }
 
     private static func quarantineRegularFiles(_ urls: [URL], from epoch: URL, root: URL) throws {

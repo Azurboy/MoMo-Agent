@@ -30,6 +30,7 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
     public static let lease: TimeInterval = 15 * 60
     public static let backgroundLease: TimeInterval = 6 * 60 * 60
     public static let interactiveZeroProgressLease: TimeInterval = 90
+    public static let interactiveStallLease: TimeInterval = 45
     public static let cooldown: TimeInterval = 5 * 60
     public private(set) var controlGeneration = UUID()
     public private(set) var acceptsLegacyControlCallbacks = true
@@ -151,6 +152,15 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
         return attempt.cancellationRequestedAt != nil && !attempt.outstanding
     }
 
+    public func allowsInteractiveAudioBlock(for envelope: ManifestEnvelope) throws -> Bool {
+        if let attempt = attempts[envelope.manifest.chunkID] {
+            guard attempt.manifestSHA256 == envelope.manifestSHA256 else {
+                throw LinkError.conflictingTransfer(envelope.manifest.chunkID)
+            }
+        }
+        return true
+    }
+
     public func canAdmit(_ envelope: ManifestEnvelope, now: Date) throws -> Bool {
         guard let prior = attempts[envelope.manifest.chunkID] else { return true }
         guard prior.manifestSHA256 == envelope.manifestSHA256 else { throw LinkError.conflictingTransfer(prior.chunkID) }
@@ -171,19 +181,26 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
 
     public func stalledCandidate(now: Date, eligibleChunkIDs: Set<UUID>? = nil,
                                  stallLease: TimeInterval = Self.lease,
-                                 interactiveZeroProgressLease: TimeInterval? = nil) -> FileTransferAttempt? {
+                                 interactiveZeroProgressLease: TimeInterval? = nil,
+                                 interactiveStallLease: TimeInterval? = nil) -> FileTransferAttempt? {
         stalledCandidates(now: now, limit: 1, eligibleChunkIDs: eligibleChunkIDs,
-            stallLease: stallLease, interactiveZeroProgressLease: interactiveZeroProgressLease).first
+            stallLease: stallLease, interactiveZeroProgressLease: interactiveZeroProgressLease,
+            interactiveStallLease: interactiveStallLease).first
     }
 
     /// Offer the bounded queue so an original that cannot be retried does not hide later candidates.
     public func stalledCandidates(now: Date, limit: Int, eligibleChunkIDs: Set<UUID>? = nil,
                                   stallLease: TimeInterval = Self.lease,
-                                  interactiveZeroProgressLease: TimeInterval? = nil) -> [FileTransferAttempt] {
+                                  interactiveZeroProgressLease: TimeInterval? = nil,
+                                  interactiveStallLease: TimeInterval? = nil) -> [FileTransferAttempt] {
         guard limit > 0 else { return [] }
         let baseLease = max(Self.lease, stallLease)
         let stalled = attempts.values.filter {
-            let requiredLease = ($0.completedUnits == 0 ? interactiveZeroProgressLease.map { min(baseLease, $0) } : nil) ?? baseLease
+            let requiredLease = Self.requiredStallLease(
+                for: $0,
+                baseLease: baseLease,
+                interactiveZeroProgressLease: interactiveZeroProgressLease,
+                interactiveStallLease: interactiveStallLease)
             return $0.outstanding && $0.cancellationRequestedAt == nil
                 && now.timeIntervalSince($0.lastProgressAt) >= requiredLease
                 && (eligibleChunkIDs?.contains($0.chunkID) ?? true)
@@ -197,15 +214,34 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
     /// Persist this decision before calling SDK cancel. Keep the slot until the SDK actually drops it.
     public mutating func requestCancellation(_ candidate: FileTransferAttempt, now: Date,
                                              stallLease: TimeInterval = Self.lease,
-                                             interactiveZeroProgressLease: TimeInterval? = nil) -> Bool {
+                                             interactiveZeroProgressLease: TimeInterval? = nil,
+                                             interactiveStallLease: TimeInterval? = nil) -> Bool {
         guard let current = attempts[candidate.chunkID], current == candidate,
               current.outstanding, current.cancellationRequestedAt == nil else { return false }
         let baseLease = max(Self.lease, stallLease)
-        let requiredLease = (current.completedUnits == 0 ? interactiveZeroProgressLease.map { min(baseLease, $0) } : nil) ?? baseLease
+        let requiredLease = Self.requiredStallLease(
+            for: current,
+            baseLease: baseLease,
+            interactiveZeroProgressLease: interactiveZeroProgressLease,
+            interactiveStallLease: interactiveStallLease)
         guard now.timeIntervalSince(current.lastProgressAt) >= requiredLease else { return false }
         attempts[candidate.chunkID]?.cancellationRequestedAt = now
         attempts[candidate.chunkID]?.retryNotBefore = now.addingTimeInterval(Self.cooldown)
         return true
+    }
+
+    private static func requiredStallLease(for attempt: FileTransferAttempt,
+                                           baseLease: TimeInterval,
+                                           interactiveZeroProgressLease: TimeInterval?,
+                                           interactiveStallLease: TimeInterval?) -> TimeInterval {
+        var required = baseLease
+        if let interactiveStallLease {
+            required = min(required, interactiveStallLease)
+        }
+        if attempt.completedUnits == 0, let interactiveZeroProgressLease {
+            required = min(required, interactiveZeroProgressLease)
+        }
+        return required
     }
 
     public func acceptsFileCallback(chunkID: UUID, attemptID: UUID?) -> Bool {
