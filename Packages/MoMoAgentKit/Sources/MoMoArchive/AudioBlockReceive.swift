@@ -83,13 +83,21 @@ extension ArchiveStore {
                 try handle.write(contentsOf: block.payload)
                 offset += Int64(block.payload.count)
             }
-            try handle.synchronize()
+            if offset == manifest.byteCount {
+                try handle.synchronize()
+            }
             try handle.close()
         } catch { try handle.close(); throw error }
-        try ArchiveFilePolicy.write(Data(String(offset).utf8), to: offsetURL)
-        let checkpoint = try FileHandle(forWritingTo: offsetURL)
-        do { try checkpoint.synchronize(); try checkpoint.close() }
-        catch { try checkpoint.close(); throw error }
+        if files.fileExists(atPath: offsetURL.path) {
+            try Data(String(offset).utf8).write(to: offsetURL)
+        } else {
+            try ArchiveFilePolicy.write(Data(String(offset).utf8), to: offsetURL)
+        }
+        if offset == manifest.byteCount {
+            let checkpoint = try FileHandle(forWritingTo: offsetURL)
+            do { try checkpoint.synchronize(); try checkpoint.close() }
+            catch { try checkpoint.close(); throw error }
+        }
         guard offset == manifest.byteCount else { return AudioBlockReply(block: block, nextOffset: offset) }
         guard try ContentHash.sha256(fileAt: audio) == manifest.audioSHA256 else {
             try files.removeItem(at: directory)

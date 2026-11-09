@@ -62,6 +62,7 @@ private struct FileQueueDiagnostic: Encodable {
     private nonisolated let statusReplyProvider: (@Sendable (Bool) async throws -> StatusSnapshot)?
     private nonisolated let controlReplyProvider: (@Sendable (ControlMessage) async throws -> ControlMessage?)?
     var audioBlockTask: Task<Void, Never>?
+    var activeAudioBlockGate: AudioBlockReplyGate?
     var audioBlockChunkID: UUID?
     var resumableAudioBlockChunkID: UUID?
     var audioBlockBackoff = LinkRetryBackoff()
@@ -130,6 +131,14 @@ private struct FileQueueDiagnostic: Encodable {
     }
 
     public var resumableAudioBlockChunk: UUID? { resumableAudioBlockChunkID }
+
+    public func hasSubmittedFileTransfer(chunkID: UUID) -> Bool {
+        submissions.hasSubmittedFileTransfer(chunkID: chunkID)
+    }
+
+    public func refreshFileQueue() throws {
+        _ = try refreshOutstanding()
+    }
 
     /// A user-confirmed receiver change invalidates old-peer custody, including late callbacks.
     public func resetPeerControlState() throws {
@@ -333,11 +342,13 @@ private struct FileQueueDiagnostic: Encodable {
         try transferFileResult(at: url, envelope: envelope) == .submitted
     }
 
-    @discardableResult public func transferFileResult(at url: URL, envelope: ManifestEnvelope) throws -> FileSubmissionResult {
-        try refreshOutstanding()
+    @discardableResult public func transferFileResult(at url: URL, envelope: ManifestEnvelope,
+                                                      refreshQueue: Bool = true) throws -> FileSubmissionResult {
+        if refreshQueue { try refreshOutstanding() }
         guard audioBlockChunkID != envelope.manifest.chunkID else { return .alreadySubmitted }
         if session.isReachable, resumableAudioBlockChunkID == envelope.manifest.chunkID { return .retryLater }
         guard peerState == .available else { return .deferred }
+        if let blocked = try submissions.precheckReservation(envelope) { return blocked }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
             event(.audioBlockSourceInvalid(chunkID: envelope.manifest.chunkID))
@@ -739,9 +750,13 @@ private struct FileQueueDiagnostic: Encodable {
     }
 
     public nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
-        guard session.isReachable else { return }
+        let reachable = session.isReachable
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard reachable, self.session.isReachable else {
+                self.activeAudioBlockGate?.finish(.failure(LinkError.notReachable))
+                return
+            }
             self.interactiveControls.allowReplay()
             self.allowAudioBlockReplay()
             #if os(iOS)

@@ -147,7 +147,6 @@ final class PhoneReceiveCoordinator {
                 }
             } catch { onFailure(String(localized: "无法核对同步指令回执：\(error.localizedDescription)")); return }
             if let failure {
-                if case .receipt = message { receiptCursor = 0 }
                 if case .reconcileResponse(let response) = message {
                     if submittingResponseID == response.messageID { submissionFailed = true }
                     do {

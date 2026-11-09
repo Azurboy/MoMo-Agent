@@ -348,3 +348,42 @@ private func linkEnvelope() throws -> ManifestEnvelope {
     #expect(rejected["control_preserved"] as? Bool == false)
     #expect(try LinkWireFormat.controlReplyMessage(rejected) == nil)
 }
+
+@Test func precheckReservationAndSubmittedLookupMatchReserveAcrossLargeBacklog() async throws {
+    let items = try (1...420).map { (sequence: Int64($0), envelope: try linkEnvelope()) }
+    var state = LinkSubmissionState()
+    state.update(activation: .activated, isReachable: false)
+    let now: TimeInterval = 100
+
+    // Simulate 380 chunks already uploaded via transferFile and awaiting durable receipts.
+    for index in 0..<380 {
+        let envelope = items[index].envelope
+        #expect(!state.hasSubmittedFileTransfer(chunkID: envelope.manifest.chunkID))
+        #expect(try state.precheckReservation(envelope, now: now) == nil)
+        #expect(try state.reserve(envelope, now: now) == .submitted)
+        #expect(state.hasSubmittedFileTransfer(chunkID: envelope.manifest.chunkID))
+        #expect(try state.precheckReservation(envelope, now: now) == .alreadySubmitted)
+        _ = state.didFinish(chunkID: envelope.manifest.chunkID, now: now)
+        #expect(state.hasSubmittedFileTransfer(chunkID: envelope.manifest.chunkID))
+        #expect(try state.precheckReservation(envelope, now: now) == .alreadySubmitted)
+    }
+
+    // Even from cursor 0, a single 512-row scan skips all 380 awaiting-receipt rows in memory and fills 4 slots.
+    var submittedSequences: [Int64] = []
+    let outcome = try #require(await scanFileBatch(
+        after: 0, maximumScanned: 512,
+        hasDueRetries: { state.hasDueFileRetries(now: now) },
+        sequenceOf: \.sequence,
+        loadPage: { after in Array(items.filter { $0.sequence > after }.prefix(4)) },
+        submit: { item in
+            if let blocked = try state.precheckReservation(item.envelope, now: now) { return blocked }
+            let result = try state.reserve(item.envelope, now: now)
+            if result == .submitted { submittedSequences.append(item.sequence) }
+            return result
+        }
+    ))
+    #expect(submittedSequences == [381, 382, 383, 384])
+    #expect(outcome.cursor == 384)
+    #expect(outcome.deferred)
+    #expect(try state.precheckReservation(items[384].envelope, now: now) == .deferred)
+}

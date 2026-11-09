@@ -40,6 +40,7 @@ extension WatchConnectivityTransport {
     public func cancelAudioBlockTransfer() {
         audioBlockPhase = "cancelled"
         audioBlockGeneration = nil; audioBlockChunkID = nil; resumableAudioBlockChunkID = nil
+        activeAudioBlockGate?.finish(.failure(CancellationError())); activeAudioBlockGate = nil
         audioBlockTask?.cancel(); audioBlockTask = nil
     }
 
@@ -107,10 +108,12 @@ extension WatchConnectivityTransport {
         let data = try WireJSON.encode(block)
         guard data.count <= AudioBlock.maximumWireBytes else { throw LinkError.invalidMetadata }
         let gate = AudioBlockReplyGate()
+        activeAudioBlockGate = gate
+        defer { if activeAudioBlockGate === gate { activeAudioBlockGate = nil } }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 guard gate.install(continuation) else { return }
-                gate.startDeadline()
+                gate.startDeadline(after: .seconds(12))
                 if Task.isCancelled { gate.finish(.failure(CancellationError())); return }
                 session.sendMessage(["audio_block": data], replyHandler: { @Sendable reply in
                     do {
