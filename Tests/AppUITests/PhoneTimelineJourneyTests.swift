@@ -2,6 +2,99 @@ import XCTest
 
 @MainActor
 final class PhoneTimelineJourneyTests: XCTestCase {
+    func testRecordingDetailPlayerTapDragScrollAndResumeReachTheRealAudioClock() throws {
+        let app = launch(timelineFixture: "player")
+        latestWindow(app).tap()
+        let paragraph = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "transcript.play.")).firstMatch
+        XCTAssertTrue(paragraph.waitForExistence(timeout: 10))
+        paragraph.tap()
+        try waitForPlayerLabel("暂停回听这段文字", element: paragraph)
+        paragraph.tap()
+        try waitForPlayerLabel("继续回听这段文字", element: paragraph)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let mini = app.buttons["playback.mini.open"]
+        XCTAssertTrue(mini.waitForExistence(timeout: 5))
+        mini.tap()
+        XCTAssertTrue(app.navigationBars["录音"].waitForExistence(timeout: 5))
+        let progress = app.descendants(matching: .any).matching(identifier: "transcript.recording.play.seek").firstMatch
+        let play = app.buttons["transcript.recording.play"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 10))
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5)).tap()
+        try waitForPlayerLabel("继续回听", element: play)
+        let selected = try playerTime(progress)
+        XCTAssertEqual(selected.current, (selected.total * 0.7).rounded(.down), accuracy: 1)
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: progress.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)))
+        let dragged = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let value = try? self.playerTime(progress) else { return false }
+            return abs(value.current - (value.total * 0.25).rounded(.down)) <= 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [dragged], timeout: 8), .completed)
+        XCTAssertEqual(play.label, "继续回听")
+        attach(app, name: "recording-player-paused-after-drag")
+
+        let beforeScroll = try playerTime(progress)
+        let text = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "transcript.text.")).firstMatch
+        let top = text.frame.minY
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: progress.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: -3)))
+        let scrolled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !text.exists || text.frame.minY < top - 40 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [scrolled], timeout: 5), .completed, "A vertical drag on the waveform must scroll the text.")
+        XCTAssertEqual(try playerTime(progress).current, beforeScroll.current)
+        XCTAssertEqual(play.label, "继续回听")
+        attach(app, name: "recording-player-vertical-scroll-without-seek")
+
+        play.tap()
+        try waitForPlayerLabel("暂停回听", element: play)
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: progress.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5)))
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let value = try? self.playerTime(progress) else { return false }
+            return value.current > (value.total * 0.6).rounded(.down) && play.label == "暂停回听"
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 8), .completed, "The native clock must resume beyond the selected position.")
+        play.tap()
+        try waitForPlayerLabel("继续回听", element: play)
+        XCTAssertFalse(app.staticTexts["transcript.recording.play.failure"].exists)
+        attach(app, name: "recording-player-resumed-from-dragged-position")
+    }
+
+    private func waitForPlayerLabel(_ label: String, element: XCUIElement) throws {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+    }
+
+    private func playerTime(_ element: XCUIElement) throws -> (current: Double, total: Double) {
+        let value = try XCTUnwrap(element.value as? String)
+        let times = value.components(separatedBy: "，共 ")
+        XCTAssertEqual(times.count, 2)
+        func seconds(_ text: String) throws -> Double {
+            try text.split(separator: ":").reduce(0) { total, field in total * 60 + (try XCTUnwrap(Double(field))) }
+        }
+        return try (seconds(times[0]), seconds(times[1]))
+    }
+
+    func testPlayerCanSeekBeforePlayAndKeepsPausedPosition() throws {
+        let app = launch()
+        latestWindow(app).tap()
+        let progress = app.descendants(matching: .any).matching(identifier: "transcript.recording.play.seek").firstMatch
+        let play = app.buttons["transcript.recording.play"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 15))
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let value = progress.value as? String else { return false }
+            return !value.contains("--:--")
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 15), .completed)
+        let before = try XCTUnwrap(progress.value as? String)
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5)).tap()
+        let sought = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (progress.value as? String) != before && play.label == "继续回听" && play.isEnabled
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [sought], timeout: 8), .completed,
+                       "Tapping the waveform must select a position before the first play without starting sound.")
+        attach(app, name: "player-preview-tap-selected-position")
+    }
+
     func testContinuousSpeechMergesAndSpeakerChangeStartsAnotherRow() {
         let app = launch(timelineFixture: "turns")
         latestWindow(app).tap()

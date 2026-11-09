@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import MoMoArchive
 
 /// All three presentations observe the runtime's one player. A preview never starts playback.
@@ -13,13 +14,14 @@ struct AudioPlayerCard: View {
     @State private var preview: AudioPlaybackSnapshot?
     @State private var failure: String?
     @State private var changing = false
+    @State private var pendingPlayback: Bool?
     @State private var operation = UUID()
     @State private var seekPreview: Double?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var active: AudioPlaybackSnapshot? { playback.snapshot?.target == target ? playback.snapshot : nil }
     private var display: AudioPlaybackSnapshot? { active ?? (preview?.target == target ? preview : nil) }
-    private var playing: Bool { active?.state == .playing }
+    private var playing: Bool { pendingPlayback ?? (active != nil && playback.playbackRequested) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -28,9 +30,9 @@ struct AudioPlayerCard: View {
                     PlaybackToggleButton(playing: playing, loading: changing || active?.state == .loading,
                                          label: playing ? String(localized: "暂停回听") : active?.state == .paused ? String(localized: "继续回听") : playLabel,
                                          size: 52, identifier: actionIdentifier) { toggle() }
-                        .disabled(disabled || unavailableReason != nil || changing || active?.state == .loading)
+                        .disabled(disabled || unavailableReason != nil)
                     PlaybackWaveform(snapshot: display, identifier: actionIdentifier + ".seek",
-                                     disabled: disabled || unavailableReason != nil || active == nil || changing,
+                                     disabled: disabled || unavailableReason != nil,
                                      reading: unavailableReason == nil && failure == nil && !disabled,
                                      previewPosition: $seekPreview, seek: seek)
                         .frame(height: dynamicTypeSize.isAccessibilitySize ? 64 : 52)
@@ -61,7 +63,7 @@ struct AudioPlayerCard: View {
                 }
             }
         }
-        .onChange(of: target) { operation = UUID(); changing = false; seekPreview = nil }
+        .onChange(of: target) { operation = UUID(); changing = false; seekPreview = nil; pendingPlayback = nil }
     }
 
     private func toggle() {
@@ -70,16 +72,20 @@ struct AudioPlayerCard: View {
         let wasActive = active != nil
         let attempt = UUID()
         operation = attempt
+        pendingPlayback = !wasPlaying
         changing = true; failure = nil
         Task {
-            defer { if operation == attempt { changing = false } }
+            defer { if operation == attempt { changing = false; seekPreview = nil; pendingPlayback = nil } }
             do {
                 guard operation == attempt else { return }
-                if wasActive {
+                if wasPlaying { await playback.pause() }
+                else if wasActive {
                     guard playback.snapshot?.target == expectedTarget else { return }
-                    if wasPlaying { await playback.pause() }
-                    else { try await playback.resume() }
-                } else { try await playback.play(expectedTarget) }
+                    try await playback.resume()
+                } else {
+                    let position = seekPreview.flatMap { $0 < (display?.duration ?? 0) ? $0 : nil }
+                    try await playback.play(expectedTarget, from: position)
+                }
             } catch is CancellationError { }
             catch {
                 if operation == attempt { failure = String(localized: "原音暂时无法播放，请检查可回听范围后重试。") }
@@ -88,16 +94,19 @@ struct AudioPlayerCard: View {
     }
 
     private func seek(_ position: Double) {
-        guard !changing, active != nil else { return }
+        guard !disabled, unavailableReason == nil, display?.canSeek == true else { return }
         let expectedTarget = target
+        let continuePlaying = playing
         let attempt = UUID()
         operation = attempt
+        pendingPlayback = continuePlaying
+        seekPreview = position
         changing = true; failure = nil
         Task {
-            defer { if operation == attempt { changing = false } }
+            defer { if operation == attempt { changing = false; seekPreview = nil; pendingPlayback = nil } }
             do {
-                guard operation == attempt, playback.snapshot?.target == expectedTarget else { return }
-                try await playback.seek(to: position)
+                guard operation == attempt else { return }
+                try await playback.seek(to: position, in: expectedTarget, continuePlaying: continuePlaying)
             }
             catch is CancellationError { }
             catch {
@@ -199,50 +208,131 @@ private struct PlaybackWaveform: View {
     let reading: Bool
     @Binding var previewPosition: Double?
     let seek: (Double) -> Void
-    @GestureState private var dragging = false
 
-    private var canSeek: Bool { !disabled && snapshot?.canSeek == true && (snapshot?.duration ?? 0) > 0 }
+    private var canSeek: Bool {
+        !disabled && snapshot?.canSeek == true && snapshot?.duration.map { $0.isFinite && $0 > 0 } == true
+    }
     private var position: Double { previewPosition ?? snapshot?.position ?? 0 }
     private var rangeLabel: String {
         if snapshot?.target.source != nil { String(localized: "引用片段") } else { String(localized: "整段原音") }
     }
 
     var body: some View {
-        GeometryReader { geometry in
+        ZStack {
             PlaybackWaveformDrawing(snapshot: snapshot, position: position, reading: reading)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 5)
-                    .updating($dragging) { _, state, _ in state = true }
-                    .onChanged { value in
-                        guard canSeek, let duration = snapshot?.duration, geometry.size.width > 0 else { return }
-                        previewPosition = min(1, max(0, value.location.x / geometry.size.width)) * duration
-                    }
-                    .onEnded { value in
-                        defer { previewPosition = nil }
-                        guard canSeek, let duration = snapshot?.duration, geometry.size.width > 0 else { return }
-                        seek(min(1, max(0, value.location.x / geometry.size.width)) * duration)
-                    }, including: canSeek ? .all : .none)
+                .allowsHitTesting(false).accessibilityHidden(true)
+            PlaybackSeekInput(snapshot: snapshot, enabled: canSeek, identifier: identifier,
+                label: canSeek ? String(localized: "\(rangeLabel)播放进度") : String(localized: "\(rangeLabel)波形"),
+                previewPosition: $previewPosition, seek: seek)
         }
         .frame(minHeight: 44)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(canSeek ? String(localized: "\(rangeLabel)播放进度") : String(localized: "\(rangeLabel)波形"))
-        .accessibilityValue("\(PlaybackTime.text(position))，共 \(PlaybackTime.text(snapshot?.duration))")
-        .accessibilityHint(canSeek ? String(localized: "向上或向下调整播放位置") : String(localized: "当前范围暂不支持定位"))
-        .accessibilityAdjustableAction { direction in
-            guard canSeek, let snapshot else { return }
-            switch direction {
-            case .increment:
-                if let position = snapshot.adjustedSeekPosition(forward: true) { seek(position) }
-            case .decrement:
-                if let position = snapshot.adjustedSeekPosition(forward: false) { seek(position) }
-            @unknown default: break
-            }
-        }
-        .accessibilityIdentifier(identifier)
-        .onChange(of: dragging) { if !dragging { previewPosition = nil } }
         .onChange(of: snapshot?.target) { previewPosition = nil }
         .onChange(of: canSeek) { if !canSeek { previewPosition = nil } }
     }
+}
+
+/// UIKit arbitrates the horizontal scrub before claiming a touch from the enclosing vertical scroll view.
+private struct PlaybackSeekInput: UIViewRepresentable {
+    let snapshot: AudioPlaybackSnapshot?
+    let enabled: Bool
+    let identifier: String
+    let label: String
+    @Binding var previewPosition: Double?
+    let seek: (Double) -> Void
+
+    func makeUIView(context: Context) -> PlaybackSeekControl { PlaybackSeekControl(frame: .zero) }
+
+    func updateUIView(_ control: PlaybackSeekControl, context: Context) {
+        if control.playbackTarget != snapshot?.target || control.isEnabled != enabled {
+            control.resetInteraction()
+        }
+        control.playbackTarget = snapshot?.target
+        control.duration = snapshot?.duration ?? 0
+        control.isEnabled = enabled
+        control.pan.isEnabled = enabled
+        control.tap.isEnabled = enabled
+        control.accessibilityIdentifier = identifier
+        control.accessibilityLabel = label
+        control.accessibilityValue = "\(PlaybackTime.text(previewPosition ?? snapshot?.position ?? 0))，共 \(PlaybackTime.text(snapshot?.duration))"
+        control.accessibilityHint = enabled ? String(localized: "向上或向下调整播放位置") : String(localized: "当前范围暂不支持定位")
+        control.accessibilityTraits = enabled ? [.adjustable] : [.adjustable, .notEnabled]
+        control.preview = { previewPosition = $0 }
+        control.commit = seek
+        control.adjust = { forward in
+            guard var value = snapshot else { return }
+            value.position = previewPosition ?? value.position
+            if let position = value.adjustedSeekPosition(forward: forward) { seek(position) }
+        }
+    }
+}
+
+private final class PlaybackSeekControl: UIView, UIGestureRecognizerDelegate {
+    var isEnabled = true
+    var playbackTarget: AudioPlaybackTarget?
+    var duration = 0.0
+    var preview: ((Double?) -> Void)?
+    var commit: ((Double) -> Void)?
+    var adjust: ((Bool) -> Void)?
+    private var dragDuration: Double?
+    private var resetting = false
+    lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(dragged(_:)))
+    lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isAccessibilityElement = true
+        pan.delegate = self
+        addGestureRecognizer(pan)
+        addGestureRecognizer(tap)
+        tap.require(toFail: pan)
+    }
+
+    required init?(coder: NSCoder) { return nil }
+    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 44) }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard isEnabled, duration.isFinite, duration > 0 else { return false }
+        guard gestureRecognizer === pan else { return true }
+        let velocity = pan.velocity(in: self)
+        return abs(velocity.x) > abs(velocity.y)
+    }
+
+    func resetInteraction() {
+        resetting = true
+        pan.isEnabled = false; tap.isEnabled = false
+        dragDuration = nil
+        resetting = false
+    }
+
+    private func position(at point: CGPoint, duration: Double) -> Double {
+        min(1, max(0, Double(point.x / max(1, bounds.width)))) * duration
+    }
+
+    @objc private func dragged(_ recognizer: UIPanGestureRecognizer) {
+        guard !resetting, isEnabled else { return }
+        switch recognizer.state {
+        case .began, .changed:
+            if dragDuration == nil { dragDuration = duration }
+            preview?(position(at: recognizer.location(in: self), duration: dragDuration ?? duration))
+        case .ended:
+            let selected = position(at: recognizer.location(in: self), duration: dragDuration ?? duration)
+            dragDuration = nil
+            commit?(selected)
+        case .cancelled, .failed:
+            let wasDragging = dragDuration != nil
+            dragDuration = nil
+            if wasDragging { preview?(nil) }
+        default: break
+        }
+    }
+
+    @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
+        guard isEnabled, recognizer.state == .ended else { return }
+        commit?(position(at: recognizer.location(in: self), duration: duration))
+    }
+
+    override func accessibilityIncrement() { if isEnabled { adjust?(true) } }
+    override func accessibilityDecrement() { if isEnabled { adjust?(false) } }
 }
 
 private struct PlaybackWaveformDrawing: View {

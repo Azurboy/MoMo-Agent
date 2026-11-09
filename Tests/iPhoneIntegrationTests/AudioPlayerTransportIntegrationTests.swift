@@ -8,6 +8,82 @@ import MoMoContracts
 /// Actual AVAudioPlayer/AVAudioFile with the public speech fixture. Notification tests exercise
 /// app handling only; they do not certify physical phone calls or headphone-route behavior.
 extension AudioPlaybackIntegrationTests {
+    func testSeekDuringInitialLoadKeepsTheLatestExplicitPlayIntent() async throws {
+        let fixture = try await makeRecording()
+        let player = AudioPlaybackController(archive: fixture.archive)
+        addTeardownBlock { await player.stop() }
+        let entered = expectation(description: "Initial timeline held")
+        let busy = Task.detached { await fixture.archive.occupyForPlaybackClockRegression { entered.fulfill() } }
+        await fulfillment(of: [entered], timeout: 2)
+        let requested = expectation(description: "Play intent received")
+        withObservationTracking { _ = player.playbackRequested } onChange: { requested.fulfill() }
+        let earlier = Task { try await player.play(fixture.source) }
+        await fulfillment(of: [requested], timeout: 2)
+        try await player.seek(to: 2, in: .transcript(fixture.source), continuePlaying: true)
+        await busy.value
+        do { try await earlier.value; XCTFail("The selected position must supersede the original play request.") }
+        catch is CancellationError { }
+        XCTAssertEqual(player.snapshot?.state, .playing)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(player.snapshot?.position), 2)
+    }
+
+    func testLaterSeekKeepsPlayingIntentWhileTheEarlierSeekAwaitsValidation() async throws {
+        let fixture = try await makeRecording()
+        let player = AudioPlaybackController(archive: fixture.archive)
+        addTeardownBlock { await player.stop() }
+        try await player.play(fixture.source)
+        let entered = expectation(description: "Archive validation held")
+        let busy = Task.detached { await fixture.archive.occupyForPlaybackClockRegression { entered.fulfill() } }
+        await fulfillment(of: [entered], timeout: 2)
+        let earlier = Task { try await player.seek(to: 1) }
+        try await waitForPlayer(player, state: .paused)
+        XCTAssertTrue(player.playbackRequested, "Native preparation is distinct from the user's playback intent.")
+        try await player.seek(to: 2)
+        await busy.value
+        do { try await earlier.value; XCTFail("The earlier command must be superseded.") }
+        catch is CancellationError { }
+        XCTAssertEqual(player.snapshot?.state, .playing)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(player.snapshot?.position), 2)
+    }
+
+    func testPauseDuringSeekCannotRestartAudioWhenValidationReturns() async throws {
+        let fixture = try await makeRecording()
+        let player = AudioPlaybackController(archive: fixture.archive)
+        addTeardownBlock { await player.stop() }
+        try await player.play(fixture.source)
+        let entered = expectation(description: "Archive validation held")
+        let busy = Task.detached { await fixture.archive.occupyForPlaybackClockRegression { entered.fulfill() } }
+        await fulfillment(of: [entered], timeout: 2)
+        let earlier = Task { try await player.seek(to: 1) }
+        try await waitForPlayer(player, state: .paused)
+        await player.pause()
+        await busy.value
+        do { try await earlier.value; XCTFail("Pause must supersede the in-flight seek.") }
+        catch is CancellationError { }
+        XCTAssertEqual(player.snapshot?.state, .paused)
+        XCTAssertFalse(player.playbackRequested)
+    }
+
+    func testPauseBeforeTimelineLoadsCancelsThePendingPlay() async throws {
+        let fixture = try await makeRecording()
+        let player = AudioPlaybackController(archive: fixture.archive)
+        addTeardownBlock { await player.stop() }
+        let entered = expectation(description: "Timeline load held")
+        let busy = Task.detached { await fixture.archive.occupyForPlaybackClockRegression { entered.fulfill() } }
+        await fulfillment(of: [entered], timeout: 2)
+        let requested = expectation(description: "Play requested before timeline returns")
+        withObservationTracking { _ = player.playbackRequested } onChange: { requested.fulfill() }
+        let earlier = Task { try await player.play(fixture.source) }
+        await fulfillment(of: [requested], timeout: 2)
+        XCTAssertTrue(player.playbackRequested)
+        await player.pause()
+        await busy.value
+        do { try await earlier.value; XCTFail("Pause must cancel a pending initial play.") }
+        catch is CancellationError { }
+        XCTAssertNotEqual(player.snapshot?.state, .playing)
+        XCTAssertFalse(player.playbackRequested)
+    }
+
     func testPlaybackClockDoesNotInvalidateTranscriptTransportObservers() async throws {
         let fixture = try await makeRecording()
         let player = AudioPlaybackController(archive: fixture.archive)

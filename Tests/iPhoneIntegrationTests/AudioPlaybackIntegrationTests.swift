@@ -7,6 +7,24 @@ import MoMoContracts
 
 @MainActor
 final class AudioPlaybackIntegrationTests: XCTestCase {
+    func testSelectingPositionBeforePlayValidatesAudioWithoutStartingSound() async throws {
+        let fixture = try await makeRecording()
+        let probe = PlaybackSessionProbe()
+        let player = AudioPlaybackController(archive: fixture.archive, audioSession: probe.owner())
+        addTeardownBlock { await player.stop() }
+        let target = AudioPlaybackTarget.recording(fixture.source.sessionID, fixture.source.generation)
+        try await player.seek(to: 1.5, in: target)
+        XCTAssertEqual(player.snapshot?.target, target)
+        XCTAssertEqual(player.snapshot?.state, .paused)
+        XCTAssertEqual(try XCTUnwrap(player.snapshot?.position), 1.5, accuracy: 0.001)
+        XCTAssertFalse(player.playbackRequested)
+        XCTAssertEqual(probe.playbackStarts, 0)
+        XCTAssertTrue(probe.operations.isEmpty, "Selecting a position must not activate the audio session.")
+        try await player.resume()
+        XCTAssertEqual(player.snapshot?.state, .playing)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(player.snapshot?.position), 1.5)
+    }
+
     func testExplicitMarkPositionIsAppliedBeforeNativeAudioStarts() async throws {
         let fixture = try await makeRecording()
         let probe = PlaybackSessionProbe()

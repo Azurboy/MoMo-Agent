@@ -14,6 +14,7 @@ struct PhoneUITestConfiguration {
     var timelineFixture = false
     var timelineScrollFixture = false
     var timelineTurnsFixture = false
+    var playerInteractionFixture = false
     var lifeIllustrationsFixture = false
     var documentChange: DocumentChange? = nil
     var useSilentAudio = false
@@ -43,8 +44,9 @@ struct PhoneUITestConfiguration {
         result.lifeIllustrationsFixture = timelineFixture == "life-illustrations"
         result.timelineScrollFixture = timelineFixture == "scroll"
         result.timelineTurnsFixture = timelineFixture == "turns"
+        result.playerInteractionFixture = timelineFixture == "player"
         result.remoteFixture = timelineFixture == "remote" || timelineFixture == "chat"
-        result.timelineFixture = result.lifeIllustrationsFixture || timelineFixture == "1" || result.timelineScrollFixture || result.timelineTurnsFixture || timelineFixture == "remote"
+        result.timelineFixture = result.lifeIllustrationsFixture || timelineFixture == "1" || result.timelineScrollFixture || result.timelineTurnsFixture || result.playerInteractionFixture || timelineFixture == "remote"
         result.useSilentAudio = fixture == "silence"
         result.padSpeechForPlayback = fixture == "speech-playback"
         result.showStatusFailure = environment["MOMO_UI_TEST_STATUS_FAILURE"] == "1"
@@ -109,7 +111,7 @@ struct PhoneUITestConfiguration {
             (illustrationBase + 14.3 * 3600, "坐在台灯旁喝茶，翻看画册。"),
             (illustrationBase + 15.2 * 3600, "明天再继续，今晚先休息。")
         ]
-        let inputs: [(Double, String)] = lifeIllustrationsFixture ? illustrationInputs : remoteFixture ? [(base, "下周五给小林发方案。方案需要包含手机采集和 Mac 执行的分工。聚餐还没有定，先不要安排。")] : timelineScrollFixture ? (8...19).map {
+        let inputs: [(Double, String)] = playerInteractionFixture ? [(base, "播放器交互测试")] : lifeIllustrationsFixture ? illustrationInputs : remoteFixture ? [(base, "下周五给小林发方案。方案需要包含手机采集和 Mac 执行的分工。聚餐还没有定，先不要安排。")] : timelineScrollFixture ? (8...19).map {
             (todayDay.date().timeIntervalSince1970 + Double($0) * 3_600,
              "第 \($0) 时的测试录音，用于验证时间轴顺序和阅读位置。")
         } + [(todayDay.adding(days: -1).date().timeIntervalSince1970 + 23 * 3_600,
@@ -135,7 +137,17 @@ struct PhoneUITestConfiguration {
                 sourceDeviceID: runID, endFrame: audio.length, reason: .stopped))
             let claimed = try await archive.claimAnalysisJob(configurationHash: fingerprint ?? "timeline-ui")
             guard let ticket = claimed else { throw FixtureError.invalidAudio }
-            if timelineTurnsFixture {
+            if playerInteractionFixture {
+                let firstEnd = audio.length / 3
+                let spans = try (0..<36).map { index in
+                    let start = index == 0 ? 0 : firstEnd + (audio.length - firstEnd) * Int64(index - 1) / 35
+                    let end = index == 0 ? firstEnd : firstEnd + (audio.length - firstEnd) * Int64(index) / 35
+                    return TranscriptSpan(chunkID: ticket.chunkID, frames: try FrameRange(start: start, count: end - start),
+                        text: "第 \(index + 1) 段：回看讨论记录时，可以选择原音位置，也可以继续上下滚动阅读文字。操作播放器不应改变正在阅读的录音。",
+                        startsNewSpeakerTurn: index > 0)
+                }
+                _ = try await archive.commitTranscript(ticket: ticket, spans: spans)
+            } else if timelineTurnsFixture {
                 let quarter = audio.length / 4
                 _ = try await archive.commitTranscript(ticket: ticket, spans: [
                     TranscriptSpan(chunkID: ticket.chunkID, frames: FrameRange(start: 0, count: quarter), text: "同一个人的连续发言，"),

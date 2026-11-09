@@ -39,16 +39,24 @@ final class PhonePlayerReducedMotionTests: XCTestCase {
         let runID = UUID().uuidString
         app.launchEnvironment["MOMO_UI_TEST_RUN_ID"] = runID
         app.launchEnvironment["MOMO_UI_TEST_TIMELINE_FIXTURE"] = "1"
-        app.launchArguments = ["-iphone.firstUse.completed", "YES"]
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         let evidence = XCTAttachment(string: "runID=\(runID); originalSettingsSwitch=\(originalValue); system Reduce Motion enabled through com.apple.Preferences UI and confirmed by public UIKit getter; formal timeline fixture, no ASR/provider/network flags or SwiftUI environment override")
         evidence.name = "reduce-motion-system-and-fixture"
         evidence.lifetime = .keepAlways; add(evidence)
 
-        let library = app.buttons["assistant.library"]
+        if app.buttons["welcome.skip"].waitForExistence(timeout: 5) {
+            app.buttons["welcome.skip"].tap()
+            app.buttons["welcome.start"].tap()
+            try wait("Defer initial pairing") { app.buttons["稍后配对"].exists }
+            app.buttons["稍后配对"].tap()
+        }
+        let library = app.tabBars.buttons["转录"]
         try wait("Library entry") { library.exists && library.isHittable }
         library.tap()
-        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window.")).firstMatch
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        try wait("Timeline populated") { rows.firstMatch.exists }
+        let row = rows.element(boundBy: rows.count - 1)
         try wait("Timeline row") { row.exists && row.isHittable }
         row.tap()
         let source = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
