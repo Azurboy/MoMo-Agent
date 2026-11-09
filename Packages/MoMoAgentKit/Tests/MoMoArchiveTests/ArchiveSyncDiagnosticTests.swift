@@ -22,6 +22,8 @@ struct ArchiveSyncDiagnosticTests {
         #expect(first.days[0].retentionCounts == ["present": 1])
         #expect(first.days[0].sourceDeviceID == fixture.deviceID.uuidString)
         #expect(first.latestCommit?.chunkID == envelope.manifest.chunkID && first.pendingReceiptCount == 1)
+        #expect(first.pendingReceiptCountsBySource == [fixture.deviceID.uuidString: 1])
+        #expect(first.pendingReconcileResponseCountsBySource == [:])
         let next = try fixture.envelope(startFrame: 1600, sequence: 1)
         _ = try await store.commitReceivedChunk(fixture.deliver(next, to: store))
         try await store.writeSyncDiagnostic(now: now.addingTimeInterval(1))

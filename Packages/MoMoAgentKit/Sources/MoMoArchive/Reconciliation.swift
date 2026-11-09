@@ -19,9 +19,10 @@ extension ArchiveStore {
         }
     }
 
-    public func pendingReconcileResponses(limit: Int = 32) throws -> [ReconcileResponse] {
+    public func pendingReconcileResponses(limit: Int = 32, sourceDeviceID: UUID? = nil) throws -> [ReconcileResponse] {
         guard (1...32).contains(limit) else { throw ArchiveError.invalidQuery }
-        let rows = try database.rows("SELECT request FROM reconcile_requests WHERE pending=1 ORDER BY rowid LIMIT ?", [.integer(Int64(limit))])
+        let rows = try database.rows("SELECT request FROM reconcile_requests WHERE pending=1\(sourceDeviceID == nil ? "" : " AND source_device=?") ORDER BY rowid LIMIT ?",
+            (sourceDeviceID.map { [.text($0.uuidString)] } ?? []) + [.integer(Int64(limit))])
         // A cached success is not evidence that the original audio still exists at replay time.
         return try rows.map { try refreshReconcileResponse(WireJSON.decode(ReconcileRequest.self, from: $0.requireData(0))) }
     }

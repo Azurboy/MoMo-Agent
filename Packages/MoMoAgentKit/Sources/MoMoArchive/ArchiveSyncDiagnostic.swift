@@ -16,6 +16,8 @@ public struct ArchiveSyncDiagnostic: Codable, Sendable {
     public let observedAt: Date
     public let libraryInstanceID: UUID
     public let pendingReceiptCount: Int
+    public let pendingReceiptCountsBySource: [String: Int]?
+    public let pendingReconcileResponseCountsBySource: [String: Int]?
     public let latestCommit: Commit?
     public let days: [Day]
 }
@@ -59,8 +61,17 @@ extension ArchiveStore {
         if !ids.isEmpty { days.append(.init(sourceDeviceID: source, localDay: day, chunkIDs: ids, retentionCounts: retention, receivedBytes: bytes)) }
         let latest = try database.rows("SELECT value FROM metadata WHERE key='latest_receive_commit'").first
             .map { try WireJSON.decode(ArchiveSyncDiagnostic.Commit.self, from: Data($0.requireString(0).utf8)) }
+        let receiptCounts = try database.rows("""
+            SELECT s.source_device,COUNT(*) FROM receipt_outbox r
+            JOIN chunks c ON c.id=r.chunk_id JOIN sessions s ON s.id=c.session_id
+            WHERE r.sent=0 AND s.deleted=0 AND c.retention='present' GROUP BY s.source_device
+            """)
+        let responseCounts = try database.rows("SELECT source_device,COUNT(*) FROM reconcile_requests WHERE pending=1 GROUP BY source_device")
         let snapshot = ArchiveSyncDiagnostic(observedAt: now, libraryInstanceID: libraryInstanceID,
-            pendingReceiptCount: try pendingReceiptCount(), latestCommit: latest, days: days)
+            pendingReceiptCount: try pendingReceiptCount(),
+            pendingReceiptCountsBySource: try Dictionary(uniqueKeysWithValues: receiptCounts.map { (try $0.requireString(0), Int(try $0.requireInt(1))) }),
+            pendingReconcileResponseCountsBySource: try Dictionary(uniqueKeysWithValues: responseCounts.map { (try $0.requireString(0), Int(try $0.requireInt(1))) }),
+            latestCommit: latest, days: days)
         try ArchiveFilePolicy.write(WireJSON.encode(snapshot), to: rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/sync-receive-diagnostic.json"))
         performanceMonitor.record(.writeSyncDiagnostic, durationMs: APIPerformanceMonitor.uptimeMilliseconds() - startedMs, itemCount: rows.count)
     }

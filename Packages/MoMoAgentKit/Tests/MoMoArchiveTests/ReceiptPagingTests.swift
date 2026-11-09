@@ -4,6 +4,28 @@ import MoMoContracts
 @testable import MoMoArchive
 
 struct ReceiptPagingTests {
+    @Test func reconciliationPagesAndDiagnosticsSeparateWatchesWithoutDroppingTheOtherOutbox() async throws {
+        let first = try Fixture(), second = try Fixture()
+        defer { first.remove(); second.remove() }
+        let store = try first.store()
+        let firstRequest = try ReconcileRequest(sourceDeviceID: first.deviceID, receiverDeviceID: first.deviceID,
+            libraryInstanceID: store.libraryInstanceID, items: [ReconcileChunkIdentity(envelope: first.envelope())])
+        let secondRequest = try ReconcileRequest(sourceDeviceID: second.deviceID, receiverDeviceID: first.deviceID,
+            libraryInstanceID: store.libraryInstanceID, items: [ReconcileChunkIdentity(envelope: second.envelope())])
+        let old = try await store.receiveReconcileRequest(secondRequest)
+        let current = try await store.receiveReconcileRequest(firstRequest)
+        #expect(try await store.pendingReconcileResponses(limit: 1, sourceDeviceID: first.deviceID) == [current])
+        #expect(try await store.pendingReconcileResponses(limit: 1, sourceDeviceID: second.deviceID) == [old])
+        try await store.writeSyncDiagnostic()
+        let diagnostic = try WireJSON.decode(ArchiveSyncDiagnostic.self, from: Data(contentsOf:
+            store.rootURL.appendingPathComponent("Library/Application Support/MoMoAgent/sync-receive-diagnostic.json")))
+        #expect(diagnostic.pendingReconcileResponseCountsBySource == [first.deviceID.uuidString: 1, second.deviceID.uuidString: 1])
+        try await store.markReconcileResponseSubmitted(messageID: current.messageID)
+        let reopened = try first.store()
+        #expect(try await reopened.pendingReconcileResponses(sourceDeviceID: first.deviceID).isEmpty)
+        #expect(try await reopened.pendingReconcileResponses(sourceDeviceID: second.deviceID) == [old])
+    }
+
     @Test func receiptsAndPendingStatusAreScopedToTheSelectedWatchWithoutAcknowledgingAnotherWatch() async throws {
         let first = try Fixture(), second = try Fixture()
         defer { first.remove(); second.remove() }

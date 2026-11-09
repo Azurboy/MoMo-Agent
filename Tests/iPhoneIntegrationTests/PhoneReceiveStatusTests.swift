@@ -9,6 +9,91 @@ import MoMoRecording
 
 @MainActor
 final class PhoneReceiveStatusTests: XCTestCase {
+    func testRetryingOrInteractiveReconciliationNeverBlocksDurableAudioReceipts() async throws {
+        for admission in [ControlSubmissionResult.deferred, .retryLater, .submitted, .alreadySubmitted] {
+            let fixture = try await Fixture(), coordinator = fixture.coordinator()
+            let clock = try await fixture.selectWatch(on: coordinator)
+            await coordinator.receive(.selectedWatchStatusReceived(try fixture.snapshot(revision: 1),
+                origin: .applicationContextCallback, context: clock.receive()))
+            let response = try await fixture.archive.receiveReconcileRequest(fixture.request())
+            var attempted: [ControlMessage] = []
+            await coordinator.submitPendingControls(submit: { message in
+                attempted.append(message)
+                if case .reconcileResponse = message { return (admission, .submitted) }
+                return (.submitted, .deferred)
+            }, replay: { _ in }, retrying: false)
+            XCTAssertEqual(attempted, [.reconcileResponse(response), .receipt(fixture.receipt)])
+            let receipts = try await fixture.archive.pendingReceipts()
+            XCTAssertEqual(receipts, [fixture.receipt], "Transport admission must not acknowledge or delete audio.")
+            let pending = try await fixture.archive.pendingReconcileResponses()
+            XCTAssertEqual(pending.isEmpty, admission == .submitted || admission == .alreadySubmitted)
+        }
+    }
+
+    func testInvalidReconciliationStillAllowsReceiptAndSurvivesRestart() async throws {
+        let fixture = try await Fixture(), coordinator = fixture.coordinator()
+        let clock = try await fixture.selectWatch(on: coordinator)
+        await coordinator.receive(.selectedWatchStatusReceived(try fixture.snapshot(revision: 1),
+            origin: .applicationContextCallback, context: clock.receive()))
+        let response = try await fixture.archive.receiveReconcileRequest(fixture.request())
+        var attempted: [ControlMessage] = []
+        await coordinator.submitPendingControls(submit: { message in
+            attempted.append(message)
+            if case .reconcileResponse = message { throw LinkError.invalidMetadata }
+            return (.submitted, .deferred)
+        }, replay: { _ in }, retrying: false)
+        XCTAssertEqual(attempted, [.reconcileResponse(response), .receipt(fixture.receipt)])
+        let reopened = try ArchiveStore(rootURL: fixture.archive.rootURL, receiverDeviceID: fixture.receiver)
+        let responses = try await reopened.pendingReconcileResponses()
+        let receipts = try await reopened.pendingReceipts()
+        XCTAssertEqual(responses, [response])
+        XCTAssertEqual(receipts, [fixture.receipt])
+    }
+
+    func testResponseBurstLeavesTransportCapacityForReceiptsAndScopesTheSelectedWatch() async throws {
+        let fixture = try await Fixture(), coordinator = fixture.coordinator()
+        let clock = try await fixture.selectWatch(on: coordinator)
+        await coordinator.receive(.selectedWatchStatusReceived(try fixture.snapshot(revision: 1),
+            origin: .applicationContextCallback, context: clock.receive()))
+        let foreignSource = UUID()
+        let foreign = try await fixture.archive.receiveReconcileRequest(ReconcileRequest(sourceDeviceID: foreignSource,
+            receiverDeviceID: fixture.receiver, libraryInstanceID: fixture.archive.libraryInstanceID,
+            items: [ReconcileChunkIdentity(envelope: fixture.envelope)]))
+        for _ in 0..<3 { _ = try await fixture.archive.receiveReconcileRequest(fixture.request()) }
+        var state = LinkControlSubmissionState(maximumOutstandingCount: 2)
+        var attempted: [ControlMessage] = []
+        await coordinator.submitPendingControls(submit: { message in
+            attempted.append(message)
+            return (try state.reserve(message, now: 100), .deferred)
+        }, replay: { _ in }, retrying: false)
+        XCTAssertEqual(attempted.count, 2)
+        XCTAssertEqual(attempted.last, .receipt(fixture.receipt))
+        let ownResponses = try await fixture.archive.pendingReconcileResponses(sourceDeviceID: fixture.source)
+        let otherResponses = try await fixture.archive.pendingReconcileResponses(sourceDeviceID: foreignSource)
+        XCTAssertEqual(ownResponses.count, 2)
+        XCTAssertEqual(otherResponses, [foreign], "Another Watch's response is retained without occupying this Watch's route.")
+    }
+
+    func testForeignResponseFailureRetiresOnlyItsRetryAndKeepsTheDurableOutbox() async throws {
+        let fixture = try await Fixture(), coordinator = fixture.coordinator()
+        let clock = try await fixture.selectWatch(on: coordinator)
+        await coordinator.receive(.selectedWatchStatusReceived(try fixture.snapshot(revision: 1),
+            origin: .applicationContextCallback, context: clock.receive()))
+        let foreignSource = UUID()
+        let foreign = try await fixture.archive.receiveReconcileRequest(ReconcileRequest(sourceDeviceID: foreignSource,
+            receiverDeviceID: fixture.receiver, libraryInstanceID: fixture.archive.libraryInstanceID,
+            items: [ReconcileChunkIdentity(envelope: fixture.envelope)]))
+        var banner: String?
+        coordinator.onSyncFailure = { banner = $0 }
+        let failure = TransportFailure(NSError(domain: WCErrorDomain, code: WCError.Code.payloadUnsupportedTypes.rawValue))
+        await coordinator.receive(.controlTransportFinished(message: .reconcileResponse(foreign), failure: failure))
+        XCTAssertNil(banner)
+        let retained = try await fixture.archive.pendingReconcileResponses(sourceDeviceID: foreignSource)
+        XCTAssertEqual(retained, [foreign])
+        await coordinator.receive(.controlTransportFinished(message: .receipt(fixture.receipt), failure: failure))
+        XCTAssertNotNil(banner, "A different Watch's failure must not hide a current Watch's failure.")
+    }
+
     func testRepeatedUnreachableFailuresNeverInterruptThePhoneOrAcknowledgePendingAudio() async throws {
         let fixture = try await Fixture(), coordinator = fixture.coordinator()
         let agent = try PhoneRemoteAgent(directory: fixture.root.appendingPathComponent("remote"), archive: fixture.archive, deviceID: fixture.receiver)
