@@ -31,7 +31,8 @@ extension RecordingStore {
     /// Routine sync checks unresolved chunks. A completed full audit remains fresh for one day.
     /// The round's persisted scope and request survive interruption, even if the next caller changes modes.
     public func nextReconciliationRequest(sourceDeviceID: UUID, beginNewRound: Bool = false, through: Int64 = .max,
-                                         preferPending: Bool = false, now: Date = Date()) throws -> ReconcileRequest? {
+                                         preferPending: Bool = false, allowHistoricalAudit: Bool = true,
+                                         now: Date = Date()) throws -> ReconcileRequest? {
         guard through >= 0, now.timeIntervalSince1970.isFinite else { throw RecordingReconciliationError.invalidCursor }
         guard let receiver = try boundReceiver() else { return nil }
         return try database.transaction {
@@ -40,12 +41,17 @@ extension RecordingStore {
                 guard value.source == sourceDeviceID, value.receiver == receiver.deviceID,
                       value.library == receiver.libraryInstanceID else { throw RecordingError.receiverMismatch }
                 if let requestID = value.requestID { return try reconciliationRequest(id: requestID).request }
-                if value.cursor >= value.highWater, !beginNewRound { return nil }
+                if value.cursor >= value.highWater, !beginNewRound, !(preferPending && !allowHistoricalAudit && value.fullHistory) {
+                    return nil
+                }
             }
-            if round.map({ $0.cursor >= $0.highWater && beginNewRound }) ?? true {
+            let preemptHistoricalForPending = round.map {
+                preferPending && !allowHistoricalAudit && $0.fullHistory && $0.requestID == nil
+            } ?? false
+            if preemptHistoricalForPending || (round.map({ $0.cursor >= $0.highWater && beginNewRound }) ?? true) {
                 let highWater = min(through, try database.rows("SELECT COALESCE(MAX(rowid),0) FROM chunks") { sqlite3_column_int64($0, 0) }.first ?? 0)
                 let auditAge = round?.historyAuditedAt.map { now.timeIntervalSince1970 - $0 }
-                let fullHistory = !preferPending || (auditAge.map { $0 < 0 || $0 >= 86_400 } ?? true)
+                let fullHistory = !preferPending || (allowHistoricalAudit && (auditAge.map { $0 < 0 || $0 >= 86_400 } ?? true))
                 try database.execute("INSERT INTO reconciliation_round(id,source_id,receiver_id,library_id,high_water,cursor,request_id,full_history) VALUES(1,?,?,?,?,0,NULL,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,receiver_id=excluded.receiver_id,library_id=excluded.library_id,high_water=excluded.high_water,cursor=0,request_id=NULL,full_history=excluded.full_history", [.text(sourceDeviceID.uuidString), .text(receiver.deviceID.uuidString), .text(receiver.libraryInstanceID.uuidString), .integer(highWater), .integer(fullHistory ? 1 : 0)])
                 round = try reconciliationRound()
             }
@@ -155,6 +161,11 @@ extension RecordingStore {
     /// Fair rowid paging; a blocked or unconfirmed first file does not starve newer sealed files.
     public func pendingChunkBatch(after sequence: Int64, through: Int64 = .max, limit: Int = 4) throws -> [RecordingChunkEntry] {
         guard sequence >= 0, through >= 0, (1...4).contains(limit) else { throw RecordingReconciliationError.invalidCursor }
+        return try pendingChunkPage(after: sequence, through: through, limit: limit)
+    }
+
+    public func pendingChunkPage(after sequence: Int64, through: Int64 = .max, limit: Int = 32) throws -> [RecordingChunkEntry] {
+        guard sequence >= 0, through >= 0, (1...64).contains(limit) else { throw RecordingReconciliationError.invalidCursor }
         return try database.rows("SELECT rowid,envelope FROM chunks WHERE rowid>? AND rowid<=? AND state='ready' AND id NOT IN (SELECT chunk_id FROM reconciliation_file_actions WHERE action!='retry') ORDER BY rowid LIMIT ?", [.integer(sequence), .integer(through), .integer(Int64(limit))]) { row in
             let envelope = try WireJSON.decode(ManifestEnvelope.self, from: RecordingDatabase.data(row, 1))
             let chunk = RecordedChunk(envelope: envelope,

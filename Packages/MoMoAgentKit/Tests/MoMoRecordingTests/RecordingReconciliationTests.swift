@@ -428,6 +428,71 @@ import MoMoContracts
         #expect(try await store.cleanupAcknowledgedChunks().count == 2)
     }
 
+    @Test func pendingOnlyReconciliationSkipsRemovedHistoryAndPreemptsIdleFullAudit() async throws {
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let store = try await boundStore(fixture)
+        let source = fixture.envelope.manifest.sourceDeviceID
+        let historical = try await addChunks(32, fixture: fixture, store: store)
+        for chunk in historical {
+            let receipt = try Receipt(
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID,
+                chunkID: chunk.envelope.manifest.chunkID,
+                audioSHA256: chunk.envelope.manifest.audioSHA256,
+                manifestSHA256: chunk.envelope.manifestSHA256
+            )
+            _ = try await store.applyReceipt(receipt)
+        }
+        _ = try await store.cleanupAcknowledgedChunks()
+
+        // Start a full-history round and complete its first page so cursor < highWater with full_history=1.
+        let now = Date()
+        let fullPageOne = try #require(await store.nextReconciliationRequest(sourceDeviceID: source, beginNewRound: true, now: now))
+        #expect(fullPageOne.items.count == 16)
+        _ = try await store.applyReconciliationResponse(response(fullPageOne) { item in
+            let chunk = try #require(historical.first { $0.envelope.manifest.chunkID == item.chunkID })
+            return .received(try Receipt(
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID,
+                chunkID: item.chunkID,
+                audioSHA256: chunk.envelope.manifest.audioSHA256,
+                manifestSHA256: chunk.envelope.manifestSHA256))
+        }, now: now)
+
+        // Seal 3 active ready chunks: pending-only mode must preempt the historical crawl and jump straight to them.
+        let active = try await addChunks(3, startingAt: 32, fixture: fixture, store: store)
+        #expect(try await store.pendingChunkPage(after: 0, limit: 32).count == 3)
+        let fastRequest = try #require(await store.nextReconciliationRequest(
+            sourceDeviceID: source,
+            beginNewRound: true,
+            preferPending: true,
+            allowHistoricalAudit: false,
+            now: now.addingTimeInterval(5)
+        ))
+        #expect(fastRequest.items.map(\.chunkID) == active.map { $0.envelope.manifest.chunkID })
+        _ = try await store.applyReconciliationResponse(response(fastRequest) { item in
+            let chunk = try #require(active.first { $0.envelope.manifest.chunkID == item.chunkID })
+            return .received(try Receipt(
+                receiverDeviceID: fixture.receiverID,
+                libraryInstanceID: fixture.libraryID,
+                chunkID: item.chunkID,
+                audioSHA256: chunk.envelope.manifest.audioSHA256,
+                manifestSHA256: chunk.envelope.manifestSHA256))
+        }, now: now.addingTimeInterval(5))
+        _ = try await store.cleanupAcknowledgedChunks()
+
+        // Once pending chunks are drained, historical audit resumes cleanly.
+        let idleAudit = try #require(await store.nextReconciliationRequest(
+            sourceDeviceID: source,
+            beginNewRound: true,
+            preferPending: true,
+            allowHistoricalAudit: true,
+            now: now.addingTimeInterval(10)
+        ))
+        #expect(idleAudit.items.map(\.chunkID) == historical.prefix(16).map { $0.envelope.manifest.chunkID })
+    }
+
     private func boundStore(_ fixture: RecordingFixture) async throws -> RecordingStore {
         let store = try fixture.store()
         try await store.bindReceiver(deviceID: fixture.receiverID, libraryInstanceID: fixture.libraryID)

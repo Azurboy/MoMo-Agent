@@ -35,7 +35,7 @@ private struct FileQueueDiagnostic: Encodable {
     let session: WCSession
     private var submissions = LinkSubmissionState()
     private var controlSubmissions = LinkControlSubmissionState()
-    private var interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 4)
+    private var interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 16)
     private var fileAttempts = FileAttemptLedger()
     private var controlGeneration: UUID { fileAttempts.controlGeneration }
     private let attemptsURL: URL?
@@ -150,7 +150,7 @@ private struct FileQueueDiagnostic: Encodable {
         attemptJournalNeedsSave = true
         try saveAttempts(next)
         controlSubmissions = LinkControlSubmissionState()
-        interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 4)
+        interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 16)
         for transfer in session.outstandingUserInfoTransfers where transfer.userInfo["control"] is Data { transfer.cancel() }
     }
     public func allowControlReplay(_ message: ControlMessage) throws {

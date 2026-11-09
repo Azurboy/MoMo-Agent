@@ -503,7 +503,7 @@ final class PhoneReceiveCoordinator {
         retrying: Bool
     ) async throws {
         guard let source = selectedWatchWatermark?.sourceDeviceID else { return }
-        if retrying { receiptCursor = 0 }
+        let startingCursor = receiptCursor
         for failedMessage in controlFailures.failedMessages {
             guard selectedWatchWatermark?.sourceDeviceID == source else { return }
             guard case .receipt(let receipt) = failedMessage,
@@ -528,6 +528,9 @@ final class PhoneReceiveCoordinator {
         } else {
             receiptCursor = 0
             replayReceiptSweep = false
+            if startingCursor != 0, retrying {
+                requested = true
+            }
         }
     }
 

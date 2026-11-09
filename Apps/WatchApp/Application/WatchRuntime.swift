@@ -1555,7 +1555,8 @@ final class WatchRuntime {
             sourceDeviceID: sourceDeviceID,
             beginNewRound: reconciliationRequested,
             through: admittedThrough,
-            preferPending: true) {
+            preferPending: true,
+            allowHistoricalAudit: pendingChunkCount == 0) {
             guard grantID == startingGrant else { return }
             if startingRound {
                 reconciliationRequested = false
@@ -1583,8 +1584,8 @@ final class WatchRuntime {
         guard !channelDeferred, budget.count < maximumCount else { return }
         let rewindDueRetries = transport.hasDueControlRetries
         if rewindDueRetries { controlCursors.removeAll() }
-        // These positions select a fair scan, never acknowledge delivery. They survive cold grants.
-        for kind in RecordingControlKind.allCases {
+        // Prioritize deletions and capture boundaries ahead of per-receipt acknowledgements.
+        for kind in [RecordingControlKind.deletion, .capture, .receipt] {
             try Task.checkCancellation()
             let position: Int64
             if rewindDueRetries { position = 0 }
@@ -1634,8 +1635,8 @@ final class WatchRuntime {
     }
 
     private func admitAudioBatch() async throws -> Int64 {
-        let interactiveFlush = !connectivityGrant && transport.isReachable
-            && (presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
+        let interactiveFlush = !connectivityGrant
+            && (transport.isReachable || presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
         let flush = flushAudioBatch || interactiveFlush
         flushAudioBatch = false
         do {
@@ -1656,9 +1657,11 @@ final class WatchRuntime {
         }
         try transport.refreshFileQueue()
         let startingCursor = fileCursor
+        let pageSize = connectivityGrant ? 16 : 32
         guard let outcome = try await scanFileBatch(
             after: startingCursor,
             maximumScanned: maximumScanned,
+            pageSize: pageSize,
             hasDueRetries: {
                 let due = transport.hasDueFileRetries || needsPostActivationWrap
                 needsPostActivationWrap = false
@@ -1666,7 +1669,7 @@ final class WatchRuntime {
             },
             sequenceOf: \.sequence,
             loadPage: { cursor in
-                let entries = try await store.pendingChunkBatch(after: cursor, through: admittedThrough)
+                let entries = try await store.pendingChunkPage(after: cursor, through: admittedThrough, limit: pageSize)
                 return grantID == startingGrant ? entries : nil
             },
             submit: { entry in
@@ -1719,12 +1722,13 @@ final class WatchRuntime {
             var cursor = audioBlockCursor
             var wrapped = cursor == 0
             var pages = 0
-            while pages < 32, unsubmitted.count < LinkSubmissionState.maximumOutstandingFiles {
+            let pageSize = 32
+            while pages < 8, unsubmitted.count < LinkSubmissionState.maximumOutstandingFiles {
                 pages += 1
-                let batch = try await store.pendingChunkBatch(
+                let batch = try await store.pendingChunkPage(
                     after: cursor,
                     through: admittedThrough,
-                    limit: LinkSubmissionState.maximumOutstandingFiles)
+                    limit: pageSize)
                 if batch.isEmpty {
                     if !wrapped {
                         cursor = 0
@@ -1744,7 +1748,7 @@ final class WatchRuntime {
                         awaitingReceipt.append((id, entry.sequence))
                     }
                 }
-                if batch.count < LinkSubmissionState.maximumOutstandingFiles {
+                if batch.count < pageSize {
                     if !wrapped, unsubmitted.isEmpty {
                         cursor = 0
                         wrapped = true
