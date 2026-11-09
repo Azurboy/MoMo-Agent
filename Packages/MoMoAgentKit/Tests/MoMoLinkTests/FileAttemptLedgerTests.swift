@@ -4,6 +4,47 @@ import MoMoContracts
 @testable import MoMoLink
 
 struct FileAttemptLedgerTests {
+    @Test func anUnretryableOldestCopyDoesNotHideHealthyStalledCopies() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let files = try (0..<4).map { _ in try envelope() }
+        var journal = FileAttemptLedger()
+        for (index, file) in files.enumerated() {
+            _ = try journal.begin(file, now: start.addingTimeInterval(Double(index)))
+        }
+        let now = start.addingTimeInterval(1_000)
+        let candidates = journal.stalledCandidates(now: now, limit: 4)
+        #expect(candidates.map(\.chunkID) == files.map { $0.manifest.chunkID })
+        // The owner cannot validate the oldest original, so its SDK copy must stay intact.
+        for candidate in candidates.dropFirst() {
+            let cancelled = journal.requestCancellation(candidate, now: now)
+            #expect(cancelled)
+        }
+        #expect(journal.attempts[files[0].manifest.chunkID]?.cancellationRequestedAt == nil)
+        #expect(journal.attempts.values.allSatisfy { $0.outstanding })
+        #expect(journal.stalledCandidates(now: now, limit: 4).map(\.chunkID) == [files[0].manifest.chunkID])
+    }
+
+    @Test func stalledSnapshotHonorsBudgetEligibilityAndRevalidatesProgressBeforeCancellation() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let files = try (0..<4).map { _ in try envelope() }
+        var journal = FileAttemptLedger()
+        for (index, file) in files.enumerated() {
+            _ = try journal.begin(file, now: start.addingTimeInterval(Double(index)))
+        }
+        let now = start.addingTimeInterval(1_000)
+        let eligible = Set(files.dropFirst().map { $0.manifest.chunkID })
+        let candidates = journal.stalledCandidates(now: now, limit: 2, eligibleChunkIDs: eligible)
+        #expect(candidates.map(\.chunkID) == files.dropFirst().prefix(2).map { $0.manifest.chunkID })
+        #expect(journal.stalledCandidates(now: now, limit: 0).isEmpty)
+        let advanced = try #require(candidates.first)
+        try journal.observe(envelope: files[1], attemptID: advanced.attemptID, completedUnits: 1, now: now)
+        let cancelledAdvanced = journal.requestCancellation(advanced, now: now)
+        let cancelledStalled = journal.requestCancellation(try #require(candidates.last), now: now)
+        #expect(!cancelledAdvanced)
+        #expect(cancelledStalled)
+        #expect(journal.attempts[files[1].manifest.chunkID]?.cancellationRequestedAt == nil)
+    }
+
     @Test func SDKSnapshotAdoptsADifferentRealAttemptWhenTheJournalAttemptHasExited() throws {
         let file = try envelope(), start = Date(timeIntervalSince1970: 1_000), actualID = UUID()
         var journal = FileAttemptLedger()

@@ -172,16 +172,26 @@ public struct FileAttemptLedger: Codable, Sendable, Equatable {
     public func stalledCandidate(now: Date, eligibleChunkIDs: Set<UUID>? = nil,
                                  stallLease: TimeInterval = Self.lease,
                                  interactiveZeroProgressLease: TimeInterval? = nil) -> FileTransferAttempt? {
+        stalledCandidates(now: now, limit: 1, eligibleChunkIDs: eligibleChunkIDs,
+            stallLease: stallLease, interactiveZeroProgressLease: interactiveZeroProgressLease).first
+    }
+
+    /// Offer the bounded queue so an original that cannot be retried does not hide later candidates.
+    public func stalledCandidates(now: Date, limit: Int, eligibleChunkIDs: Set<UUID>? = nil,
+                                  stallLease: TimeInterval = Self.lease,
+                                  interactiveZeroProgressLease: TimeInterval? = nil) -> [FileTransferAttempt] {
+        guard limit > 0 else { return [] }
         let baseLease = max(Self.lease, stallLease)
-        return attempts.values.filter {
+        let stalled = attempts.values.filter {
             let requiredLease = ($0.completedUnits == 0 ? interactiveZeroProgressLease.map { min(baseLease, $0) } : nil) ?? baseLease
             return $0.outstanding && $0.cancellationRequestedAt == nil
                 && now.timeIntervalSince($0.lastProgressAt) >= requiredLease
                 && (eligibleChunkIDs?.contains($0.chunkID) ?? true)
-        }.min { lhs, rhs in
+        }.sorted { lhs, rhs in
             lhs.lastProgressAt == rhs.lastProgressAt ? lhs.chunkID.uuidString < rhs.chunkID.uuidString
                 : lhs.lastProgressAt < rhs.lastProgressAt
         }
+        return Array(stalled.prefix(limit))
     }
 
     /// Persist this decision before calling SDK cancel. Keep the slot until the SDK actually drops it.
