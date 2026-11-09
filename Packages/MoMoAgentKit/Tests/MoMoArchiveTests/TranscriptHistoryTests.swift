@@ -122,6 +122,7 @@ extension ArchiveStore {
             "epochs_wall_clock",
             "analysis_windows_session",
             "analysis_windows_epoch_state",
+            "analysis_windows_epoch_config_core",
             "analysis_windows_epoch_core_end",
             "analysis_windows_companion",
             "chunks_epoch_start",

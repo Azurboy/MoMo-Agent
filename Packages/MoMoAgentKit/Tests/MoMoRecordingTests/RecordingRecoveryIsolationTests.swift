@@ -3,6 +3,35 @@ import Testing
 import MoMoContracts
 @testable import MoMoRecording
 
+@Test(arguments: [false, true])
+func malformedReadyEntryDoesNotAbortRecoveryOfHealthyAudio(symbolicLink: Bool) async throws {
+    let fixture = try RecordingFixture()
+    defer { fixture.clean() }
+    let store = try fixture.store()
+    let healthy = try await store.sealChunk(audioAt: fixture.source, envelope: fixture.envelope)
+    let malformedID = UUID()
+    let malformed = fixture.root.appendingPathComponent("watch/CaptureReady/\(malformedID.uuidString)")
+    let bytes = Data("interrupted directory write".utf8)
+    if symbolicLink {
+        try FileManager.default.createSymbolicLink(at: malformed, withDestinationURL: fixture.source)
+    } else {
+        try bytes.write(to: malformed)
+    }
+    let reopened = try fixture.store()
+    let report = try await reopened.recover()
+    #expect(report.damaged == [malformedID])
+    #expect(report.registered == [fixture.envelope.manifest.chunkID])
+    #expect(try await reopened.pendingChunkCount() == 1)
+    #expect(try await reopened.originalAvailableForTransferRetry(fixture.envelope, maximumValidationBytes: 1_048_576))
+    #expect(try ContentHash.sha256(fileAt: healthy.audioURL) == fixture.envelope.manifest.audioSHA256)
+    if symbolicLink {
+        #expect(try malformed.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+        #expect(try ContentHash.sha256(fileAt: fixture.source) == fixture.envelope.manifest.audioSHA256)
+    } else {
+        #expect(try Data(contentsOf: malformed) == bytes)
+    }
+}
+
 @Test func deletionIgnoresUnrelatedCorruptionAndCleansKnownOwnerWithBrokenDraft() async throws {
     let fixture = try RecordingFixture()
     defer { fixture.clean() }

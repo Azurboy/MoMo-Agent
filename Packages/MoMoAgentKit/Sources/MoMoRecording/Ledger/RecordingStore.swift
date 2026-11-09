@@ -643,9 +643,9 @@ public actor RecordingStore {
             // A receipt can remove a later directory while recovery yields between entries.
             let known = try chunk(id: id)
             if known?.state == .acknowledged || known?.state == .removed { continue }
-            let resource = try entry.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
-            guard resource.isSymbolicLink != true, resource.isDirectory == true else { throw RecordingError.invalidDirectory(entry.lastPathComponent) }
             do {
+                let resource = try entry.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+                guard resource.isSymbolicLink != true, resource.isDirectory == true else { throw RecordingError.invalidDirectory(entry.lastPathComponent) }
                 let envelope = try readEnvelope(at: entry)
                 guard envelope.manifest.chunkID == id else { throw RecordingError.contentConflict(id) }
                 if try isDeleted(envelope.manifest.sessionID) {
@@ -658,7 +658,7 @@ public actor RecordingStore {
                 report.registered.append(id)
             } catch let error as RecordingError {
                 switch error {
-                case .invalidAudio, .contentConflict:
+                case .invalidAudio, .contentConflict, .invalidDirectory:
                     try database.execute("UPDATE chunks SET state='damaged' WHERE id=?", [.text(id.uuidString)])
                     report.damaged.append(id)
                 default: throw error

@@ -1406,21 +1406,25 @@ final class WatchRuntime {
                         let interactiveFastPath = audioBlockRecoveryAvailable
                             && (presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
                         let maxRetirements = connectivityGrant ? 1 : LinkSubmissionState.maximumOutstandingFiles
-                        for _ in 0..<maxRetirements {
-                            guard let (attempt, envelope) = try transport.stalledFileAttempt(
-                                maximumValidationBytes: maximumBytes,
-                                allowAudioBlockRecovery: audioBlockRecoveryAvailable,
-                                allowInteractiveFastPath: interactiveFastPath) else { break }
+                        var retirements = 0
+                        let candidates = try transport.stalledFileAttempts(
+                            maximumValidationBytes: maximumBytes,
+                            allowAudioBlockRecovery: audioBlockRecoveryAvailable,
+                            allowInteractiveFastPath: interactiveFastPath)
+                        for (attempt, envelope) in candidates {
                             let valid = try await store.originalAvailableForTransferRetry(envelope,
                                 maximumValidationBytes: maximumBytes)
                             guard grantID == startingGrant else { return }
-                            guard valid else { break }
+                            // Its SDK copy may be the last healthy copy. Keep it and inspect the next original.
+                            guard valid else { continue }
                             try transport.retireStalledFileAttempt(
                                 attempt,
                                 allowAudioBlockRecovery: audioBlockRecoveryAvailable,
                                 allowInteractiveFastPath: interactiveFastPath)
                             fileCursor = 0
                             fileCursorLoaded = true
+                            retirements += 1
+                            if retirements == maxRetirements { break }
                         }
                     }
                 }

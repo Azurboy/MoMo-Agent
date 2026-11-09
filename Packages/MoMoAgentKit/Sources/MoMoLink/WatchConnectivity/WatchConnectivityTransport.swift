@@ -196,21 +196,20 @@ private struct FileQueueDiagnostic: Encodable {
         return fileAttempts.allowsAudioBlockRecovery(chunkID: envelope.manifest.chunkID)
     }
 
-    /// At most one stalled candidate is offered. The recording owner must validate its original first.
-    public func stalledFileAttempt(maximumValidationBytes: Int64,
+    /// The recording owner validates each original before retiring its stalled system copy.
+    public func stalledFileAttempts(maximumValidationBytes: Int64,
                                    allowAudioBlockRecovery: Bool = false,
-                                   allowInteractiveFastPath: Bool = false) throws -> (FileTransferAttempt, ManifestEnvelope)? {
+                                   allowInteractiveFastPath: Bool = false) throws -> [(FileTransferAttempt, ManifestEnvelope)] {
         let transfers = try refreshOutstanding()
         let eligible = Set(transfers.filter { $0.1.manifest.byteCount <= maximumValidationBytes }.map { $0.1.manifest.chunkID })
         let blockRecoveryReady = allowAudioBlockRecovery && session.isReachable && peerState == .available
         let stallLease = blockRecoveryReady ? FileAttemptLedger.lease : FileAttemptLedger.backgroundLease
         let fastLease: TimeInterval? = (blockRecoveryReady && allowInteractiveFastPath)
             ? FileAttemptLedger.interactiveZeroProgressLease : nil
-        guard let candidate = fileAttempts.stalledCandidate(now: Date(), eligibleChunkIDs: eligible,
-                                                            stallLease: stallLease,
-                                                            interactiveZeroProgressLease: fastLease),
-              let envelope = transfers.first(where: { $0.1.manifest.chunkID == candidate.chunkID })?.1 else { return nil }
-        return (candidate, envelope)
+        return fileAttempts.stalledCandidates(now: Date(), limit: LinkSubmissionState.maximumOutstandingFiles,
+            eligibleChunkIDs: eligible, stallLease: stallLease, interactiveZeroProgressLease: fastLease).compactMap { candidate in
+                transfers.first(where: { $0.1.manifest.chunkID == candidate.chunkID }).map { (candidate, $0.1) }
+            }
     }
 
     public func retireStalledFileAttempt(_ candidate: FileTransferAttempt,
