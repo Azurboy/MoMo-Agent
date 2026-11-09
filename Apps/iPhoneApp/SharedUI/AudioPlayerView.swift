@@ -14,13 +14,14 @@ struct AudioPlayerCard: View {
     @State private var preview: AudioPlaybackSnapshot?
     @State private var failure: String?
     @State private var changing = false
+    @State private var pendingPlayback: Bool?
     @State private var operation = UUID()
     @State private var seekPreview: Double?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var active: AudioPlaybackSnapshot? { playback.snapshot?.target == target ? playback.snapshot : nil }
     private var display: AudioPlaybackSnapshot? { active ?? (preview?.target == target ? preview : nil) }
-    private var playing: Bool { active != nil ? playback.playbackRequested : changing && seekPreview == nil }
+    private var playing: Bool { pendingPlayback ?? (active != nil && playback.playbackRequested) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -62,7 +63,7 @@ struct AudioPlayerCard: View {
                 }
             }
         }
-        .onChange(of: target) { operation = UUID(); changing = false; seekPreview = nil }
+        .onChange(of: target) { operation = UUID(); changing = false; seekPreview = nil; pendingPlayback = nil }
     }
 
     private func toggle() {
@@ -71,9 +72,10 @@ struct AudioPlayerCard: View {
         let wasActive = active != nil
         let attempt = UUID()
         operation = attempt
+        pendingPlayback = !wasPlaying
         changing = true; failure = nil
         Task {
-            defer { if operation == attempt { changing = false; seekPreview = nil } }
+            defer { if operation == attempt { changing = false; seekPreview = nil; pendingPlayback = nil } }
             do {
                 guard operation == attempt else { return }
                 if wasPlaying { await playback.pause() }
@@ -94,15 +96,17 @@ struct AudioPlayerCard: View {
     private func seek(_ position: Double) {
         guard !disabled, unavailableReason == nil, display?.canSeek == true else { return }
         let expectedTarget = target
+        let continuePlaying = playing
         let attempt = UUID()
         operation = attempt
+        pendingPlayback = continuePlaying
         seekPreview = position
         changing = true; failure = nil
         Task {
-            defer { if operation == attempt { changing = false; seekPreview = nil } }
+            defer { if operation == attempt { changing = false; seekPreview = nil; pendingPlayback = nil } }
             do {
                 guard operation == attempt else { return }
-                try await playback.seek(to: position, in: expectedTarget)
+                try await playback.seek(to: position, in: expectedTarget, continuePlaying: continuePlaying)
             }
             catch is CancellationError { }
             catch {

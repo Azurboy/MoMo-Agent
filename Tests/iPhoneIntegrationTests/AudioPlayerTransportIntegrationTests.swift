@@ -8,6 +8,25 @@ import MoMoContracts
 /// Actual AVAudioPlayer/AVAudioFile with the public speech fixture. Notification tests exercise
 /// app handling only; they do not certify physical phone calls or headphone-route behavior.
 extension AudioPlaybackIntegrationTests {
+    func testSeekDuringInitialLoadKeepsTheLatestExplicitPlayIntent() async throws {
+        let fixture = try await makeRecording()
+        let player = AudioPlaybackController(archive: fixture.archive)
+        addTeardownBlock { await player.stop() }
+        let entered = expectation(description: "Initial timeline held")
+        let busy = Task.detached { await fixture.archive.occupyForPlaybackClockRegression { entered.fulfill() } }
+        await fulfillment(of: [entered], timeout: 2)
+        let requested = expectation(description: "Play intent received")
+        withObservationTracking { _ = player.playbackRequested } onChange: { requested.fulfill() }
+        let earlier = Task { try await player.play(fixture.source) }
+        await fulfillment(of: [requested], timeout: 2)
+        try await player.seek(to: 2, in: .transcript(fixture.source), continuePlaying: true)
+        await busy.value
+        do { try await earlier.value; XCTFail("The selected position must supersede the original play request.") }
+        catch is CancellationError { }
+        XCTAssertEqual(player.snapshot?.state, .playing)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(player.snapshot?.position), 2)
+    }
+
     func testLaterSeekKeepsPlayingIntentWhileTheEarlierSeekAwaitsValidation() async throws {
         let fixture = try await makeRecording()
         let player = AudioPlaybackController(archive: fixture.archive)

@@ -284,12 +284,12 @@ final class AudioPlaybackController {
         }
     }
 
-    func seek(to position: Double, in target: AudioPlaybackTarget) async throws {
-        if snapshot?.target == target { try await seek(to: position) }
-        else { try await play(target, from: position, startPaused: true) }
+    func seek(to position: Double, in target: AudioPlaybackTarget, continuePlaying: Bool? = nil) async throws {
+        if snapshot?.target == target { try await seek(to: position, continuePlaying: continuePlaying) }
+        else { try await play(target, from: position, startPaused: continuePlaying != true) }
     }
 
-    func seek(to position: Double) async throws {
+    func seek(to position: Double, continuePlaying: Bool? = nil) async throws {
         guard let current = snapshot, let timeline, current.canSeek,
               position.isFinite, position >= 0, let duration = timeline.duration, position <= duration else {
             throw PlaybackError.unavailable
@@ -303,7 +303,8 @@ final class AudioPlaybackController {
         }
         generation &+= 1
         let attempt = generation
-        let wasPlaying = playbackRequested
+        let wasPlaying = continuePlaying ?? playbackRequested
+        playbackRequested = wasPlaying
         await pauseNative(operation: attempt, wasPlaying: wasPlaying)
         try require(attempt)
         let previousPosition = snapshot?.position ?? current.position

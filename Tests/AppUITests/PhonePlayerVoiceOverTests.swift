@@ -29,17 +29,25 @@ final class PhonePlayerVoiceOverTests: XCTestCase {
         let runID = UUID().uuidString
         app.launchEnvironment["MOMO_UI_TEST_RUN_ID"] = runID
         app.launchEnvironment["MOMO_UI_TEST_TIMELINE_FIXTURE"] = "1"
-        app.launchArguments = ["-iphone.firstUse.completed", "YES"]
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
         let isolation = XCTAttachment(string: "runID=\(runID); initiallyVoiceOverEnabled=\(initiallyEnabled); official timeline fixture; no ASR, provider configuration or network flags; real VoiceOver service and one-finger gestures")
         isolation.name = "player-voiceover-isolation"
         isolation.lifetime = .keepAlways
         add(isolation)
 
+        if app.buttons["welcome.skip"].waitForExistence(timeout: 5) {
+            app.buttons["welcome.skip"].tap()
+            app.buttons["welcome.start"].tap()
+            wait("Defer initial pairing") { app.buttons["稍后配对"].exists }
+            app.buttons["稍后配对"].tap()
+        }
         let library = app.tabBars.buttons["转录"]
         wait("Library entry") { library.exists && library.isHittable }
         library.tap()
-        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window.")).firstMatch
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "timeline.window."))
+        wait("Timeline populated") { rows.firstMatch.exists }
+        let row = rows.element(boundBy: rows.count - 1)
         wait("Timeline row") { row.exists && row.isHittable }
         row.tap()
         let source = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
