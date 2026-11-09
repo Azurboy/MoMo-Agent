@@ -129,7 +129,7 @@ final class PhoneReceiveCoordinator {
                     await reconcile()
                     return
                 }
-                if try await retireForeignReceiptFailure(message) {
+                if try await retireForeignControlFailure(message) {
                     await reconcile()
                     return
                 }
@@ -410,23 +410,13 @@ final class PhoneReceiveCoordinator {
                         let routes = try transport.transferControlRoutes(message)
                         if routes.background == .deferred && routes.interactive != .submitted && routes.interactive != .alreadySubmitted { break }
                     }
-                    var responseDeferred = false
-                    for _ in 0..<32 {
-                        guard let response = try await archive.pendingReconcileResponses(limit: 1).first else { break }
-                        let admission = try await submitResponse(response, using: transport)
-                        guard admission != .deferred, admission != .retryLater else {
-                            responseDeferred = true
-                            break
-                        }
-                    }
-                    if !responseDeferred {
-                        try await submitReceiptPage(using: transport)
-                    }
+                    await submitPendingControls(submit: { try transport.transferControlRoutes($0) },
+                        replay: { try transport.allowControlReplay($0) }, retrying: transport.hasDueControlRetries)
                 }
             } catch { reportTransportFailure(TransportFailure(error), context: String(localized: "设备同步尚未完成")) }
             do {
                 for message in controlFailures.failedMessages {
-                    if try await retireForeignReceiptFailure(message) { continue }
+                    if try await retireForeignControlFailure(message) { continue }
                     if try await archive.controlWasApplied(message) { try confirmControlDelivery(message) }
                 }
             } catch { onFailure(String(localized: "无法核对同步指令回执：\(error.localizedDescription)")) }
@@ -451,9 +441,15 @@ final class PhoneReceiveCoordinator {
         return value.receiverLibraryInstanceID == identity.libraryInstanceID
     }
 
-    private func retireForeignReceiptFailure(_ message: ControlMessage) async throws -> Bool {
-        guard case .receipt(let receipt) = message, let source = selectedWatchWatermark?.sourceDeviceID,
-              try await archive.sourceDeviceID(for: receipt) != source,
+    private func retireForeignControlFailure(_ message: ControlMessage) async throws -> Bool {
+        guard let source = selectedWatchWatermark?.sourceDeviceID else { return false }
+        let messageSource: UUID?
+        switch message {
+        case .receipt(let receipt): messageSource = try await archive.sourceDeviceID(for: receipt)
+        case .reconcileResponse(let response): messageSource = response.sourceDeviceID
+        default: return false
+        }
+        guard let messageSource, messageSource != source,
               selectedWatchWatermark?.sourceDeviceID == source else { return false }
         try transport?.stopRetryingControl(message)
         try controlFailures.didFinish(message, failure: nil)
@@ -484,24 +480,46 @@ final class PhoneReceiveCoordinator {
         onFailure("\(context)：\(failure.diagnosticDescription)")
     }
 
-    private func submitReceiptPage(using transport: WatchConnectivityTransport) async throws {
+    // One response per pass leaves capacity for receipts, including while its interactive route is retrying.
+    func submitPendingControls(
+        submit: (ControlMessage) throws -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult),
+        replay: (ControlMessage) throws -> Void,
+        retrying: Bool
+    ) async {
         guard let source = selectedWatchWatermark?.sourceDeviceID else { return }
-        if transport.hasDueControlRetries { receiptCursor = 0 }
+        do {
+            if let response = try await archive.pendingReconcileResponses(limit: 1, sourceDeviceID: source).first,
+               selectedWatchWatermark?.sourceDeviceID == source {
+                let admission = try await submitResponse(response, submit: submit)
+                if admission == .submitted || admission == .alreadySubmitted { requested = true }
+            }
+        } catch { reportTransportFailure(TransportFailure(error), context: String(localized: "设备对账尚未完成")) }
+        do { try await submitReceiptPage(submit: submit, replay: replay, retrying: retrying) }
+        catch { reportTransportFailure(TransportFailure(error), context: String(localized: "录音接收回执尚未发送")) }
+    }
+
+    private func submitReceiptPage(
+        submit: (ControlMessage) throws -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult),
+        replay: (ControlMessage) throws -> Void,
+        retrying: Bool
+    ) async throws {
+        guard let source = selectedWatchWatermark?.sourceDeviceID else { return }
+        if retrying { receiptCursor = 0 }
         for failedMessage in controlFailures.failedMessages {
             guard selectedWatchWatermark?.sourceDeviceID == source else { return }
             guard case .receipt(let receipt) = failedMessage,
                   try await archive.sourceDeviceID(for: receipt) == source,
                   !(try await archive.controlWasApplied(failedMessage)) else { continue }
-            if replayReceiptSweep { try transport.allowControlReplay(failedMessage) }
-            let routes = try transport.transferControlRoutes(failedMessage)
+            if replayReceiptSweep { try replay(failedMessage) }
+            let routes = try submit(failedMessage)
             guard routes.background != .deferred || routes.interactive == .submitted || routes.interactive == .alreadySubmitted else { return }
         }
         let page = try await archive.pendingReceiptPage(after: receiptCursor, sourceDeviceID: source)
         for entry in page.entries {
             guard selectedWatchWatermark?.sourceDeviceID == source else { return }
             let message = ControlMessage.receipt(entry.receipt)
-            if replayReceiptSweep { try transport.allowControlReplay(message) }
-            let routes = try transport.transferControlRoutes(message)
+            if replayReceiptSweep { try replay(message) }
+            let routes = try submit(message)
             guard routes.background != .deferred || routes.interactive == .submitted || routes.interactive == .alreadySubmitted else { return }
             receiptCursor = entry.sequence
         }
@@ -514,11 +532,13 @@ final class PhoneReceiveCoordinator {
         }
     }
 
-    private func submitResponse(_ response: ReconcileResponse, using transport: WatchConnectivityTransport) async throws -> ControlSubmissionResult {
+    private func submitResponse(_ response: ReconcileResponse,
+        submit: (ControlMessage) throws -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult)
+    ) async throws -> ControlSubmissionResult {
         submittingResponseID = response.messageID
         submissionFailed = false
         defer { submittingResponseID = nil; submissionFailed = false }
-        let admission = try transport.transferControl(.reconcileResponse(response))
+        let admission = try submit(.reconcileResponse(response)).background
         guard admission != .deferred, admission != .retryLater else { return admission }
         try await archive.markReconcileResponseSubmitted(messageID: response.messageID)
         // A failure callback may re-enter while the submitted-state write is awaiting the archive actor.
@@ -543,7 +563,8 @@ final class PhoneReceiveCoordinator {
         do {
             let receipts = try await archive.pendingReceiptCount(sourceDeviceID: selectedWatchWatermark?.sourceDeviceID)
             let deletions = try await archive.pendingDeletions().count
-            let responses = try await archive.pendingReconcileResponses(limit: 1).count
+            let responses = try await archive.pendingReconcileResponses(limit: 1,
+                sourceDeviceID: selectedWatchWatermark?.sourceDeviceID).count
             pending = receipts + deletions + responses + (pendingInboxRecovery ? 1 : 0)
         } catch { onFailure(String(localized: "同步待办尚未读取：\(error.localizedDescription)")) }
         // A failed read leaves the work state unknown, not empty. Keep one bounded recovery task.
