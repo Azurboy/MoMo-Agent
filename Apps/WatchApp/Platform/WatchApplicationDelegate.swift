@@ -86,8 +86,12 @@ final class WatchApplicationDelegate: NSObject, WKApplicationDelegate {
     }
 
     private func beginDrain() {
-        guard drain == nil, runtime != nil, !connectivityTasks.isEmpty else { return }
-        runtime?.beginConnectivityGrant()
+        guard drain == nil, let runtime, !connectivityTasks.isEmpty else { return }
+        if runtime.requiresConstrainedConnectivityGrant {
+            runtime.beginConnectivityGrant()
+        } else {
+            runtime.beginBackgroundConnectivity()
+        }
         let id = UUID()
         drainID = id
         drain = Task { @MainActor [weak self] in
@@ -106,7 +110,10 @@ final class WatchApplicationDelegate: NSObject, WKApplicationDelegate {
                     self.recoveryRequested = false
                     await runtime.resumeSynchronization(flushAudio: false)
                 }
-                switch await runtime.drainBackgroundConnectivity() {
+                let outcome = runtime.isInConnectivityGrant
+                    ? await runtime.drainBackgroundConnectivity()
+                    : await runtime.drainActiveConnectivity()
+                switch outcome {
                 case .completed, .failed:
                     return
                 case .pending: break

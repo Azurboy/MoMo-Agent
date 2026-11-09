@@ -170,7 +170,8 @@ public struct LinkSubmissionState: Sendable {
         try reserve(envelope, now: now) == .submitted
     }
 
-    public mutating func reserve(_ envelope: ManifestEnvelope, now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> FileSubmissionResult {
+    public func precheckReservation(_ envelope: ManifestEnvelope,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> FileSubmissionResult? {
         guard activation == .activated else { throw LinkError.notActivated }
         let id = envelope.manifest.chunkID
         if let known = outstanding[id] {
@@ -185,6 +186,12 @@ public struct LinkSubmissionState: Sendable {
         }
         if let retryAt = retryNotBefore[id], now < retryAt { return .retryLater }
         guard outstanding.values.reduce(0, { $0 + $1.count }) < Self.maximumOutstandingFiles else { return .deferred }
+        return nil
+    }
+
+    public mutating func reserve(_ envelope: ManifestEnvelope, now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> FileSubmissionResult {
+        if let blocked = try precheckReservation(envelope, now: now) { return blocked }
+        let id = envelope.manifest.chunkID
         // Reachability applies to interactive messages, not the background file queue.
         outstanding[id] = (envelope.manifestSHA256, 1)
         submitted[id] = envelope.manifestSHA256
@@ -240,6 +247,10 @@ public struct LinkSubmissionState: Sendable {
         }
         let alreadyConfirmed = submitted[id] != nil && awaitingReceipts[id] == nil
         return !alreadyConfirmed
+    }
+
+    public func hasSubmittedFileTransfer(chunkID: UUID) -> Bool {
+        outstanding[chunkID] != nil || submitted[chunkID] != nil
     }
 
     private mutating func waitForReceipt(chunkID: UUID, now: TimeInterval) {

@@ -3,8 +3,8 @@ import Foundation
 /// A resumable copy of an already sealed original, addressed to one receiver library.
 public struct AudioBlock: Codable, Sendable {
     public static let version = 1
-    public static let maximumPayloadBytes = 16 * 1024
-    public static let maximumWireBytes = 48 * 1024
+    public static let maximumPayloadBytes = 32 * 1024
+    public static let maximumWireBytes = 60 * 1024
     public static let maximumFileBytes: Int64 = 64 * 1024 * 1024
     public let protocolVersion: Int
     public let receiverDeviceID: UUID
