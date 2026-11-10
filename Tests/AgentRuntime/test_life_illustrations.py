@@ -380,7 +380,7 @@ class IllustrationTests(unittest.TestCase):
         self.queue.advance(self.generator, self.context)
         self.assertEqual([], self.generator.prepared); self.assertEqual([], self.generator.generated)
 
-    def test_visits_require_closed_overlap_actual_provenance_and_accuracy(self):
+    def test_visits_match_recording_time_actual_provenance_and_accuracy(self):
         visits = [dict(id='valid', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
                        title='河边', latitude=31, longitude=121, accuracy=20),
                   dict(id='future', source_name='CoreLocation visits', start=self.start + 4*3600, end=self.start + 5*3600,
@@ -391,7 +391,28 @@ class IllustrationTests(unittest.TestCase):
         self.context.db.execute('INSERT INTO phone_source_snapshots VALUES(?,?,?,?,?)',
                                (self.payload['device_id'], 'visits', 1, json.dumps(dict(state='enabled', records=visits)), self.start))
         result = visit_evidence(self.context, self.start, self.start + 3*3600)
-        self.assertEqual(['valid', 'boundary'], [visit['id'] for visit in result])
+        self.assertEqual(['valid', 'boundary', 'short'], [visit['id'] for visit in result])
+
+    def test_ongoing_visit_locates_recording_without_waiting_for_departure(self):
+        snapshot = self.install_journey()
+        snapshot['records'][0]['end'] = None
+        self.context.db.execute('UPDATE phone_source_snapshots SET payload=?', (json.dumps(snapshot),))
+        self.generate()
+        self.assertEqual(('工作室', 39.9982, 116.4796),
+            (self.row()['place'], self.row()['latitude'], self.row()['longitude']))
+        self.assertIsNone(self.row()['place_start'])
+        self.assertIsNone(self.row()['place_end'])
+
+    def test_ongoing_visit_stops_at_next_arrival_and_snapshot_observation(self):
+        records = [dict(id='old', source_name='CoreLocation visits', start=self.start, end=None,
+                        latitude=31, longitude=121, accuracy=20),
+                   dict(id='next', source_name='CoreLocation visits', start=self.start + 600, end=None,
+                        latitude=32, longitude=122, accuracy=20)]
+        snapshot = dict(state='enabled', records=records, observed_at=self.start + 1200)
+        self.context.db.execute('INSERT INTO phone_source_snapshots VALUES(?,?,?,?,?)',
+            (self.payload['device_id'], 'visits', 1, json.dumps(snapshot), self.start))
+        self.assertEqual(['next'], [point['id'] for point in visit_evidence(self.context, self.start + 700, self.start + 800)])
+        self.assertEqual([], visit_evidence(self.context, self.start + 1300, self.start + 1400))
 
     def install_journey(self):
         records = [dict(id='stay', source_name='CoreLocation visits', start=self.start, end=self.start + 3600,
@@ -446,6 +467,47 @@ class IllustrationTests(unittest.TestCase):
             self.assertEqual(before['route_points'], self.row()['route_points'])
             self.assertEqual(image, self.queue.asset(before['asset_sha256']))
         self.assertTrue(all(not item['deleted'] for item in self.queue.manifest()['items']))
+
+    def test_late_ongoing_visit_enriches_saved_sticker_without_regeneration(self):
+        self.generate()
+        before = dict(self.row())
+        self.assertIsNone(before['latitude'])
+        pixels = self.queue.asset(before['asset_sha256'])
+        first_manifest = self.queue.manifest()
+        snapshot = self.install_journey()
+        snapshot['records'][0]['end'] = None
+        self.context.db.execute('UPDATE phone_source_snapshots SET revision=2,payload=?', (json.dumps(snapshot),))
+        self.queue.reconcile(self.context)
+        after = dict(self.row())
+        self.assertEqual(('工作室', 39.9982, 116.4796), (after['place'], after['latitude'], after['longitude']))
+        for field in ('id', 'state', 'asset_sha256', 'thumbnail_sha256', 'summary', 'brief', 'request_id', 'attempt'):
+            self.assertEqual(before[field], after[field], field)
+        self.assertEqual(pixels, self.queue.asset(after['asset_sha256']))
+        self.assertEqual(1, len(self.generator.generated))
+        updates = self.queue.manifest(first_manifest['next_cursor'])
+        self.assertEqual(1, len(updates['items']))
+        self.assertFalse(updates['items'][0]['deleted'])
+        self.assertEqual('工作室', updates['items'][0]['place'])
+        self.context.db.execute('UPDATE phone_source_snapshots SET revision=3')
+        self.queue.reconcile(self.context)
+        self.assertEqual([], self.queue.manifest(updates['next_cursor'])['items'])
+
+    def test_recorded_fix_enriches_saved_map_without_inventing_stay_times(self):
+        self.generate()
+        before = dict(self.row())
+        snapshot = self.install_journey()
+        snapshot['records'] = [dict(snapshot['records'][1], start=self.start + 80, end=self.start + 80)]
+        self.context.db.execute('UPDATE phone_source_snapshots SET payload=?', (json.dumps(snapshot),))
+        # Explicit GMT zones are also valid server output on machines without a named local zone.
+        self.queue.db.execute("UPDATE slots SET timezone='GMT+08:00'")
+        self.queue.reconcile(self.context)
+        after = dict(self.row())
+        self.assertEqual((39.9685, 116.4660), (after['latitude'], after['longitude']))
+        self.assertIsNone(after['place_start'])
+        self.assertIsNone(after['place_end'])
+        self.assertEqual(before['route_points'], after['route_points'])
+        self.assertEqual(before['asset_sha256'], after['asset_sha256'])
+        self.assertEqual(1, len(self.generator.generated))
 
     def test_bounded_trajectory_keeps_stays_and_rejects_nonfinite_coordinates(self):
         snapshot = self.install_journey()

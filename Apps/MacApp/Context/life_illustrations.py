@@ -114,19 +114,33 @@ def window_at(timestamp, hours, day_start):
 
 
 def visit_evidence(context, start, end):
-    """Only completed phone Visits can establish a place; an open visit is unknown."""
+    """Match the recording time, including a visit that the phone still reports as ongoing."""
     result, seen = [], set()
     for row in context.db.execute("SELECT device_id,revision,payload FROM phone_source_snapshots WHERE kind='visits'"):
         snapshot = json.loads(row['payload'])
         if snapshot.get('state') not in ('enabled', 'foreground_only'):
             continue
-        for visit in snapshot.get('records', []):
+        records = [record for record in snapshot.get('records', [])
+                   if record.get('source_name') == 'CoreLocation visits' and finite_number(record.get('start'))]
+        for visit in records:
             arrival, departure = visit.get('start'), visit.get('end')
-            if (visit.get('source_name') != 'CoreLocation visits' or not valid_location(visit, 200)
-                    or not finite_number(arrival) or not finite_number(departure) or departure - arrival < 300):
+            if not valid_location(visit, 200):
                 continue
-            overlap = min(end, departure) - max(start, arrival)
-            if overlap <= 0 or overlap < min(300.0, max(1.0, end - start)):
+            if departure is None:
+                # Arrival and departure callbacks may use different coordinates/IDs for the same visit.
+                if any(record['start'] == arrival and finite_number(record.get('end')) for record in records):
+                    continue
+                observed = snapshot.get('observed_at', snapshot.get('window_end'))
+                if not finite_number(observed):
+                    continue
+                later = [record['start'] for record in records if record['start'] > arrival]
+                covered_until = min([observed] + later)
+            elif finite_number(departure):
+                covered_until = departure
+            else:
+                continue
+            overlap = min(end, covered_until) - max(start, arrival)
+            if overlap <= 0:
                 continue
             key = (arrival, departure, visit.get('latitude'), visit.get('longitude'))
             if key in seen:
@@ -137,6 +151,19 @@ def visit_evidence(context, start, end):
                                latitude=visit.get('latitude'), longitude=visit.get('longitude'),
                                title=(visit.get('title') or '').strip() or None))
     return sorted(result, key=lambda value: (-value['overlap_seconds'], value['id']))
+
+
+def recording_location(context, start, end, visits):
+    if visits:
+        return visits[0]
+    fixes = [point for point in trajectory_evidence(context, start, end)
+             if point['kind'] == 'waypoint' and start <= point['timestamp'] < end]
+    return min(fixes, key=lambda point: point['timestamp'], default={})
+
+
+def completed_place_interval(place):
+    start, end = place.get('start'), place.get('end')
+    return (start, end) if finite_number(start) and finite_number(end) and end > start else (None, None)
 
 
 def finite_number(value):
@@ -430,20 +457,40 @@ class LifeIllustrations:
                 if path.stem not in referenced:
                     path.unlink(missing_ok=True)
 
+    def _enrich_saved_geography(self, context, row):
+        if row['latitude'] is not None:
+            return
+        visits = visit_evidence(context, row['window_start'], row['window_end'])
+        primary = recording_location(context, row['window_start'], row['window_end'], visits)
+        if not primary:
+            return
+        evidence = json.loads(row['evidence'])
+        evidence['map_location'] = primary
+        place_start, place_end = completed_place_interval(primary)
+        with self.write():
+            self.db.execute('''UPDATE slots SET place=?,latitude=?,longitude=?,place_start=?,place_end=?,
+                evidence=?,updated_at=? WHERE id=? AND state='ready' ''',
+                (primary.get('title'), primary['latitude'], primary['longitude'], place_start, place_end, canonical(evidence),
+                 max(time.time(), row['updated_at'] + 0.000001), row['id']))
+            self.publish(self.db.execute('SELECT * FROM slots WHERE id=?', (row['id'],)).fetchone())
+
     def reconcile(self, context):
-        signature = canonical([context.revision, [tuple(row) for row in context.db.execute(
+        signature = canonical(['saved-geography-v1', context.revision, [tuple(row) for row in context.db.execute(
             "SELECT device_id,revision FROM phone_source_snapshots WHERE kind='visits' ORDER BY device_id")]])
         previous = self.db.execute("SELECT value FROM metadata WHERE key='reconciled_sources'").fetchone()
         if previous and previous['value'] == signature:
             return
         rows = self.db.execute("SELECT * FROM slots WHERE state NOT IN ('deleted','invalid','skipped')").fetchall()
-        source_entries = _preload_source_entries(context) if rows else []
+        source_entries = _preload_source_entries(context) if any(row['state'] in ('pending', 'preparing') for row in rows) else []
         deleted_sources = {row['id'] for row in context.db.execute('SELECT id FROM sources WHERE deleted=1')}
         for row in rows:
             if deleted_sources.intersection(json.loads(row['source_versions'])):
                 self.delete(row['id'], state='deleted')
                 continue
-            # A completed/accepted image is a saved artifact, not a live view of mutable transcripts or locations.
+            # Saved pixels remain immutable; reliable locations arriving later may enrich their map metadata.
+            if row['state'] == 'ready':
+                self._enrich_saved_geography(context, row)
+                continue
             if row['state'] not in ('pending', 'preparing'):
                 continue
             evidence, versions, semantic, _ = evidence_for(
@@ -454,7 +501,8 @@ class LifeIllustrations:
             invalid_visit = any(not location_evidence_is_current(context, point)
                                 for point in previous_evidence.get('visits', []) + previous_evidence.get('trajectory', []))
             if semantic != row['semantic_hash'] or invalid_visit:
-                primary = evidence['visits'][0] if evidence['visits'] else {}
+                primary = recording_location(context, row['window_start'], row['window_end'], evidence['visits'])
+                place_start, place_end = completed_place_interval(primary)
                 route = [point for point in previous_evidence.get('trajectory', [])
                          if location_evidence_is_current(context, point)]
                 evidence['trajectory'] = route
@@ -462,7 +510,7 @@ class LifeIllustrations:
                     brief=NULL,summary=NULL,place=?,latitude=?,longitude=?,place_start=?,place_end=?,route_points=?
                     WHERE id=? AND state IN ('pending','preparing')''',
                     (canonical(versions), canonical(evidence), semantic, primary.get('title'),
-                     primary.get('latitude'), primary.get('longitude'), primary.get('start'), primary.get('end'),
+                     primary.get('latitude'), primary.get('longitude'), place_start, place_end,
                      canonical(route), row['id']))
             elif canonical(versions) != row['source_versions']:
                 self.db.execute("UPDATE slots SET source_versions=? WHERE id=? AND state NOT IN ('deleted','invalid')", (canonical(versions), row['id']))
@@ -531,7 +579,8 @@ class LifeIllustrations:
             if not is_dense_conversation(text, episode['speech_end'] - start):
                 continue
             identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f'momo-life-v1:{start}:{end}'))
-            primary = evidence['visits'][0] if evidence['visits'] else {}
+            primary = recording_location(context, start, end, evidence['visits'])
+            place_start, place_end = completed_place_interval(primary)
             _, zone = local_timezone(start)
             day_start = dt.datetime.combine(dt.date.fromisoformat(episode['logical_day']),
                 dt.time(day_start_hour), tzinfo=zone).timestamp()
@@ -543,7 +592,7 @@ class LifeIllustrations:
                 VALUES(?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)''',
                 (identity, start, end, episode['logical_day'], episode['timezone'], canonical(versions), canonical(evidence),
                  semantic, primary.get('title'), primary.get('latitude'), primary.get('longitude'),
-                 primary.get('start'), primary.get('end'), canonical(route), now, now))
+                 place_start, place_end, canonical(route), now, now))
 
     def asset(self, sha):
         if not isinstance(sha, str) or not re.fullmatch(r'[a-f0-9]{64}', sha):
