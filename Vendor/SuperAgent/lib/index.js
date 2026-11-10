@@ -3,7 +3,7 @@ import { D as LIMITS, E as SetupError, O as key, S as writeEnvironment, _ as run
 import { i as pullOf, m as readRepositoryPath, o as readPull, p as readGithub, r as pullEndNotices, t as claimPull } from "./github-pull-C3KAqERt.js";
 import { b as feishuTriggerId, d as feishuChatLink, f as feishuRead, g as feishuRef, m as readFeishuLink, p as feishuReferences, r as feishuSettings } from "./feishu-DZfozmN4.js";
 import { Service } from "@deepseek-ai/cordis";
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { lockSync } from "proper-lockfile";
 import { randomUUID } from "node:crypto";
@@ -9250,6 +9250,43 @@ const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|
 * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
 * job wait its timeout; the router preset ends both after 5 seconds.
 */
+function momoMemoryPromptBlock() {
+	const dataDir = process.env.MOMO_DATA_DIR?.trim();
+	if (!dataDir) return "";
+	const memDir = existsSync(join(dataDir, "memories")) ? join(dataDir, "memories") : join(dataDir, "hermes/memories");
+	if (!existsSync(memDir)) return "";
+	const readMd = (rel, maxChars = 3600) => {
+		try {
+			const p = join(memDir, rel);
+			return existsSync(p) ? readFileSync(p, "utf8").trim().slice(0, maxChars) : "";
+		} catch {
+			return "";
+		}
+	};
+	const sections = [];
+	const userMd = readMd("USER.md", 2400);
+	if (userMd) sections.push(`### USER.md (用户画像与核心偏好)\n${userMd}`);
+	const memMd = readMd("MEMORY.md", 3600);
+	if (memMd) sections.push(`### MEMORY.md (核心背景与长线索引)\n${memMd}`);
+	const briefingMd = readMd("BRIEFING.md", 2400);
+	if (briefingMd) sections.push(`### BRIEFING.md (最新 Dream 晨间简报)\n${briefingMd}`);
+	const notesIndex = [];
+	for (const [label, folder] of [
+		["person", "people"],
+		["topic", "topics"],
+		["journal", "journal"]
+	]) try {
+		const dir = join(memDir, folder);
+		if (!existsSync(dir)) continue;
+		const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith(".")).sort().reverse().slice(0, 15);
+		for (const file of files) {
+			const title = (readMd(`${folder}/${file}`, 240).split("\n")[0] ?? file).replace(/^#+\s*/, "").trim();
+			notesIndex.push(`- [${label}] \`${join(memDir, folder, file)}\` — ${title}`);
+		}
+	} catch {}
+	if (notesIndex.length > 0) sections.push(`### Dream Markdown 活页笔记本索引 (可用 read 或 read_memory_notebook 工具按需精读)\n${notesIndex.join("\n")}`);
+	return sections.length > 0 ? `\n\n## MoMo 共享长期记忆与 Dream Markdown 活页笔记本\n${sections.join("\n\n")}` : "";
+}
 function noWait({ name, arguments: input }, routed) {
 	const args = input ?? {};
 	if (name === "bash") {
@@ -9468,7 +9505,8 @@ var Sessions = class {
 				const version = this.promptFor(agent, context.signal !== void 0);
 				const current = ticket && host.store.tickets.get(ticket.id);
 				const composed = host.prompts.compose(version.config, master ? "orchestrator" : "worker", current ? host.environment(current) : void 0);
-				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : ""}`;
+				const mandate = current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : "";
+				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${momoMemoryPromptBlock()}`;
 			},
 			...master ? { complete: true } : {}
 		}));
@@ -10347,6 +10385,64 @@ function momoPimTools(host, ticketId) {
 			description: "Delete an Apple Note by note_id.",
 			schema: z.object({ note_id: z.string().min(1).max(500) }).strict(),
 			execute: (args, signal) => call("delete_note", args, signal)
+		},
+		{
+			name: "list_memory_notebooks",
+			description: "List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, journal, person, topic).",
+			schema: z.object({ category: z.enum([
+				"briefing",
+				"journal",
+				"person",
+				"topic"
+			]).optional() }).strict(),
+			execute: (args, signal) => call("list_memory_notebooks", args, signal)
+		},
+		{
+			name: "read_memory_notebook",
+			description: "Read a pure Markdown (.md) living notebook page or core memory file (briefing, journal, person, topic, user, memory).",
+			schema: z.object({
+				category: z.enum([
+					"briefing",
+					"journal",
+					"person",
+					"topic",
+					"user",
+					"memory"
+				]),
+				slug: z.string().max(180).optional()
+			}).strict(),
+			execute: (args, signal) => call("read_memory_notebook", args, signal)
+		},
+		{
+			name: "write_memory_notebook",
+			description: "Create or update a pure Markdown (.md) living notebook page (briefing, journal, person, topic). Content must be pure Markdown, never raw JSON.",
+			schema: z.object({
+				category: z.enum([
+					"briefing",
+					"journal",
+					"person",
+					"topic"
+				]),
+				slug: z.string().max(180).optional(),
+				title: z.string().max(200).optional(),
+				content: z.string().min(1).max(32e3),
+				mode: z.enum(["replace", "append"]).default("replace")
+			}).strict(),
+			execute: (args, signal) => call("write_memory_notebook", args, signal)
+		},
+		{
+			name: "relabel_recording_speakers",
+			description: "Relabel anonymous ([说话人 1]) or misattributed speaker spans in a synchronized recording based on semantic dialogue context, and queue the correction back to iPhone.",
+			schema: z.object({
+				source_id: z.string().min(1).max(200),
+				target_speaker: z.string().trim().min(1).max(64),
+				is_owner: z.boolean().default(false),
+				from_speaker: z.string().max(64).optional(),
+				span_ids: z.array(z.string().min(1)).max(200).optional(),
+				scope: z.enum(["cluster", "selection"]).default("cluster"),
+				reason: z.string().max(400).default("")
+			}).strict(),
+			execute: (args, signal) => call("relabel_recording_speakers", args, signal)
 		}
 	];
 }

@@ -182,6 +182,40 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
         XCTAssertNotNil(journeyWorldRouteSample(fallbackPoints, fraction: 0.52))
     }
 
+    func testDreamBriefingMarkdownParserExtractsMorningCardsAndMotifs() {
+        let markdown = """
+        # 晨间简报 · 2026-11-10
+
+        ## 今日脉络
+        昨晚在望京工作室敲定了同步协议与人物声纹整理方案，今天上午重点推进收尾。
+
+        ## 重点预热与未闭环线索
+        - 小林下午四点前同步接口清单
+
+        ## 卡片：跟进小林接口清单
+        - 纹样：关系交汇
+        - 语境：承接昨晚工作室讨论
+
+        请帮我结合昨晚录音里和小林敲定的接口边界，列一份下午联调的检查清单。
+
+        ## 卡片：梳理周末出行安排
+        - 纹样：声音片段
+        - 语境：上次聊到的出行计划
+
+        帮我把这周提到的周末出行地点和时间整理成待办。
+        """
+        let doc = DreamBriefingDocument.parse(markdown: markdown)
+        XCTAssertEqual(doc.headline, "晨间简报 · 2026-11-10")
+        XCTAssertTrue(doc.overview.contains("望京工作室"))
+        XCTAssertEqual(doc.cards.count, 2)
+        XCTAssertEqual(doc.cards[0].title, "跟进小林接口清单")
+        XCTAssertEqual(doc.cards[0].subtitle, "承接昨晚工作室讨论")
+        XCTAssertEqual(doc.cards[0].motif, .relationWeave)
+        XCTAssertTrue(doc.cards[0].prompt.contains("联调的检查清单"))
+        XCTAssertEqual(doc.cards[1].title, "梳理周末出行安排")
+        XCTAssertEqual(doc.cards[1].motif, .voiceWave)
+    }
+
     private func item(index: Int, points: [LifeIllustrationRoutePoint] = []) -> LifeIllustration {
         LifeIllustration(id: "stop-\(index)", windowStart: Double(index * 200 + 100),
             windowEnd: Double(index * 200 + 200), logicalDay: "2026-11-05", timezone: "Asia/Shanghai",

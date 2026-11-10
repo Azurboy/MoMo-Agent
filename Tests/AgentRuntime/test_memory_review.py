@@ -181,7 +181,10 @@ class MemoryReviewTests(unittest.TestCase):
         session='momo-review-sa-1'
         system_prompt,tool_specs,execute_tool=gateway._build_memory_review_session(session)
         self.assertIn('empty',system_prompt)
-        self.assertEqual({'memory','read_recording','session_search'},{t['name'] for t in tool_specs})
+        self.assertEqual(
+            {'memory','notebook','relabel_speakers','list_recordings','read_recording','search_recordings','phone_context','session_search'},
+            {t['name'] for t in tool_specs},
+        )
 
         payload=json.dumps({'memory_review':{'outcome':'updated','reason':'保存了每日起点偏好'}})
         with self.assertRaises(Conflict):
@@ -198,6 +201,98 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertEqual('updated',verified['outcome'])
         self.assertEqual(1,verified['native_writes'])
         self.assertIn('08:00',(self.data/'hermes/memories/USER.md').read_text(encoding='utf-8'))
+
+    def test_dream_relabels_speakers_and_writes_markdown_notebook(self):
+        from superagent_gateway import SuperAgentGateway
+        gateway=SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data=self.data
+        lib_id=str(uuid.uuid4()); sess_id=str(uuid.uuid4()); dev_id=str(uuid.uuid4())
+        sp1=str(uuid.uuid4()); sp2=str(uuid.uuid4())
+        t1='[我] 小林，接口清单你下午能发我吗？'
+        t2='[说话人 1] 没问题，我四点前整理好发你。'
+        full_text=t1+'\n'+t2
+        receipt=self.store.sync_source({
+            'library_id':lib_id,'session_id':sess_id,'device_id':dev_id,
+            'generation':0,'version':1,'deleted':False,'recorded_at':1700000000,
+            'spans':[
+                {'id':sp1,'text':t1,'recorded_at':1700000000,'is_owner':True},
+                {'id':sp2,'text':t2,'recorded_at':1700000010,'is_owner':False},
+            ],
+            'text_sha256':digest(full_text),
+        })
+        src_id=receipt['source_id']
+        session='momo-review-dream-speaker-1'
+        _, _, execute_tool=gateway._build_memory_review_session(session)
+
+        relabel_res=json.loads(execute_tool('relabel_speakers',{
+            'source_id':src_id,
+            'from_speaker':'说话人 1',
+            'target_speaker':'小林',
+            'is_owner':False,
+            'scope':'cluster',
+            'reason':'对话中用户直接称呼对方为小林，对方回应四点前发接口清单',
+        }))
+        self.assertTrue(relabel_res['success'])
+        self.assertEqual(1,relabel_res['updated_span_count'])
+
+        read_res=json.loads(execute_tool('read_recording',{'source_id':src_id}))
+        spans={s['id']:s for s in read_res['spans']}
+        self.assertEqual('小林',spans[sp2]['speaker'])
+        self.assertEqual('other',spans[sp2]['speaker_role'])
+        self.assertIn('[小林]',spans[sp2]['text'])
+
+        pending=self.store.pending_speaker_relabels()
+        self.assertEqual(1,len(pending))
+        self.assertEqual('小林',pending[0]['new_speaker'])
+        self.store.ack_speaker_relabels([pending[0]['id']])
+        self.assertEqual([],self.store.pending_speaker_relabels())
+
+        nb_res=json.loads(execute_tool('notebook',{
+            'action':'write',
+            'category':'person',
+            'slug':'小林',
+            'title':'小林',
+            'content':'# 小林\n\n- 协作推进接口清单，约定下午四点前同步。',
+        }))
+        self.assertTrue(nb_res['success'])
+        verified=review.outcome(self.data/'hermes',session,json.dumps({'memory_review':{'outcome':'updated','reason':'修正说话人小林并更新人物活页'}}))
+        self.assertEqual('updated',verified['outcome'])
+        self.assertEqual(2,verified['native_writes'])
+
+    def test_prose_wrapped_receipt_and_wedged_run_timeout_recovery(self):
+        from superagent_gateway import SuperAgentGateway
+        from momo_memory import MoMoMemory
+        mem=MoMoMemory(self.data)
+        self.assertTrue((self.data/'memories').is_symlink())
+
+        gateway=SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data=self.data
+        session='momo-review-prose-1'
+        _, _, execute_tool=gateway._build_memory_review_session(session)
+        execute_tool('notebook',{'action':'write','category':'briefing','content':'# 今日晨间卡片\n\n- 重点推进 Dream 稳定运行。'})
+        synthesized=gateway._finalize_memory_review_output(session,'')
+        verified=review.outcome(self.data/'hermes',session,synthesized)
+        self.assertEqual('updated',verified['outcome'])
+
+        prose_wrapped='我已完成整理：\n```json\n{"memory_review": {"outcome": "updated", "reason": "已更新晨间简报"}}\n```\n祝工作顺利！'
+        self.assertEqual('updated',review.outcome(self.data/'hermes',session,prose_wrapped)['outcome'])
+
+        src_id=self.source('卡住的转录批次')['source_id']
+        import transcript_ingestion as ti, time as _time
+        job=ti.next_job(self.store,_time.time()+1000,True)
+        self.store.db.execute("UPDATE jobs SET state='running', run_id='run_orphaned_1', first_attempt=100, replay_before=160 WHERE id=?",(job['id'],))
+        self.store.db.commit()
+        service=ContextService.__new__(ContextService);service.data=self.data
+        service.request=lambda path,*_: {'run_id':'run_orphaned_1','session_id':'momo-transcript-'+job['id'],'status':'started'}
+        row=self.store.db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
+        with patch('context_server.time.time',return_value=600):
+            service.advance_job(self.store,row)
+        recovered=self.store.db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
+        self.assertEqual('retrying',recovered['state'])
+        pending=self.store.db.execute("SELECT * FROM jobs WHERE source_id=? AND state='pending'",(src_id,)).fetchone()
+        self.assertIsNotNone(pending)
+        self.assertIsNone(pending['run_id'])
+        self.assertEqual(1,pending['attempt'])
 
 
 if __name__=='__main__':unittest.main()

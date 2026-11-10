@@ -846,6 +846,12 @@ final class DesktopModel {
         await loadContext()
     }
 
+    func triggerDream() async throws {
+        guard let connection, let url = connection.dataURL else { throw DesktopError.message(String(localized: "Mac 尚未连接。")) }
+        _ = try await dataClient(for: connection, url: url).triggerDream()
+        await loadContext()
+    }
+
     func readSource(_ source: ContextSource, offset: Int = 0, limit: Int? = nil) async throws -> SourceTextPage {
         guard let connection, let url = connection.dataURL else { throw DesktopError.message(String(localized: "Mac 尚未连接。")) }
         return try await dataClient(for: connection, url: url).sourceText(source, offset: offset, limit: limit)

@@ -50,6 +50,21 @@ public struct SourceReceipt: Codable, Sendable {
     public let sourceRevision: String
     public let revision: Int64
 }
+public struct SpeakerRelabelInstruction: Codable, Sendable, Identifiable, Equatable {
+    public let id: String
+    public let sourceId: String
+    public let sessionId: String
+    public let spanIds: [String]
+    public let newSpeaker: String
+    public let isOwner: Bool
+    public let scope: String
+    public let reason: String
+}
+public struct DreamTriggerReceipt: Codable, Sendable {
+    public let jobId: String
+    public let state: String
+    public let enqueued: Bool
+}
 public struct ContextStatus: Codable, Sendable {
     public let workspaceId: UUID
     public let sourceSync: Bool
@@ -57,6 +72,7 @@ public struct ContextStatus: Codable, Sendable {
     public let memoryPending: Int?
     public let memoryNeedsReview: Int?
     public let memoryReview: MemoryReviewStatus?
+    public let speakerRelabels: [SpeakerRelabelInstruction]?
 }
 public struct MemoryReviewStatus: Codable, Sendable {
     public struct Dream: Codable, Sendable { public let at: Double }
@@ -109,6 +125,14 @@ extension AgentClient {
     }
     public func forget(_ mutation: ForgetMemory) async throws {
         _ = try await request(path: ["v1", "memories", "forget"], method: "POST", body: encodeContext(mutation))
+    }
+    public func triggerDream() async throws -> DreamTriggerReceipt {
+        struct Empty: Encodable {}
+        return try decodeContext(await request(path: ["v1", "memories", "dream"], method: "POST", body: encodeContext(Empty())))
+    }
+    public func acknowledgeSpeakerRelabels(ids: [String]) async throws {
+        struct Input: Encodable { let ids: [String] }
+        _ = try await request(path: ["v1", "speakers", "ack"], method: "POST", body: encodeContext(Input(ids: ids)))
     }
     private func decodeContext<T: Decodable>(_ data: Data) throws -> T {
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase

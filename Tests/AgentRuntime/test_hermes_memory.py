@@ -49,3 +49,35 @@ class HermesMemoryTests(unittest.TestCase):
         with self.memory.store() as store: store.add('user','当前实例的用户。')
         with HermesMemory(other).store() as store: self.assertEqual([], store.user_entries)
         self.assertEqual(1,len(self.memory.list()['items']))
+
+    def test_markdown_notebook_briefing_journal_person_and_topic_roundtrip(self):
+        # Reject raw JSON dumps; notebook files must be pure Markdown.
+        bad = self.memory.write_notebook('topic', '{"not": "markdown"}', slug='bad-json')
+        self.assertFalse(bad['success'])
+
+        b_res = self.memory.write_notebook(
+            'briefing',
+            '# 晨间简报 · 2026-11-10\n\n## 今日脉络\n今天继续推进 Dream 闲时整合。\n\n## 卡片：梳理人物声纹与脉络\n- 纹样：关系交汇\n- 语境：承接昨日工作室讨论\n\n请帮我把最近录音里小林相关的讨论和待办整理出来。',
+        )
+        self.assertTrue(b_res['success'])
+        p_res = self.memory.write_notebook('person', '协作伙伴，负责后端接口联调。', slug='小林', title='小林 · 协作脉络')
+        self.assertTrue(p_res['success'])
+        j_res = self.memory.write_notebook('journal', '# 2026-11-10 · 架构与地图优化\n\n- 上午完成了地图轨迹原生渲染。', slug='2026-11-10')
+        self.assertTrue(j_res['success'])
+        t_res = self.memory.write_notebook('topic', '# Dream 闲时记忆架构\n\n## 当前共识\n采用纯 Markdown 活页笔记本。', slug='dream-notebook')
+        self.assertTrue(t_res['success'])
+
+        notes = self.memory.list_notebook()
+        self.assertEqual({'briefing', 'journal', 'person', 'topic'}, {n['category'] for n in notes})
+
+        items = self.memory.list()['items']
+        kinds = {i['kind'] for i in items}
+        self.assertEqual({'briefing', 'journal', 'person', 'topic'}, kinds)
+        person_item = next(i for i in items if i['kind'] == 'person')
+        self.assertIn('# 小林 · 协作脉络', person_item['text'])
+        self.assertEqual('dream', person_item['basis'])
+
+        # Deleting a Markdown notebook item via forget() removes the underlying .md file.
+        self.memory.forget(person_item['id'])
+        self.assertFalse((self.home / 'memories/people/小林.md').exists())
+

@@ -15,6 +15,8 @@ final class PhoneContextSync {
     private(set) var isSyncing = false
     private(set) var memoryPending = 0
     private(set) var memoryNeedsReview = 0
+    private(set) var memoryReview: MemoryReviewStatus?
+    private(set) var isDreamRequesting = false
     var pendingSources: Int { state.sources.values.filter { $0.receipt == nil }.count }
     var needsDelivery: Bool {
         pendingSources > 0 || (state.sourceChangeRevision ?? 0) != (state.deliveredChangeRevision ?? 0)
@@ -164,6 +166,24 @@ final class PhoneContextSync {
                 : error.localizedDescription
         }
     }
+    func triggerDream() async {
+        guard !isDreamRequesting else { return }
+        isDreamRequesting = true
+        defer { isDreamRequesting = false }
+        do {
+            _ = try await client.triggerDream()
+            try await synchronize(includeMemories: true)
+            failure = nil
+        } catch {
+            guard !AgentTransportFailure.isCancelled(error) else { return }
+            if case AgentClientError.http(401, _, _, _) = error {
+                authenticationRequired = true; background(); onAuthenticationRequired?(error)
+            }
+            failure = AgentTransportFailure.isTransient(error)
+                ? String(localized: "暂时无法连接 Mac，请稍后重试。")
+                : error.localizedDescription
+        }
+    }
     func prepareSubmission(input: String) async throws {
         let expression = try NSRegularExpression(pattern: "momoagent://source/[^\\s)\\]>]+")
         for match in expression.matches(in: input, range: NSRange(input.startIndex..., in: input)) {
@@ -237,12 +257,56 @@ final class PhoneContextSync {
         guard status.workspaceId == state.connection.workspaceID, status.sourceSync,
               ["Hermes", "SuperAgent"].contains(status.memoryWriter) else { throw SyncError.identity }
         memoryPending = status.memoryPending ?? 0; memoryNeedsReview = status.memoryNeedsReview ?? 0
+        memoryReview = status.memoryReview
+        if let relabels = status.speakerRelabels, !relabels.isEmpty {
+            await applySpeakerRelabels(relabels)
+        }
         var uploadError: Error?
         do { try await uploadSources() }
         catch is CancellationError { throw CancellationError() }
         catch { uploadError = error }
         if includeMemories { try await downloadMemories() }
         if let uploadError { throw uploadError }
+    }
+    private func applySpeakerRelabels(_ relabels: [SpeakerRelabelInstruction]) async {
+        var ackIDs: [String] = []
+        var anyModified = false
+        for item in relabels {
+            guard let sessionID = UUID(uuidString: item.sessionId) else {
+                ackIDs.append(item.id)
+                continue
+            }
+            do {
+                let summary = try await archive.recordingSummary(sessionID: sessionID)
+                let refs: [SourceReference] = item.spanIds.compactMap { sid in
+                    guard let spanUUID = UUID(uuidString: sid) else { return nil }
+                    return SourceReference(
+                        sessionID: sessionID,
+                        spanID: spanUUID,
+                        transcriptVersion: summary.transcriptVersion,
+                        generation: summary.generation
+                    )
+                }
+                guard !refs.isEmpty else {
+                    ackIDs.append(item.id)
+                    continue
+                }
+                let freshRefs = (try? await archive.resolveCurrentSpeakerSources(refs)) ?? refs
+                let feedback: SpeakerFeedback = item.isOwner ? .owner : .person(item.newSpeaker)
+                let scope: SpeakerFeedbackScope = item.scope == "cluster" ? .cluster : .selection
+                try await archive.correctSpeakers(freshRefs, feedback: feedback, scope: scope, deferGlobalRematch: true)
+                anyModified = true
+                ackIDs.append(item.id)
+            } catch {
+                ackIDs.append(item.id)
+            }
+        }
+        if anyModified {
+            try? await archive.projectPendingDocuments(includeUnchanged: false)
+        }
+        if !ackIDs.isEmpty {
+            try? await client.acknowledgeSpeakerRelabels(ids: ackIDs)
+        }
     }
     private func uploadSources() async throws {
         let changeRevision = state.sourceChangeRevision

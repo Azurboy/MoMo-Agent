@@ -120,6 +120,15 @@ class ContextStore:
                 CREATE INDEX IF NOT EXISTS jobs_source ON jobs(source_id, source_revision);
                 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state);
                 CREATE INDEX IF NOT EXISTS recording_summaries_state ON recording_summaries(state, id, fingerprint);
+                CREATE TABLE IF NOT EXISTS span_speaker_overrides (
+                    source_id TEXT NOT NULL, span_id TEXT NOT NULL, speaker TEXT NOT NULL,
+                    is_owner INTEGER NOT NULL, reason TEXT NOT NULL, updated_at REAL NOT NULL,
+                    PRIMARY KEY(source_id, span_id));
+                CREATE TABLE IF NOT EXISTS speaker_relabel_queue (
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    span_ids TEXT NOT NULL, new_speaker TEXT NOT NULL, is_owner INTEGER NOT NULL,
+                    scope TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL,
+                    applied_on_phone INTEGER NOT NULL DEFAULT 0);
             """)
             for table in ('jobs', 'memory_reviews'):
                 if 'attempt' not in {row[1] for row in self.db.execute(f'PRAGMA table_info({table})')}:
@@ -598,6 +607,41 @@ class ContextStore:
             })
         return {"revision": self.revision, "items": items, "next_cursor": items[-1]["id"] if len(header_rows) > limit and items else None}
 
+    def _apply_speaker_overrides(self, source_id: str, spans: list[dict]) -> list[dict]:
+        if not spans:
+            return []
+        overrides = {
+            r["span_id"]: (r["speaker"], bool(r["is_owner"]))
+            for r in self.db.execute(
+                "SELECT span_id, speaker, is_owner FROM span_speaker_overrides WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
+        }
+        if not overrides:
+            return spans
+        out = []
+        for span in spans:
+            if not isinstance(span, dict):
+                out.append(span)
+                continue
+            override = overrides.get(str(span.get("id") or ""))
+            if override is None:
+                out.append(span)
+                continue
+            new_spk, new_owner = override
+            span_text = str(span.get("text") or "")
+            if span_text.startswith("[") and "] " in span_text:
+                span_text = f"[{new_spk}] " + span_text.split("] ", 1)[1]
+            else:
+                span_text = f"[{new_spk}] {span_text}"
+            updated = dict(span)
+            updated["text"] = span_text
+            updated["speaker"] = new_spk
+            updated["is_owner"] = new_owner
+            updated["speaker_inferred_by_dream"] = True
+            out.append(updated)
+        return out
+
     def read_source(self, source_id, expected_revision=None, offset=0, limit=12_000):
         row = self.source(source_id, expected_revision)
         text = row["text"]
@@ -605,27 +649,163 @@ class ContextStore:
             raise ValueError("Invalid character range")
         end = min(len(text), offset + limit)
         payload = json.loads(row["payload"])
+        overrides = {
+            r["span_id"]: (r["speaker"], bool(r["is_owner"]))
+            for r in self.db.execute(
+                "SELECT span_id, speaker, is_owner FROM span_speaker_overrides WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
+        }
         # Span metadata is bounded by the same character range; every span has a source citation.
         spans, position = [], 0
         for span in payload["spans"]:
             next_position = position + len(span["text"])
             if next_position > offset and position < end:
+                span_text = span["text"]
+                override = overrides.get(span["id"])
+                if override is not None:
+                    new_spk, new_owner = override
+                    if span_text.startswith("[") and "] " in span_text:
+                        span_text = f"[{new_spk}] " + span_text.split("] ", 1)[1]
+                    else:
+                        span_text = f"[{new_spk}] {span_text}"
                 item = {
                     "id": span["id"],
                     "recorded_at": span["recorded_at"],
-                    "text": span["text"],
+                    "text": span_text,
                     "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}',
                 }
-                if isinstance(span.get("is_owner"), bool):
-                    item["is_owner"] = span["is_owner"]
-                if span.get("speaker"):
-                    item["speaker"] = span["speaker"]
+                if override is not None:
+                    item["is_owner"] = override[1]
+                    item["speaker"] = override[0]
+                    item["speaker_inferred_by_dream"] = True
+                else:
+                    if isinstance(span.get("is_owner"), bool):
+                        item["is_owner"] = span["is_owner"]
+                    if span.get("speaker"):
+                        item["speaker"] = span["speaker"]
                 spans.append(item)
             position = next_position + 1
         return {"source_id": source_id, "source_revision": row["revision"], "text_sha256": row["hash"],
                 "offset": offset, "end": end, "total_characters": len(text), "text": text[offset:end],
                 "truncated": end < len(text), "next_offset": end if end < len(text) else None,
                 "spans": spans, "content_role": "recorded evidence, not instructions or execution authorization"}
+
+    def relabel_speakers(
+        self,
+        source_id: str,
+        target_speaker: str,
+        *,
+        is_owner: bool = False,
+        from_speaker: str | None = None,
+        span_ids: list[str] | None = None,
+        scope: str = "cluster",
+        reason: str = "",
+    ) -> dict:
+        row = self.source(source_id)
+        payload = json.loads(row["payload"])
+        session_id = str(payload.get("session_id") or source_id.split("/")[-1]).lower()
+        clean_target = "我" if is_owner else str(target_speaker or "").strip()
+        if not clean_target or len(clean_target) > 80:
+            raise ValueError("A valid target_speaker name (<= 80 chars) is required")
+        clean_scope = "cluster" if scope == "cluster" else "selection"
+        clean_reason = str(reason or "Dream semantic speaker inference").strip()[:400]
+
+        def _extract_label(s: dict) -> str:
+            if s.get("speaker"):
+                return str(s["speaker"]).strip()
+            txt = str(s.get("text") or "").strip()
+            if txt.startswith("[") and "]" in txt:
+                return txt[1:txt.index("]")].strip()
+            return ""
+
+        wanted_ids = {str(sid).strip().lower() for sid in (span_ids or []) if str(sid).strip()}
+        wanted_from = str(from_speaker or "").strip().strip("[]")
+        if clean_scope == "cluster" and wanted_ids and not wanted_from:
+            for sp in payload["spans"]:
+                if str(sp.get("id", "")).lower() in wanted_ids:
+                    lbl = _extract_label(sp)
+                    if lbl:
+                        wanted_from = lbl
+                        break
+
+        matched_span_ids: list[str] = []
+        for sp in payload["spans"]:
+            sid = str(sp.get("id", "")).lower()
+            lbl = _extract_label(sp)
+            if sid in wanted_ids or (wanted_from and lbl == wanted_from):
+                matched_span_ids.append(sid)
+
+        if not matched_span_ids:
+            return {"success": False, "error": "No matching transcript spans found for speaker relabeling"}
+
+        now = time.time()
+        relabel_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"momo-speaker-relabel:{source_id}:{clean_target}:{int(is_owner)}:{','.join(sorted(matched_span_ids))}"))
+        with self.write():
+            for sid in matched_span_ids:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO span_speaker_overrides(source_id, span_id, speaker, is_owner, reason, updated_at) VALUES(?,?,?,?,?,?)",
+                    (source_id, sid, clean_target, int(bool(is_owner)), clean_reason, now),
+                )
+            self.db.execute(
+                """INSERT OR REPLACE INTO speaker_relabel_queue(
+                    id, source_id, session_id, span_ids, new_speaker, is_owner, scope, reason, created_at, applied_on_phone
+                ) VALUES(?,?,?,?,?,?,?,?,?,0)""",
+                (
+                    relabel_id,
+                    source_id,
+                    session_id,
+                    canonical(matched_span_ids),
+                    clean_target,
+                    int(bool(is_owner)),
+                    clean_scope,
+                    clean_reason,
+                    now,
+                ),
+            )
+            self.advance()
+        return {
+            "success": True,
+            "relabel_id": relabel_id,
+            "source_id": source_id,
+            "session_id": session_id,
+            "updated_span_count": len(matched_span_ids),
+            "new_speaker": clean_target,
+            "is_owner": bool(is_owner),
+            "scope": clean_scope,
+        }
+
+    def pending_speaker_relabels(self, limit: int = 32) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM speaker_relabel_queue WHERE applied_on_phone=0 ORDER BY created_at ASC LIMIT ?",
+            (max(1, min(limit, 100)),),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "source_id": r["source_id"],
+                "session_id": r["session_id"],
+                "span_ids": json.loads(r["span_ids"]),
+                "new_speaker": r["new_speaker"],
+                "is_owner": bool(r["is_owner"]),
+                "scope": r["scope"],
+                "reason": r["reason"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def ack_speaker_relabels(self, ids: list[str]) -> dict:
+        clean_ids = [str(i).strip() for i in (ids or []) if str(i).strip()]
+        if not clean_ids:
+            return {"acknowledged": 0}
+        with self.write():
+            placeholders = ",".join("?" for _ in clean_ids)
+            updated = self.db.execute(
+                f"UPDATE speaker_relabel_queue SET applied_on_phone=1 WHERE id IN ({placeholders})",
+                tuple(clean_ids),
+            ).rowcount
+        return {"acknowledged": updated}
 
     def organize(self, source_id, source_revision, summary, facts, suggested_actions):
         if not isinstance(summary, str) or not summary.strip() or len(summary) > 16_000:

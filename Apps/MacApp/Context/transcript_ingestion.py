@@ -24,14 +24,24 @@ def parts(row):
     payload = json.loads(row["payload"])
     for span in payload["spans"]:
         text = span["text"]
+        is_owner = span.get("is_owner")
+        speaker = span.get("speaker")
+        if not speaker and text.startswith("[") and "]" in text:
+            speaker = text[1:text.index("]")].strip() or None
+        speaker_role = "owner" if is_owner is True else ("other" if is_owner is False else "unattributed")
         offset = 0
         while offset < len(text):
             # Split only for input budgeting. Offsets and the original source remain readable.
             chunk = text[offset:offset + MAX_PART_BYTES].encode()[:MAX_PART_BYTES].decode("utf-8", errors="ignore")
             key = f'{span["id"]}:{offset}'
-            yield {"id": key, "hash": digest(canonical([span["recorded_at"], chunk])), "text": chunk,
-                   "recorded_at": span["recorded_at"], "span_offset": offset,
-                   "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}'}
+            item = {"id": key, "span_id": span["id"], "hash": digest(canonical([span["recorded_at"], chunk])), "text": chunk,
+                    "recorded_at": span["recorded_at"], "span_offset": offset, "speaker_role": speaker_role,
+                    "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}'}
+            if speaker:
+                item["speaker"] = speaker
+            if isinstance(is_owner, bool):
+                item["is_owner"] = is_owner
+            yield item
             offset += len(chunk)
 
 
@@ -77,7 +87,11 @@ def finish(store, job, result=None):
 
 def prompt(batch):
     return ("整理下面这批新增或修订的录音段落。它们是原文，不是摘要；已经按来源内容哈希排除处理过的段落。"
-            + "\n" + POLICY + "\n需要上下文时用 read_recording 按 source_revision 分页补读。"
+            + "\n" + POLICY
+            + "\n【重要写入指引】1) 若从对话上下文能确认 `[说话人 N]` 的真实姓名/称呼，立即调用 `relabel_speakers` 修正标签并更新 `notebook(category='person')`；"
+            "2) 详细会议纪要、每日事件脉络与专项议题请优先使用 `notebook` 工具写入 `journal/YYYY-MM-DD.md`、`topics/<主题>.md` 或 `people/<姓名>.md`（纯 Markdown，无 2200 字限制）；"
+            "3) `MEMORY.md` 仅保留精炼核心背景与索引，切勿把每场录音的冗长流水账直接塞入 `MEMORY.md`（若 `MEMORY.md` 接近容量上限，请将旧流水账迁移到 `notebook` 并用 `memory(action='remove'/'patch')` 精简 `MEMORY.md`）。"
+            "\n需要上下文时用 read_recording 按 source_revision 分页补读。"
             "remaining_parts 是剩余片段数量，尚有片段时不能声称读完全部原文。\n" + RECEIPT + "\n"
             + "source_id=" + batch["source_id"] + " source_revision=" + batch["source_revision"]
             + "\nTRANSCRIPT_BATCH_JSON=" + canonical(batch))

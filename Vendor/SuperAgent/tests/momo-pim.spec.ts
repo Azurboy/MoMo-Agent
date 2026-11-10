@@ -27,13 +27,17 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
-it('registers all 19 Reminders/Calendar/Notes tools only in a loopback MoMo host', () => {
+it('registers all 23 Reminders/Calendar/Notes & Dream Notebook tools only in a loopback MoMo host', () => {
   const names = momoPimTools(host, ticket.id).map(t => t.name)
-  expect(names).toHaveLength(19)
+  expect(names).toHaveLength(23)
   expect(names).toContain('create_reminder')
   expect(names).toContain('complete_reminder')
   expect(names).toContain('create_calendar_event')
   expect(names).toContain('create_note')
+  expect(names).toContain('list_memory_notebooks')
+  expect(names).toContain('read_memory_notebook')
+  expect(names).toContain('write_memory_notebook')
+  expect(names).toContain('relabel_recording_speakers')
   vi.stubEnv('MOMO_COMPUTER_BRIDGE', '')
   expect(momoPimTools(host, ticket.id)).toEqual([])
   vi.stubEnv('MOMO_COMPUTER_BRIDGE', 'https://outside.example')

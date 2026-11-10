@@ -15,6 +15,7 @@ struct PhoneRemoteView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var showingTasks = false
     @State private var tasksSheetDetent: PresentationDetent = .medium
+    @State private var showingNotebook = false
     @State private var showingDesktop = false
     @State private var reconnecting = false
 
@@ -27,8 +28,9 @@ struct PhoneRemoteView: View {
             if let store = agent.store {
                 RemoteConversationView(store: store, agent: agent, watchStatus: watchStatus,
                     requestWatchStatus: requestWatchStatus, openLibrary: openLibrary, reconnect: { reconnecting = true },
-                    openDesktop: { showingDesktop = true }, speech: speech, stopPlayback: stopPlayback,
-                    voiceInputEnabled: chatIsVisible && !showingDesktop && !showingTasks && !reconnecting)
+                    openDesktop: { showingDesktop = true }, openNotebook: { showingNotebook = true },
+                    speech: speech, stopPlayback: stopPlayback,
+                    voiceInputEnabled: chatIsVisible && !showingDesktop && !showingTasks && !showingNotebook && !reconnecting)
             } else {
                 VStack(spacing: 24) {
                     RemoteAvatar(size: 120, active: false, watchStatus: watchStatus,
@@ -62,6 +64,22 @@ struct PhoneRemoteView: View {
             .presentationDetents([.medium, .large], selection: $tasksSheetDetent)
             .presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: $showingNotebook) {
+            if let sync = agent.context {
+                NavigationStack {
+                    RemoteMemoryView(sync: sync) { card in
+                        showingNotebook = false
+                        if let store = agent.store {
+                            store.setDraft(card.prompt)
+                            try? store.enqueue()
+                            Task { await store.refresh(userInitiated: true) }
+                        }
+                    }
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
+        }
         .fullScreenCover(isPresented: $reconnecting) { PhoneConnectionFlow(agent: agent, reconnecting: true, finish: { reconnecting = false }) }
         .fullScreenCover(isPresented: $showingDesktop) { PhoneDesktopView(agent: agent) }
     }
@@ -69,6 +87,9 @@ struct PhoneRemoteView: View {
     private var headerActions: some View {
         HStack(spacing: 10) {
             headerButton("设置", icon: "gearshape", id: "remote.settings", action: openSettings)
+            if agent.context != nil {
+                headerButton("记忆与晨间简报", icon: "sparkles", id: "remote.memory") { showingNotebook = true }
+            }
             Spacer()
             tasksHeaderButton
             headerButton("电脑桌面", icon: "desktopcomputer", id: "remote.desktop") { showingDesktop = true }
@@ -148,6 +169,7 @@ private struct RemoteConversationView: View {
     let openLibrary: () -> Void
     let reconnect: () -> Void
     let openDesktop: () -> Void
+    let openNotebook: () -> Void
     let speech: SpeechEngine?
     let stopPlayback: () async -> Void
     let voiceInputEnabled: Bool
@@ -156,14 +178,42 @@ private struct RemoteConversationView: View {
     @State private var sendFailure: String?
     @State private var viewport = CGRect.zero
     @State private var previewAttachment: AgentAttachment?
+    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var showingBriefingDetail = false
+
+    private var briefingDocument: DreamBriefingDocument? {
+        guard let sync = agent.context else { return nil }
+        return DreamBriefingDocument.resolve(from: sync.memories)
+    }
 
     var body: some View {
         let snapshot = ChatRenderSnapshot(store: store, readingPosition: agent.readingPosition,
             notificationTarget: agent.notifications.focusedTarget)
         let isEmpty = store.isEmpty || snapshot.messages.isEmpty
+        let draftEmpty = store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         VStack(spacing: 0) {
             if isEmpty {
                 identityHeader(isEmpty: true)
+                if draftEmpty, let doc = briefingDocument {
+                    DreamHomeCardsSection(
+                        document: doc,
+                        dismissedIDs: $dismissedBriefingCardIDs,
+                        onSelectCard: { card in
+                            store.setDraft(card.prompt)
+                            do {
+                                try store.enqueue()
+                                sendFailure = nil
+                                composeRevision += 1
+                                Task { await store.refresh(userInitiated: true) }
+                            } catch {
+                                sendFailure = error.localizedDescription
+                            }
+                        },
+                        onOpenBriefing: { showingBriefingDetail = true },
+                        onOpenNotebook: openNotebook
+                    )
+                    .padding(.bottom, 12)
+                }
             } else {
                 PhoneHeaderViewport { inset in
                     transcript(snapshot, headerInset: inset)
@@ -182,6 +232,26 @@ private struct RemoteConversationView: View {
         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: isEmpty)
         .scrollDismissesKeyboard(.interactively)
         .sheet(item: $previewAttachment) { ClientAttachmentPreview(attachment: $0) }
+        .sheet(isPresented: $showingBriefingDetail) {
+            if let doc = briefingDocument {
+                NavigationStack {
+                    ScrollView {
+                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "assistant.dreamBriefingMarkdown")
+                            .padding(20)
+                    }
+                    .phonePageSurface()
+                    .navigationTitle(doc.headline)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") { showingBriefingDetail = false }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             ClientComposer(text: Binding(get: { store.draft }, set: store.setDraft),
                            store: store,
