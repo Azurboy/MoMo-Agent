@@ -201,9 +201,17 @@ struct SpeakerProfilesView: View {
                         } label: {
                             Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44)
                         }
-                        .disabled(isMutating)
+                        .disabled(busy)
                         .accessibilityLabel("管理\(person.name)")
-                    }.accessibilityElement(children: .contain)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            deleting = person
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
                 }
             } footer: {
                 Text("在转录中点说话人，确认或纠正姓名。确认后会基于声纹自动匹配当前及全部历史录音中的同一说话人。")
@@ -298,7 +306,10 @@ struct SpeakerProfilesView: View {
     }
 
     private func update(_ action: @escaping @MainActor () async throws -> Void) {
-        guard !isMutating else { return }
+        guard !busy else { return }
+        if rematch.isRunning {
+            rematch.cancel()
+        }
         busy = true
         Task {
             defer { busy = false }

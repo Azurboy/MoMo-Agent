@@ -77,7 +77,11 @@ class HermesMemoryTests(unittest.TestCase):
         self.assertIn('# 小林 · 协作脉络', person_item['text'])
         self.assertEqual('dream', person_item['basis'])
 
-        # Deleting a Markdown notebook item via forget() removes the underlying .md file.
+        # Deleting a Markdown notebook item via forget() removes the underlying .md file
+        # and records a tombstone so Dream will not recreate the deleted person/topic/project.
         self.memory.forget(person_item['id'])
         self.assertFalse((self.home / 'memories/people/小林.md').exists())
+        recreate = self.memory.write_notebook('person', '重新创建的说话人', slug='小林', title='小林')
+        self.assertFalse(recreate['success'])
+
 

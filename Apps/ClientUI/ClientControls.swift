@@ -577,7 +577,7 @@ struct MemoryBinderTab: View {
                 .overlay { Circle().strokeBorder(colors.secondaryInk.opacity(0.45), lineWidth: 0.5) }
                 .accessibilityHidden(true)
             Text(category.title)
-                .momoHandwriting(size: 13.5, weight: isSelected ? .semibold : .regular)
+                .momoHandwriting(size: 12.5, weight: isSelected ? .semibold : .regular)
                 .foregroundStyle(colors.ink)
         }
         .padding(.horizontal, 11)
@@ -610,6 +610,7 @@ struct MemoryCardDigest: Equatable, Sendable {
     let title: String
     let highlights: [String]
     let sectionPills: [String]
+    let linkedPaths: [String]
     let cleanedNotebookMarkdown: String
     let isNotebookMarkdown: Bool
 
@@ -765,6 +766,18 @@ struct MemoryCardDigest: Equatable, Sendable {
             let candidateHighlights = bullets.isEmpty ? paragraphs : bullets
             self.highlights = Array(candidateHighlights.prefix(2))
             self.sectionPills = Array(sections.prefix(4))
+            var refs: [String] = []
+            if let regex = Self.notebookRefRegex {
+                for match in regex.matches(in: bodyText, range: NSRange(bodyText.startIndex..., in: bodyText)) {
+                    if let r = Range(match.range(at: 1), in: bodyText) {
+                        let ref = String(bodyText[r])
+                        if !refs.contains(ref) {
+                            refs.append(ref)
+                        }
+                    }
+                }
+            }
+            self.linkedPaths = refs
             self.cleanedNotebookMarkdown = Self.cleanNotebookMarkdownForDetail(bodyText)
         } else {
             var working = bodyText
@@ -819,11 +832,30 @@ struct MemoryCardDigest: Equatable, Sendable {
                 }
             }
             self.sectionPills = []
+            self.linkedPaths = []
             self.cleanedNotebookMarkdown = bodyText
         }
 
         self.dateBadge = extractedDate
         self.sourceNote = extractedNote
+    }
+
+    static func linkedChildren(for parent: ContextMemory, in allMemories: [ContextMemory]) -> [ContextMemory] {
+        let digest = cached(for: parent)
+        guard !digest.linkedPaths.isEmpty else { return [] }
+        var result: [ContextMemory] = []
+        for relPath in digest.linkedPaths {
+            let encoded = relPath
+                .split(separator: "/")
+                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                .joined(separator: "/")
+            guard let url = URL(string: "momoagent://memory/\(encoded)"),
+                  let target = DreamMemoryLinkResolver.resolve(url: url, in: allMemories),
+                  target.id != parent.id,
+                  !result.contains(where: { $0.id == target.id }) else { continue }
+            result.append(target)
+        }
+        return result
     }
 
     private static func badgeTitleFallback(for kind: String) -> String {
@@ -915,48 +947,48 @@ struct MemoryCardView: View {
     var body: some View {
         let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: 10) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(colors.tab(memory.kind))
-                .frame(width: 4)
+                .frame(width: 3.5)
                 .padding(.vertical, 2)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(digest.title)
-                        .momoHandwriting(size: 14.5, weight: .semibold, relativeTo: .headline)
+                        .momoHandwriting(size: 13.5, weight: .semibold, relativeTo: .headline)
                         .foregroundStyle(colors.ink)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     if let date = digest.dateBadge {
                         Text(date)
-                            .font(.caption2.monospacedDigit())
+                            .font(.system(size: 10.5, weight: .regular, design: .monospaced))
                             .foregroundStyle(colors.secondaryInk)
                     }
                 }
                 if let firstHighlight = digest.highlights.first {
                     Text(firstHighlight)
-                        .font(.caption)
+                        .font(.system(size: 11.5))
                         .foregroundStyle(colors.secondaryInk)
                         .lineLimit(1)
                 }
             }
 
             Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(colors.secondaryInk.opacity(0.6))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(colors.secondaryInk.opacity(0.55))
                 .accessibilityHidden(true)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(colors.paper, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(colors.paper, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(colors.secondaryInk.opacity(0.12), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(colors.secondaryInk.opacity(0.14), lineWidth: 0.5)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(([digest.badge.title, digest.dateBadge, digest.statusBadge, digest.title]
             .compactMap { $0 } + digest.highlights + ["查看全文"]).joined(separator: "，"))
@@ -965,24 +997,37 @@ struct MemoryCardView: View {
 
 struct ClientMemoryContent: View {
     let memory: ContextMemory
+    var onDelete: (() -> Void)? = nil
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             // Skeuomorphic top margin header sitting right above the double red rule (y=40)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 Text(digest.title)
-                    .momoHandwriting(size: 15, weight: .semibold, relativeTo: .headline)
+                    .momoHandwriting(size: 14, weight: .semibold, relativeTo: .headline)
                     .foregroundStyle(colors.ink)
                     .lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 6)
                 if let date = digest.dateBadge {
                     Text(date)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(colors.margin)
+                }
+                if let onDelete {
+                    Button(role: .destructive, action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(colors.margin)
+                            .frame(width: 26, height: 26)
+                            .background(colors.margin.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(memory.kind == "person" ? "删除该人物" : "忘记这条记忆")
+                    .accessibilityIdentifier("remote.inlineDeleteMemory")
                 }
             }
             .padding(.bottom, 4)
@@ -992,18 +1037,18 @@ struct ClientMemoryContent: View {
                                     accessibilityID: "remote.memoryText", handwriting: true)
             } else {
                 if !digest.highlights.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline, spacing: 5) {
                                 Text("·").accessibilityHidden(true)
                                 Text(point).fixedSize(horizontal: false, vertical: true)
-                            }.momoHandwriting(size: 13.5)
+                            }.momoHandwriting(size: 12)
                         }
-                    }.lineSpacing(2)
+                    }.lineSpacing(1.5)
                 }
                 Text(memory.text)
-                    .momoHandwriting(size: 13.5)
-                    .lineSpacing(2)
+                    .momoHandwriting(size: 12)
+                    .lineSpacing(1.5)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
@@ -1012,7 +1057,7 @@ struct ClientMemoryContent: View {
 
             ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(evidence.quote).momoHandwriting(size: 12.5).lineSpacing(2).textSelection(.enabled)
+                    Text(evidence.quote).momoHandwriting(size: 11.5).lineSpacing(1.5).textSelection(.enabled)
                     if let time = evidence.recordedAt {
                         Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
                             .font(.caption2)
@@ -1036,37 +1081,37 @@ struct DreamMemorySection: Identifiable {
 }
 
 enum DreamMemoryCategory: String, CaseIterable, Identifiable {
+    case all
     case project
     case briefing
     case topic
     case person
     case journal
     case core
-    case all
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .all: return "目录"
         case .project: return "在研项目"
         case .briefing: return "晨间简报"
         case .topic: return "主题"
         case .person: return "人物"
         case .journal: return "每日日志"
         case .core: return "核心记忆"
-        case .all: return "目录"
         }
     }
 
     var symbol: String {
         switch self {
+        case .all: return "list.bullet.indent"
         case .project: return "folder.badge.gearshape"
         case .briefing: return "sun.max"
-        case .topic: return "folder"
+        case .topic: return "doc.text"
         case .person: return "person.2"
         case .journal: return "calendar"
         case .core: return "sparkles"
-        case .all: return "list.bullet"
         }
     }
 
@@ -1080,12 +1125,40 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
     }
 
     static func preferredInitialCategory(for memories: [ContextMemory]) -> DreamMemoryCategory {
-        for candidate: DreamMemoryCategory in [.project, .briefing, .topic, .person, .journal] {
-            if memories.contains(where: { candidate.matches($0) }) {
-                return candidate
+        .all
+    }
+
+    static func directoryFolders(from memories: [ContextMemory]) -> [DreamMemorySection] {
+        let active = memories.filter { $0.status != "forgotten" }
+        guard !active.isEmpty else { return [] }
+        let specs: [(id: String, title: String, subtitle: String?, filter: (ContextMemory) -> Bool)] = [
+            ("project", "在研项目", "项目与关联专题、人物", { $0.kind == "project" }),
+            ("briefing", "晨间简报", "今日焦点与未闭环事项", { $0.kind == "briefing" }),
+            ("topic", "专题活页", "专项方法论与决策脉络", { $0.kind == "topic" }),
+            ("person", "人物档案", "协作伙伴与说话人档案", { $0.kind == "person" }),
+            ("journal", "每日日志", "按日归档的时空记录", { $0.kind == "journal" }),
+            ("core", "核心记忆", "跨会话长期锚点与偏好", { $0.kind == "memory" || $0.kind == "user" }),
+        ]
+        var folders: [DreamMemorySection] = []
+        for spec in specs {
+            let matching = sortMemories(active.filter(spec.filter))
+            if !matching.isEmpty {
+                folders.append(DreamMemorySection(id: spec.id, title: spec.title, subtitle: spec.subtitle, items: matching))
             }
         }
-        return .all
+        return folders
+    }
+
+    static func defaultExpandedFolderIDs(for folders: [DreamMemorySection]) -> Set<String> {
+        let hasNotebooks = folders.contains(where: { $0.id != "core" })
+        if !hasNotebooks {
+            return Set(folders.map(\.id))
+        }
+        let totalItems = folders.reduce(0) { $0 + $1.items.count }
+        if totalItems <= 10 {
+            return Set(folders.map(\.id))
+        }
+        return ["project", "briefing", "topic", "person"]
     }
 
     static func category(for memory: ContextMemory) -> DreamMemoryCategory {
@@ -1197,6 +1270,124 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
             }
             return lhs.offset < rhs.offset
         }.map(\.element)
+    }
+
+    static func folderSymbol(for id: String) -> String {
+        switch id {
+        case "project": return "folder.fill"
+        case "briefing": return "sun.max.fill"
+        case "topic": return "doc.text.fill"
+        case "person": return "person.2.fill"
+        case "journal": return "calendar"
+        default: return "sparkles"
+        }
+    }
+}
+
+struct MemoryDirectoryFolderHeader: View {
+    let section: DreamMemorySection
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(colors.secondaryInk)
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+
+                Image(systemName: DreamMemoryCategory.folderSymbol(for: section.id))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(colors.ink)
+                    .padding(5)
+                    .background(colors.tab(section.id), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .accessibilityHidden(true)
+
+                Text(section.title)
+                    .momoHandwriting(size: 13.5, weight: .semibold, relativeTo: .headline)
+                    .foregroundStyle(colors.ink)
+
+                if let subtitle = section.subtitle, !isExpanded {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(colors.secondaryInk)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                Text("\(section.items.count)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(colors.secondaryInk)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(colors.paper.opacity(0.85), in: Capsule())
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                colors.tab(section.id).opacity(isExpanded ? 0.55 : 0.35),
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(colors.secondaryInk.opacity(0.18), lineWidth: 0.5)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityIdentifier("remote.memoryFolder.\(section.id)")
+    }
+}
+
+struct MemoryDirectoryChildRowLabel: View {
+    let child: ContextMemory
+    let isLast: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let digest = MemoryCardDigest.cached(for: child)
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        HStack(spacing: 8) {
+            Text(isLast ? "└─" : "├─")
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(colors.secondaryInk.opacity(0.65))
+                .accessibilityHidden(true)
+
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(colors.tab(child.kind))
+                .frame(width: 3, height: 14)
+                .accessibilityHidden(true)
+
+            Text(digest.title)
+                .momoHandwriting(size: 12.5, weight: .medium)
+                .foregroundStyle(colors.ink)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Text(digest.badge.title)
+                .font(.system(size: 10))
+                .foregroundStyle(colors.secondaryInk)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(colors.secondaryInk.opacity(0.5))
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(colors.paper.opacity(0.75), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(colors.secondaryInk.opacity(0.10), lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -1793,12 +1984,12 @@ struct MemoryBinderPageSwitcher: View {
                                         onSelect(item)
                                     } label: {
                                         Text(pillLabel)
-                                            .momoHandwriting(size: 13.5, weight: isSelected ? .semibold : .regular)
+                                            .momoHandwriting(size: 12.5, weight: isSelected ? .semibold : .regular)
                                             .lineLimit(1)
                                             .foregroundStyle(isSelected ? colors.paper : colors.ink)
-                                            .padding(.horizontal, 11)
-                                            .padding(.vertical, 6)
-                                            .frame(minHeight: 34)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .frame(minHeight: 30)
                                             .background(
                                                 isSelected ? colors.ink : colors.paper,
                                                 in: Capsule()
@@ -1867,9 +2058,20 @@ struct MemoryNotePreviewSheet: View {
     @Environment(\.colorScheme) private var scheme
 
     private var siblingMemories: [ContextMemory] {
-        let active = allMemories.filter { $0.status != "forgotten" && $0.kind == memory.kind }
-        let sorted = DreamMemoryCategory.sortMemories(active)
-        return sorted.isEmpty ? [memory] : sorted
+        let active = allMemories.filter { $0.status != "forgotten" }
+        let sameKind = DreamMemoryCategory.sortMemories(active.filter { $0.kind == memory.kind })
+        if sameKind.count > 1 {
+            return sameKind
+        }
+        if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
+            let allNotebooks = DreamMemoryCategory.directoryFolders(from: active)
+                .filter { $0.id != "core" }
+                .flatMap(\.items)
+            if allNotebooks.count > 1 {
+                return allNotebooks
+            }
+        }
+        return sameKind.isEmpty ? [memory] : sameKind
     }
 
     var body: some View {

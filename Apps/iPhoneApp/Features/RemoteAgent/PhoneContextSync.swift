@@ -154,6 +154,9 @@ final class PhoneContextSync {
     func forget(_ memory: ContextMemory) async {
         do {
             try await client.forget(ForgetMemory(memory: memory))
+            if memory.kind == "person" {
+                await forgetMatchingVoiceprintIfNeeded(for: memory)
+            }
             try await downloadMemories()
             failure = nil
         } catch {
@@ -164,6 +167,37 @@ final class PhoneContextSync {
             failure = AgentTransportFailure.isTransient(error)
                 ? String(localized: "暂时无法连接 Mac，请稍后重试。")
                 : error.localizedDescription
+        }
+    }
+
+    private func forgetMatchingVoiceprintIfNeeded(for memory: ContextMemory) async {
+        var candidateNames: Set<String> = []
+        if let relPath = memory.path {
+            let filename = (relPath as NSString).lastPathComponent
+            let stem = (filename as NSString).deletingPathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stem.isEmpty { candidateNames.insert(stem) }
+        }
+        let firstLine = memory.text
+            .components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .replacingOccurrences(of: #"^#+\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !firstLine.isEmpty {
+            candidateNames.insert(firstLine)
+            for sep in [" — ", " - ", " · ", "（", "("] {
+                if let prefix = firstLine.components(separatedBy: sep).first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !prefix.isEmpty {
+                    candidateNames.insert(prefix)
+                }
+            }
+        }
+        guard !candidateNames.isEmpty,
+              let profiles = try? await archive.speakerProfiles() else { return }
+        for profile in profiles where !profile.isUser {
+            let trimmed = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if candidateNames.contains(trimmed) {
+                try? await archive.forgetVoiceprint(personID: profile.id)
+            }
         }
     }
     func triggerDream() async {

@@ -307,6 +307,31 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
         )
         XCTAssertEqual(resolved?.id, "hermes-project-overview")
 
+        let topicPayload: [String: Any] = [
+            "id": "hermes-topic-diary",
+            "text": "# 日记法与访谈模式发布\n\n## 当前共识\n复用现有 App。",
+            "kind": "topic",
+            "basis": "dream",
+            "status": "current",
+            "revision": 1,
+            "path": "topics/diary-study.md",
+            "evidence": []
+        ]
+        let topicMemory = try JSONDecoder().decode(
+            ContextMemory.self,
+            from: JSONSerialization.data(withJSONObject: topicPayload)
+        )
+        let children = MemoryCardDigest.linkedChildren(
+            for: projectMemory,
+            in: [legacyCore, journal, projectMemory, topicMemory]
+        )
+        XCTAssertEqual(children.map(\.id), ["hermes-topic-diary"])
+
+        let folders = DreamMemoryCategory.directoryFolders(
+            from: [legacyCore, journal, projectMemory, topicMemory]
+        )
+        XCTAssertEqual(folders.map(\.id), ["project", "topic", "journal", "core"])
+
         let card = DreamBriefingCard(
             id: "dream-card-test-1",
             title: "收口用研项目待决项",

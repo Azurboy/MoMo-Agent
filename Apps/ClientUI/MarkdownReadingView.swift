@@ -43,9 +43,9 @@ private struct MarkdownBlockView: View {
     let handwriting: Bool
     @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .body) private var indent = 14.0
-    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 6.0
-    @ScaledMetric(relativeTo: .body) private var listSpacing = 4.0
-    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 4.0
+    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 5.0
+    @ScaledMetric(relativeTo: .body) private var listSpacing = 3.0
+    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 3.0
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -57,7 +57,7 @@ private struct MarkdownBlockView: View {
             }
             Text(block.text)
                 .modifier(MarkdownReadingTypography(style: textStyle, handwriting: handwriting))
-                .lineSpacing(handwriting ? 2 : (block.headingLevel == nil ? 5 : 2))
+                .lineSpacing(handwriting ? 1.5 : (block.headingLevel == nil ? 5 : 2))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(block.headingLevel == nil ? [] : .isHeader)
@@ -105,20 +105,11 @@ private struct MarkdownReadingTypography: ViewModifier {
     }
 
     private var size: CGFloat {
-        #if os(macOS)
         switch style {
-        case .heading: 15
-        case .subheading: 13.5
-        case .section: 13
-        default: 12.5
+        case .heading: 14.5
+        case .subheading: 13
+        case .section: 12.5
+        default: 12
         }
-        #else
-        switch style {
-        case .heading: 16.5
-        case .subheading: 14.5
-        case .section: 14
-        default: 13.5
-        }
-        #endif
     }
 }

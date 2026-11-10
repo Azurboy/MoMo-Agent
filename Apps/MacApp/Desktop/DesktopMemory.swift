@@ -8,6 +8,9 @@ struct DesktopMemory: View {
     @State private var selectedCategory: DreamMemoryCategory? = nil
     @State private var selectedMemoryID: String? = nil
     @State private var inspecting: ContextMemory?
+    @State private var deletingMemory: ContextMemory?
+    @State private var expandedFolderIDs: Set<String>? = nil
+    @State private var collapsedParentIDs: Set<String> = []
     @State private var webFailure: String?
     @State private var dreamRequesting = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
@@ -29,20 +32,50 @@ struct DesktopMemory: View {
         return nonEmpty.isEmpty ? DreamMemoryCategory.allCases : nonEmpty
     }
 
+    private var directoryFolders: [DreamMemorySection] {
+        DreamMemoryCategory.directoryFolders(from: allMemories)
+    }
+
     private var memories: [ContextMemory] { allMemories.filter { activeCategory.matches($0) } }
-    private var sections: [DreamMemorySection] { DreamMemoryCategory.sections(from: allMemories, category: activeCategory) }
+    private var sections: [DreamMemorySection] {
+        activeCategory == .all
+            ? directoryFolders
+            : DreamMemoryCategory.sections(from: allMemories, category: activeCategory)
+    }
 
     private var currentReaderItems: [ContextMemory] {
-        sections.flatMap(\.items)
+        let direct = sections.flatMap(\.items)
+        if direct.count > 1 {
+            return direct
+        }
+        let allNotebooks = directoryFolders.filter { $0.id != "core" }.flatMap(\.items)
+        return allNotebooks.count > 1 ? allNotebooks : direct
     }
 
     private var activeReaderMemory: ContextMemory? {
-        let items = currentReaderItems
+        let items = sections.flatMap(\.items)
         guard !items.isEmpty else { return nil }
-        if let selectedMemoryID, let matched = items.first(where: { $0.id == selectedMemoryID }) {
+        if let selectedMemoryID, let matched = currentReaderItems.first(where: { $0.id == selectedMemoryID }) {
             return matched
         }
         return items.first
+    }
+
+    private func isFolderExpanded(_ folderID: String) -> Bool {
+        let current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
+        return current.contains(folderID)
+    }
+
+    private func toggleFolder(_ folderID: String) {
+        var current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
+        if current.contains(folderID) {
+            current.remove(folderID)
+        } else {
+            current.insert(folderID)
+        }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            expandedFolderIDs = current
+        }
     }
 
     var body: some View {
@@ -104,9 +137,15 @@ struct DesktopMemory: View {
                             MemoryBinderPageSwitcher(
                                 items: currentReaderItems,
                                 selectedID: memory.id,
-                                onSelect: { selectedMemoryID = $0.id }
+                                onSelect: { item in
+                                    selectedMemoryID = item.id
+                                    let targetCat = DreamMemoryCategory.category(for: item)
+                                    if targetCat != activeCategory {
+                                        selectedCategory = targetCat
+                                    }
+                                }
                             )
-                            ClientMemoryContent(memory: memory)
+                            ClientMemoryContent(memory: memory, onDelete: { deletingMemory = memory })
                                 .textSelection(.enabled)
                                 .environment(\.openURL, OpenURLAction { url in
                                     if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
@@ -117,26 +156,21 @@ struct DesktopMemory: View {
                                     return .systemAction
                                 })
                         } else {
-                            LazyVStack(alignment: .leading, spacing: 14) {
+                            LazyVStack(alignment: .leading, spacing: 10) {
                                 ForEach(sections) { section in
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        if sections.count > 1 {
-                                            HStack(spacing: 6) {
-                                                Text(section.title)
-                                                    .momoHandwriting(size: 17, weight: .semibold, relativeTo: .headline)
-                                                    .foregroundStyle(colors.ink)
-                                                    .accessibilityAddTraits(.isHeader)
-                                                Text("\(section.items.count)")
-                                                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                                                    .foregroundStyle(colors.secondaryInk)
-                                            }
-                                            .padding(.top, 2)
+                                    let expanded = activeCategory != .all || isFolderExpanded(section.id)
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        if activeCategory == .all && (sections.count > 1 || section.id != "core") {
+                                            MemoryDirectoryFolderHeader(
+                                                section: section,
+                                                isExpanded: expanded,
+                                                onToggle: { toggleFolder(section.id) }
+                                            )
                                         }
-                                        ForEach(section.items) { memory in
-                                            Button { inspecting = memory } label: {
-                                                MemoryCardView(memory: memory)
-                                            }.buttonStyle(.plain)
-                                                .accessibilityIdentifier("remote.memoryRow." + memory.id)
+                                        if expanded {
+                                            ForEach(section.items) { memory in
+                                                desktopDirectoryItemView(memory, colors: colors)
+                                            }
                                         }
                                     }
                                 }
@@ -159,6 +193,117 @@ struct DesktopMemory: View {
             }
         }
         .sheet(item: $inspecting) { memory in DesktopMemoryDetail(model: model, memory: memory) }
+        .confirmationDialog(
+            deletingMemory?.kind == "person" ? "删除该人物档案？" : "忘记这条记忆？",
+            isPresented: Binding(get: { deletingMemory != nil }, set: { if !$0 { deletingMemory = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let target = deletingMemory {
+                Button(target.kind == "person" ? "删除" : "忘记", role: .destructive) {
+                    deletingMemory = nil
+                    Task { try? await model.forgetMemory(target) }
+                }
+            }
+        } message: {
+            Text(deletingMemory?.kind == "person"
+                 ? "删除后 Dream 不会再次自动生成该说话人档案。"
+                 : "原始录音和聊天记录仍保留。")
+        }
+    }
+
+    @ViewBuilder
+    private func desktopDirectoryItemView(_ memory: ContextMemory, colors: MemoryNotebookPalette) -> some View {
+        let childMemories = MemoryCardDigest.linkedChildren(for: memory, in: allMemories)
+        let digest = MemoryCardDigest.cached(for: memory)
+        let isParentExpanded = !collapsedParentIDs.contains(memory.id)
+
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Button { inspecting = memory } label: {
+                    MemoryCardView(memory: memory)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("remote.memoryRow." + memory.id)
+                .contextMenu {
+                    Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
+                        deletingMemory = memory
+                    }
+                }
+
+                if !childMemories.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            if isParentExpanded {
+                                collapsedParentIDs.insert(memory.id)
+                            } else {
+                                collapsedParentIDs.remove(memory.id)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: isParentExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("\(childMemories.count)")
+                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundStyle(colors.secondaryInk)
+                        .padding(.horizontal, 7)
+                        .frame(minHeight: 34)
+                        .background(colors.paper, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(colors.secondaryInk.opacity(0.14), lineWidth: 0.5)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if memory.kind == "person" {
+                    Button(role: .destructive) {
+                        deletingMemory = memory
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(colors.margin)
+                            .frame(width: 34, height: 34)
+                            .background(colors.paper, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(colors.margin.opacity(0.22), lineWidth: 0.5)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除\(digest.title)")
+                }
+            }
+
+            if !childMemories.isEmpty && isParentExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(childMemories.enumerated()), id: \.element.id) { idx, child in
+                        Button { inspecting = child } label: {
+                            MemoryDirectoryChildRowLabel(
+                                child: child,
+                                isLast: idx == childMemories.count - 1
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.leading, 14)
+            } else if childMemories.isEmpty && ["topic", "briefing"].contains(memory.kind) && !digest.sectionPills.isEmpty {
+                HStack(spacing: 5) {
+                    Text("└─")
+                        .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                        .foregroundStyle(colors.secondaryInk.opacity(0.6))
+                    Text(digest.sectionPills.joined(separator: " · "))
+                        .font(.system(size: 11))
+                        .foregroundStyle(colors.secondaryInk)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 14)
+                .padding(.vertical, 1)
+            }
+        }
     }
 }
 
@@ -188,8 +333,20 @@ private struct DesktopMemoryDetail: View {
     }
 
     private var siblingMemories: [ContextMemory] {
-        let active = model.memories.filter { $0.status != "forgotten" && $0.kind == memory.kind }
-        return DreamMemoryCategory.sortMemories(active)
+        let active = model.memories.filter { $0.status != "forgotten" }
+        let sameKind = DreamMemoryCategory.sortMemories(active.filter { $0.kind == memory.kind })
+        if sameKind.count > 1 {
+            return sameKind
+        }
+        if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
+            let allNotebooks = DreamMemoryCategory.directoryFolders(from: active)
+                .filter { $0.id != "core" }
+                .flatMap(\.items)
+            if allNotebooks.count > 1 {
+                return allNotebooks
+            }
+        }
+        return sameKind.isEmpty ? [memory] : sameKind
     }
 
     private var content: some View {
@@ -223,7 +380,7 @@ private struct DesktopMemoryDetail: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ClientMemoryContent(memory: memory).textSelection(.enabled)
+                    ClientMemoryContent(memory: memory, onDelete: { confirming = true }).textSelection(.enabled)
                     ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
                         if let recording = model.sources.first(where: { $0.id == evidence.sourceId && $0.revision == evidence.sourceRevision }) {
                             Button("查看录音原文", systemImage: "text.alignleft") { source = recording }

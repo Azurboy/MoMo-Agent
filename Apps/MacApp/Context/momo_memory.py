@@ -602,8 +602,34 @@ class MoMoMemory:
         mem_store.load_from_disk()
         yield mem_store
 
+    def _deleted_notebooks_path(self) -> Path:
+        return self.memories_dir / ".deleted_notebooks.json"
+
+    def _load_deleted_notebooks(self) -> set[str]:
+        path = self._deleted_notebooks_path()
+        if not path.is_file():
+            return set()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return {str(x) for x in data if x}
+        except (OSError, ValueError):
+            pass
+        return set()
+
+    def _mark_deleted_notebook(self, kind: str, slug: str) -> None:
+        if kind not in ("person", "topic", "project"):
+            return
+        deleted = self._load_deleted_notebooks()
+        deleted.add(f"{kind}:{slug}")
+        _atomic_write_markdown(
+            self._deleted_notebooks_path(),
+            json.dumps(sorted(deleted), ensure_ascii=False, indent=2) + "\n",
+        )
+
     def _notebook_files(self) -> list[tuple[str, str, Path]]:
         root = self.memories_dir
+        deleted = self._load_deleted_notebooks()
         results: list[tuple[str, str, Path]] = []
         briefing = root / "BRIEFING.md"
         if briefing.is_file():
@@ -616,6 +642,8 @@ class MoMoMemory:
                 continue
             for md_file in sorted(subdir.glob("*.md")):
                 if md_file.is_file() and not md_file.name.startswith("."):
+                    if f"{kind}:{md_file.stem}" in deleted:
+                        continue
                     results.append((kind, md_file.stem, md_file))
         return results
 
@@ -685,7 +713,7 @@ class MoMoMemory:
                     if not result.get("success"):
                         raise Conflict(result.get("error", "Memory changed; refresh and retry"))
                 else:
-                    for kind, _, path in self._notebook_files():
+                    for kind, slug, path in self._notebook_files():
                         if kind != item["kind"]:
                             continue
                         try:
@@ -695,19 +723,22 @@ class MoMoMemory:
                         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                         if f"hermes-{kind}-{digest}" == norm_id:
                             path.unlink(missing_ok=True)
+                            self._mark_deleted_notebook(kind, slug)
                             break
         return {"id": identity, "status": "forgotten"}
 
-    def resolve_notebook_path(self, category: str, slug: str | None = None) -> tuple[str, Path]:
+    @staticmethod
+    def _normalize_notebook_category(category: str) -> str:
         cat = str(category or "").strip().lower()
-        if cat == "people":
-            cat = "person"
-        elif cat == "topics":
-            cat = "topic"
-        elif cat == "journals":
-            cat = "journal"
-        elif cat == "projects":
-            cat = "project"
+        return {
+            "people": "person",
+            "topics": "topic",
+            "journals": "journal",
+            "projects": "project",
+        }.get(cat, cat)
+
+    def resolve_notebook_path(self, category: str, slug: str | None = None) -> tuple[str, Path]:
+        cat = self._normalize_notebook_category(category)
         if cat not in NOTEBOOK_KINDS:
             raise ValueError(f"Unsupported notebook category '{category}'; choose from briefing, project, journal, person, topic")
         fixed_file, folder = NOTEBOOK_KINDS[cat]
@@ -765,7 +796,13 @@ class MoMoMemory:
         title: str | None = None,
         mode: str = "replace",
     ) -> dict:
-        clean_slug, path = self.resolve_notebook_path(category, slug or title)
+        cat = self._normalize_notebook_category(category)
+        clean_slug, path = self.resolve_notebook_path(cat, slug or title)
+        if f"{cat}:{clean_slug}" in self._load_deleted_notebooks():
+            return {
+                "success": False,
+                "error": f"Notebook {cat}/{clean_slug} was deleted by user; do not recreate it.",
+            }
         body = str(content or "").strip()
         if not body:
             return {"success": False, "error": "Markdown content is required."}
@@ -783,7 +820,7 @@ class MoMoMemory:
         _atomic_write_markdown(path, body + "\n")
         return {
             "success": True,
-            "category": category,
+            "category": cat,
             "slug": clean_slug,
             "path": str(path.relative_to(self.memories_dir)),
             "characters": len(body),
@@ -791,11 +828,13 @@ class MoMoMemory:
         }
 
     def remove_notebook(self, category: str, slug: str | None = None) -> dict:
-        clean_slug, path = self.resolve_notebook_path(category, slug)
+        cat = self._normalize_notebook_category(category)
+        clean_slug, path = self.resolve_notebook_path(cat, slug)
         if not path.is_file():
-            return {"success": False, "error": f"Note not found: {category}/{clean_slug}.md"}
+            return {"success": False, "error": f"Note not found: {cat}/{clean_slug}.md"}
         path.unlink(missing_ok=True)
-        return {"success": True, "category": category, "slug": clean_slug, "removed": True}
+        self._mark_deleted_notebook(cat, clean_slug)
+        return {"success": True, "category": cat, "slug": clean_slug, "removed": True}
 
 
 HermesMemory = MoMoMemory
