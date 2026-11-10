@@ -509,6 +509,25 @@ public actor TranscriptionCoordinator {
         (try? await archive.hasUnreservedPriorityWork(configurationFingerprint: speech.configurationFingerprint)) ?? false
     }
 
+    public func hasResumableBackgroundWork(excludingBatchID: UUID? = nil) async -> Bool {
+        guard !userPaused, managed == nil, !startingManaged, !startingRetry, retryScope == nil else { return false }
+        if await hasUnreservedPriorityWork() { return true }
+        let fingerprint = speech.configurationFingerprint
+        if let batches = try? await archive.activeTranscriptionBatches(),
+           batches.contains(where: {
+               $0.id != excludingBatchID
+                   && $0.configurationFingerprint == fingerprint
+                   && ($0.state == .ready || ($0.state == .paused && $0.endReason != .userPaused))
+           }) {
+            return true
+        }
+        if let waitState = try? await archive.processingWaitState(configurationFingerprint: fingerprint),
+           waitState == .queued {
+            return true
+        }
+        return false
+    }
+
     public func resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: UUID? = nil) async throws -> UUID? {
         guard !userPaused, managed == nil, !startingManaged, !startingRetry, retryScope == nil else { return nil }
         try await preserveCompletedHistory()
@@ -844,9 +863,10 @@ public actor TranscriptionCoordinator {
                     let hasFiniteCandidate = (managed?.stopping == nil && managed?.handle.id == finiteBackgroundExecutionID && finiteBackgroundExecutionID != nil)
                         || (managed?.stopping == nil && managed?.handle.origin == .foreground && systemSuspended && foregroundContinuationAllowed)
                         || (managed == nil && systemSuspended && foregroundContinuationAllowed)
+                    let stopThreshold: TimeInterval = transcribed > 0 ? 10 : 6
                     if hasFiniteCandidate,
                        let remaining = await remainingFiniteBackgroundSeconds(),
-                       remaining.isFinite, remaining < 15 {
+                       remaining.isFinite, remaining < stopThreshold {
                         if let run = managed, run.stopping == nil, run.handle.id == finiteBackgroundExecutionID {
                             finiteBudgetExhausted = true
                             let persistedReason = try await persistManagedEnd(run.handle, reason: .backgroundExpired)
@@ -1207,7 +1227,11 @@ public actor TranscriptionCoordinator {
                         }
                     }
                 } else { applyWaitingState(waiting) }
-                if retry == nil, (managed == nil || managed?.handle.origin == .foreground || managed?.handle.origin == .backgroundProcessing), canRun {
+                if retry == nil,
+                   finiteBackgroundExecutionID == nil,
+                   !(systemSuspended && foregroundContinuationAllowed),
+                   (managed == nil || managed?.handle.origin == .foreground || managed?.handle.origin == .backgroundProcessing),
+                   canRun {
                     try await extractPendingVoiceprintSeedsIfNeeded()
                     if requested { continue }
                 }

@@ -33,7 +33,7 @@ private struct FileQueueDiagnostic: Encodable {
 
 @MainActor public final class WatchConnectivityTransport: NSObject, WCSessionDelegate {
     let session: WCSession
-    private var submissions = LinkSubmissionState()
+    private var submissions = LinkSubmissionState(maximumOutstandingFiles: LinkSubmissionState.bulkMaximumOutstandingFiles)
     private var controlSubmissions = LinkControlSubmissionState()
     private var interactiveControls = LinkControlSubmissionState(maximumOutstandingCount: 16)
     private var fileAttempts = FileAttemptLedger()
@@ -176,7 +176,9 @@ private struct FileQueueDiagnostic: Encodable {
     }
     public func confirmFileDelivery(_ receipt: Receipt) throws {
         try recoverAttemptsIfNeeded()
-        let transfers = session.activationState == .activated ? try refreshOutstanding() : []
+        let mayHaveLiveTransfer = submissions.hasOutstandingFileTransfer(chunkID: receipt.chunkID)
+            || fileAttempts.attempts[receipt.chunkID]?.outstanding == true
+        let transfers = (mayHaveLiveTransfer && session.activationState == .activated) ? try refreshOutstanding() : []
         try submissions.confirmFileDelivery(receipt)
         var next = fileAttempts
         next.confirm(chunkID: receipt.chunkID)
@@ -194,7 +196,7 @@ private struct FileQueueDiagnostic: Encodable {
     /// A bounded ledger lookup can retire acknowledged copies retained across process death.
     public func outstandingFileEnvelopes() throws -> [ManifestEnvelope] {
         guard session.activationState == .activated else { throw LinkError.notActivated }
-        return Array(try refreshOutstanding().prefix(LinkSubmissionState.maximumOutstandingFiles).map(\.1))
+        return Array(try refreshOutstanding().prefix(submissions.maximumOutstandingCount).map(\.1))
     }
 
     public func audioBlockRecoveryCandidates() throws -> [UUID] {
@@ -370,13 +372,21 @@ private struct FileQueueDiagnostic: Encodable {
         return .submitted
     }
 
+    public func refreshControlQueue() throws {
+        guard session.activationState == .activated else { throw LinkError.notActivated }
+        try controlSubmissions.reconcile(validatedOutstandingControls())
+    }
+
     @discardableResult public func transferControl(_ message: ControlMessage) throws -> ControlSubmissionResult {
         // A foreground attempt alone cannot advance the durable outbox; wait for its preserved reply.
         try transferControlRoutes(message).background
     }
 
-    @discardableResult public func transferControlRoutes(_ message: ControlMessage) throws
-        -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult) {
+    @discardableResult public func transferControlRoutes(
+        _ message: ControlMessage,
+        refreshQueue: Bool = true,
+        allowInteractive: Bool = true
+    ) throws -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult) {
         guard peerState == .available else { return (.deferred, .deferred) }
         guard session.activationState == .activated else { throw LinkError.notActivated }
         try recoverAttemptsIfNeeded()
@@ -386,8 +396,8 @@ private struct FileQueueDiagnostic: Encodable {
         var metadata = try LinkWireFormat.controlMetadata(message)
         metadata["control_generation"] = controlGeneration.uuidString
         let routes = try reserveControlRoutes(message,
-            outstanding: validatedOutstandingControls(),
-            isReachable: session.isReachable)
+            outstanding: refreshQueue ? validatedOutstandingControls() : nil,
+            isReachable: allowInteractive && session.isReachable)
         let generation = controlGeneration
         if routes.background == .submitted { session.transferUserInfo(metadata) }
         if routes.interactive == .submitted {
@@ -449,10 +459,12 @@ private struct FileQueueDiagnostic: Encodable {
         return routes
     }
 
-    func reserveControlRoutes(_ message: ControlMessage, outstanding: [ControlMessage], isReachable: Bool,
+    func reserveControlRoutes(_ message: ControlMessage, outstanding: [ControlMessage]?, isReachable: Bool,
         now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws
         -> (background: ControlSubmissionResult, interactive: ControlSubmissionResult) {
-        try controlSubmissions.reconcile(outstanding, now: now)
+        if let outstanding {
+            try controlSubmissions.reconcile(outstanding, now: now)
+        }
         if try controlSubmissions.deliveryIsConfirmed(message) {
             return (.alreadySubmitted, .alreadySubmitted)
         }
@@ -640,7 +652,7 @@ private struct FileQueueDiagnostic: Encodable {
             audioBlockRetryAfter: max(0, audioBlockRetryAt - now),
             audioBlockOffset: audioBlockOffset, audioBlockPhase: audioBlockPhase,
             audioBlockLastProgressAt: audioBlockLastProgressAt,
-            transfers: transfers.prefix(LinkSubmissionState.maximumOutstandingFiles).map { transfer, envelope in
+            transfers: transfers.prefix(submissions.maximumOutstandingCount).map { transfer, envelope in
                 let attempt = fileAttempts.attempts[envelope.manifest.chunkID]
                 return FileQueueDiagnostic.Transfer(chunkID: envelope.manifest.chunkID,
                     completedUnits: transfer.progress.completedUnitCount, totalUnits: transfer.progress.totalUnitCount,
@@ -798,6 +810,11 @@ private struct FileQueueDiagnostic: Encodable {
                     event(.failed(TransportFailure(error)))
                 }
             }
+            return
+        }
+        if let header = message["audio_block_header"] as? Data,
+           let payload = message["audio_block_payload"] as? Data {
+            receiveBinaryAudioBlock(header: header, payload: payload, replyHandler: replyHandler)
             return
         }
         if let data = message["audio_block"] as? Data {

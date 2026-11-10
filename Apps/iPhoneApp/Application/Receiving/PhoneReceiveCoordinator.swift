@@ -11,6 +11,7 @@ final class PhoneReceiveCoordinator {
     private let controls: ControlInbox
     private let identity: ReceiverIdentity
     private var transport: WatchConnectivityTransport?
+    private var localSyncServer: LocalSyncServer?
     private var active = false
     private(set) var peerState: LinkPeerState = .notPaired
     private(set) var currentWatchStatus: WatchStatusObservation?
@@ -32,6 +33,9 @@ final class PhoneReceiveCoordinator {
     private var receiptCursor: Int64 = 0
     private var replayReceiptSweep = false
     private var pendingInboxRecovery = false
+    private var lastChangedNotificationUptime: Double = -.infinity
+    private var coalescedChangedTask: Task<Void, Never>?
+    private var pendingCoalescedChanged = false
     private let logger = Logger(subsystem: "com.momoagent.ios", category: "WatchStatus")
     var onChanged: @MainActor () async -> Void = {}
     var onAudioReceived: @MainActor (UUID) -> Void = { _ in }
@@ -49,9 +53,59 @@ final class PhoneReceiveCoordinator {
         self.recoverySleep = recoverySleep
     }
 
-    deinit { recoveryTask?.cancel() }
+    deinit {
+        recoveryTask?.cancel()
+        coalescedChangedTask?.cancel()
+    }
 
     func attach(_ transport: WatchConnectivityTransport) { self.transport = transport }
+    func attachLocalSync(_ server: LocalSyncServer?) { self.localSyncServer = server }
+
+    func noteDirectChunkCommitted(chunkID: UUID) {
+        onAudioReceived(chunkID)
+        scheduleCoalescedChanged(minimumInterval: 2.0)
+    }
+
+    func noteReceiptsAppliedFromLocalSync(_ items: [ReceiptApplied]) async {
+        for item in items {
+            try? confirmControlDelivery(.receipt(item.receipt))
+        }
+        await publishStatus()
+        await scheduleAutomaticRecovery()
+    }
+
+    private func scheduleCoalescedChanged(minimumInterval: Double) {
+        let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+        let elapsed = nowUptime - lastChangedNotificationUptime
+        if elapsed >= minimumInterval, coalescedChangedTask == nil {
+            lastChangedNotificationUptime = nowUptime
+            pendingCoalescedChanged = false
+            coalescedChangedTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.onChanged()
+                try? await self.archive.writeSyncDiagnostic()
+                self.coalescedChangedTask = nil
+                if self.pendingCoalescedChanged {
+                    self.pendingCoalescedChanged = false
+                    self.scheduleCoalescedChanged(minimumInterval: minimumInterval)
+                }
+            }
+            return
+        }
+        pendingCoalescedChanged = true
+        guard coalescedChangedTask == nil else { return }
+        let waitSeconds = max(0.2, minimumInterval - max(0, elapsed))
+        coalescedChangedTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.coalescedChangedTask = nil
+            guard self.pendingCoalescedChanged else { return }
+            self.pendingCoalescedChanged = false
+            self.lastChangedNotificationUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+            await self.onChanged()
+            try? await self.archive.writeSyncDiagnostic()
+        }
+    }
 
     /// Answers interactive Watch control requests over `replyHandler` even while a staged companion update reports `companionNotInstalled`.
     func inlineControlReply(for message: ControlMessage) async -> ControlMessage? {
@@ -87,7 +141,7 @@ final class PhoneReceiveCoordinator {
         switch event {
         case .audioBlockCommitted(let chunkID):
             onAudioReceived(chunkID)
-            await onChanged()
+            scheduleCoalescedChanged(minimumInterval: 1.5)
         case .statusRefreshRequested:
             await publishStatus(refreshObservation: true)
             return
@@ -302,6 +356,7 @@ final class PhoneReceiveCoordinator {
             requested = false
             pendingInboxRecovery = true
             var contentsChanged = false
+            var notifiedFirstAccepted = false
             do {
                 // Release the shared Inbox lock between bounded pages so a live WC reply can persist promptly.
                 let batch = try controls.loadBackgroundPage(limit: 32)
@@ -344,8 +399,6 @@ final class PhoneReceiveCoordinator {
                 if listed.count > inboxPageLimit {
                     requested = true
                 }
-                var notifiedFirstAccepted = false
-                var lastChangedNotificationUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
                 // Process bounded pages so outbound receipts/reconcile responses and live transcription
                 // are never starved behind a large inbox. Keep Receipt/ReceiveResult strictly synchronous
                 // and out of async suspension frames.
@@ -361,7 +414,8 @@ final class PhoneReceiveCoordinator {
                             contentsChanged = true
                             onAudioReceived(acceptedID.uuidValue)
                             let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
-                            if !notifiedFirstAccepted || nowUptime - lastChangedNotificationUptime >= 4.0 {
+                            if (!notifiedFirstAccepted && nowUptime - lastChangedNotificationUptime >= 2.0)
+                                || nowUptime - lastChangedNotificationUptime >= 4.0 {
                                 notifiedFirstAccepted = true
                                 lastChangedNotificationUptime = nowUptime
                                 shouldNotifyChangedNow = true
@@ -400,16 +454,24 @@ final class PhoneReceiveCoordinator {
                         if replay { try transport.allowControlReplay(receiver) }
                         try transport.transferControl(receiver)
                     }
+                    let pendingReceipts = (try? await archive.pendingReceiptCount(sourceDeviceID: selectedWatchWatermark?.sourceDeviceID)) ?? 0
                     if selectedWatchWatermark == nil, (try? await archive.pendingReceiptCount(sourceDeviceID: nil)) ?? 0 > 0 {
                         transport.requestPeerStatus()
                     }
+                    try transport.refreshControlQueue()
                     for deletion in try await archive.pendingDeletions() {
                         let message = ControlMessage.deleteSession(deletion)
                         if replay { try transport.allowControlReplay(message) }
-                        let routes = try transport.transferControlRoutes(message)
+                        let routes = try transport.transferControlRoutes(message, refreshQueue: false)
                         if routes.background == .deferred && routes.interactive != .submitted && routes.interactive != .alreadySubmitted { break }
                     }
-                    await submitPendingControls(submit: { try transport.transferControlRoutes($0) },
+                    let allowInteractiveReceipts = pendingReceipts <= 4
+                    await submitPendingControls(submit: { message in
+                        let allowInteractive: Bool
+                        if case .receipt = message { allowInteractive = allowInteractiveReceipts }
+                        else { allowInteractive = true }
+                        return try transport.transferControlRoutes(message, refreshQueue: false, allowInteractive: allowInteractive)
+                    },
                         replay: { try transport.allowControlReplay($0) }, retrying: transport.hasDueControlRetries)
                 }
             } catch { reportTransportFailure(TransportFailure(error), context: String(localized: "设备同步尚未完成")) }
@@ -419,7 +481,18 @@ final class PhoneReceiveCoordinator {
                     if try await archive.controlWasApplied(message) { try confirmControlDelivery(message) }
                 }
             } catch { onFailure(String(localized: "无法核对同步指令回执：\(error.localizedDescription)")) }
-            if contentsChanged { await onChanged() }
+            if contentsChanged {
+                let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+                if !requested && (!notifiedFirstAccepted || nowUptime - lastChangedNotificationUptime >= 2.0) {
+                    lastChangedNotificationUptime = nowUptime
+                    await onChanged()
+                } else if !requested {
+                    scheduleCoalescedChanged(minimumInterval: 2.0)
+                } else {
+                    lastChangedNotificationUptime = nowUptime
+                    await onChanged()
+                }
+            }
             await publishStatus()
             await scheduleAutomaticRecovery()
             checkedRecovery = true
@@ -610,7 +683,7 @@ final class PhoneReceiveCoordinator {
         do {
             let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
             let snapshot = try await archive.phoneStatus(sourceBuild: build, sourceDeviceID: selectedWatchWatermark?.sourceDeviceID,
-                refreshObservation: refreshObservation)
+                localSync: localSyncServer?.currentEndpoint(), refreshObservation: refreshObservation)
             guard active, transport.peerState == .available else { return }
             try transport.updateStatus(snapshot)
         } catch { reportTransportFailure(TransportFailure(error), context: String(localized: "手机处理状态尚未同步")) }

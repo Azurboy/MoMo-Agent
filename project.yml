@@ -272,6 +272,9 @@ targets:
         WKCompanionAppBundleIdentifier: "$(MOMO_PHONE_BUNDLE_ID)"
         WKRunsIndependentlyOfCompanionApp: true
         NSMicrophoneUsageDescription: 在你开始录音后采集声音，传到你的 iPhone 本地转写。
+        NSLocalNetworkUsageDescription: 允许通过局域网校验通道直接与配对的 iPhone 高速同步录音。
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UIBackgroundModes: [audio]
         CFBundleURLTypes:
           - CFBundleURLName: "$(MOMO_WATCH_WIDGET_KIND)"

@@ -45,6 +45,8 @@ final class PhoneRuntime {
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var fileReconciliationRequested = false
     @ObservationIgnored private var lastFullFileReconciliationAt: Date?
+    @ObservationIgnored private var lastDocumentProjectionUptime: Double = -.infinity
+    @ObservationIgnored private var deferredProjectionTask: Task<Void, Never>?
     @ObservationIgnored private var starting = false
     @ObservationIgnored private var startWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var foregrounding = false
@@ -70,6 +72,7 @@ final class PhoneRuntime {
     @ObservationIgnored private let backgroundTasks: PhoneBackgroundTasks?
     @ObservationIgnored private var transcriptionContinuation: PhoneTranscriptionContinuation?
     @ObservationIgnored private var receivedAudioTranscription: ReceivedAudioTranscription?
+    @ObservationIgnored private var pendingBackgroundAudioWake = false
     @ObservationIgnored private var resumingAutomaticTranscription = false
     @ObservationIgnored private var automaticResumeRequested = false
     @ObservationIgnored private var libraryPresentationDeferred = false
@@ -203,6 +206,9 @@ final class PhoneRuntime {
                 coordinator: transcription,
                 excludingBatchID: { [weak self] in
                     self?.backgroundTasks?.pendingContinuedBatchID ?? self?.requestedTranscriptionBatchID
+                },
+                reconcilePendingBatch: { [weak self] in
+                    _ = await self?.backgroundTasks?.reconcileOrReleaseStalledPendingContinuedBatch()
                 }
             )
             received.onActivityChanged = { [weak self] in self?.syncSpeechExecutionMode() }
@@ -364,7 +370,7 @@ final class PhoneRuntime {
             await transcription?.requestWork()
         }
         await backgroundTasks?.scheduleAutomatic()
-        if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
+        if !libraryPresentationDeferred { await refresh(reconcileFiles: false, deferBurstProjection: true) }
         let currentSnapshot = await transcription?.snapshot()
         if isForeground, !preparingTranscriptionContinuation,
            currentSnapshot?.execution == nil,
@@ -375,8 +381,14 @@ final class PhoneRuntime {
     }
 
     private func audioReceived(_ chunkID: UUID) {
-        if !isForeground, !hasTranscriptionContinuation, PhoneBackgroundTasks.resourcesAllowProcessing {
-            receivedAudioTranscription?.request()
+        if !isForeground {
+            if !ready {
+                pendingBackgroundAudioWake = true
+            } else if !activeSystemTaskRunning,
+                      backgroundTasks?.hasActiveContinuedGrant != true,
+                      PhoneBackgroundTasks.resourcesAllowProcessing {
+                receivedAudioTranscription?.request()
+            }
         }
         playback.requestWaveformPreparation(chunkID: chunkID, run: isForeground)
     }
@@ -418,7 +430,24 @@ final class PhoneRuntime {
             activateTransportIfNeeded()
             await receiver.reconcile()
             remoteAgent.sourcesChanged()
-            await resumeAutomaticTranscription()
+            if isForeground {
+                await resumeAutomaticTranscription()
+            } else {
+                let hadPendingAudioWake = pendingBackgroundAudioWake
+                pendingBackgroundAudioWake = false
+                if !activeSystemTaskRunning,
+                   backgroundTasks?.hasActiveContinuedGrant != true,
+                   PhoneBackgroundTasks.resourcesAllowProcessing,
+                   let transcription {
+                    let excluded = backgroundTasks?.pendingContinuedBatchID ?? requestedTranscriptionBatchID
+                    let shouldWake = hadPendingAudioWake
+                        ? true
+                        : await transcription.hasResumableBackgroundWork(excludingBatchID: excluded)
+                    if shouldWake {
+                        receivedAudioTranscription?.request()
+                    }
+                }
+            }
             await backgroundTasks?.scheduleAutomatic()
         } catch { failure = String(localized: "本机资料恢复未完成：\(error.localizedDescription)") }
     }
@@ -574,7 +603,9 @@ final class PhoneRuntime {
            !activeSystemTaskRunning, backgroundTasks?.hasActiveContinuedGrant != true {
             let snapshot = transcriptionSnapshot
             let activeWork = preparingTranscriptionContinuation
+                || resumingAutomaticTranscription
                 || requestedTranscriptionBatchID != nil
+                || activeBatches.contains(where: { isBatchAutomaticallyResumable($0) })
                 || snapshot?.execution != nil
                 || snapshot?.nativeInFlight == true
                 || (snapshot.map { [.preparing, .transcribing, .queued].contains($0.phase) } ?? false)
@@ -590,6 +621,9 @@ final class PhoneRuntime {
         guard !isForeground else { return }
         libraryPresentationDeferred = true
         syncSpeechExecutionMode()
+        if requestedTranscriptionBatchID != nil {
+            _ = await backgroundTasks?.reconcilePendingContinuedBatch()
+        }
         if !activeSystemTaskRunning
             && backgroundTasks?.hasActiveContinuedGrant != true
             && transcriptionContinuation?.isActive != true {
@@ -603,11 +637,29 @@ final class PhoneRuntime {
             speechWarmup?.cancel()
         }
         playback.suspendWaveformPreparation()
-        await transcription?.suspendForSystem(
-            continuingForeground: transcriptionContinuation?.isActive == true
-                && !activeSystemTaskRunning
-                && backgroundTasks?.hasActiveContinuedGrant != true
-        )
+        let continuingForeground = transcriptionContinuation?.isActive == true
+            && !activeSystemTaskRunning
+            && backgroundTasks?.hasActiveContinuedGrant != true
+        await transcription?.suspendForSystem(continuingForeground: continuingForeground)
+        if !isForeground, continuingForeground,
+           transcriptionContinuation?.isActive == true,
+           !activeSystemTaskRunning,
+           backgroundTasks?.hasActiveContinuedGrant != true,
+           let transcription,
+           (await transcription.snapshot()).execution == nil,
+           !(await transcription.hasUnreservedPriorityWork()) {
+            let excluded = backgroundTasks?.pendingContinuedBatchID ?? requestedTranscriptionBatchID
+            if let resumedID = try? await transcription.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) {
+                _ = try? await transcription.startBatch(id: resumedID, origin: .foreground) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, !self.isForeground, self.transcriptionContinuation?.isActive == true else { return }
+                        if await self.transcription?.finishForegroundContinuationIfIdle() == true {
+                            self.transcriptionContinuation?.finish()
+                        }
+                    }
+                }
+            }
+        }
         if !isForeground, transcriptionContinuation?.isActive == true,
            await transcription?.finishForegroundContinuationIfIdle() == true {
             transcriptionContinuation?.finish()
@@ -908,11 +960,20 @@ final class PhoneRuntime {
         await refresh(reconcileFiles: false)
     }
 
-    func refresh(reconcileFiles: Bool = true) async {
+    func refresh(reconcileFiles: Bool = true, deferBurstProjection: Bool = false) async {
         if reconcileFiles {
             remoteAgent.sourcesChanged()
             lifeIllustrations.requestRefresh()
         }
+        let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+        if deferBurstProjection, !reconcileFiles, nowUptime - lastDocumentProjectionUptime < 10.0 {
+            await refreshBatches()
+            await library.refresh(inspectFiles: false)
+            scheduleDeferredDocumentProjection()
+            return
+        }
+        deferredProjectionTask?.cancel()
+        deferredProjectionTask = nil
         refreshRequested = true
         fileReconciliationRequested = fileReconciliationRequested || reconcileFiles
         guard !refreshing else { return }
@@ -932,6 +993,7 @@ final class PhoneRuntime {
                 // reconcileDocumentFiles above already inspected unchanged sessions on disk when reconcileFiles == true;
                 // only project sessions with pending transcript/manifest updates (plus pending/deleted plans).
                 try await archive.projectPendingDocuments(includeUnchanged: false)
+                lastDocumentProjectionUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
                 stage = String(localized: "更新资料引用")
                 try await invalidatePendingContexts()
                 stage = String(localized: "清理失效聊天引用")
@@ -945,6 +1007,17 @@ final class PhoneRuntime {
             // A failed file projection must not hide recordings already committed to the archive.
             await library.refresh(inspectFiles: reconcileFiles)
             requestAudioMaintenance()
+        }
+    }
+
+    private func scheduleDeferredDocumentProjection() {
+        guard deferredProjectionTask == nil else { return }
+        deferredProjectionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, let self else { return }
+            self.deferredProjectionTask = nil
+            guard !self.libraryPresentationDeferred else { return }
+            await self.refresh(reconcileFiles: false, deferBurstProjection: false)
         }
     }
 

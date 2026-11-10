@@ -539,7 +539,86 @@ final class BackgroundGrantLifecycleTests: XCTestCase {
                       "Multi-hour remaining duration must show minute precision: \(threeHr21Min)")
     }
 
+    func testReceivedAudioTranscriptionResumesQueuedArrivalsAfterProactiveBudgetStopAndSystemTaskHandoff() async throws {
+        let firstStarted = expectation(description: "First grant started")
+        let secondStarted = expectation(description: "Second grant started after proactive finite-budget stop")
+        let thirdStarted = expectation(description: "Third grant started after system task finished")
+        let runner = ReceivedAudioHarness(expectations: [firstStarted, secondStarted, thirdStarted])
+        var osGrants = 0
+        var osReleases = 0
+        var allowNewGrant = true
+        let received = ReceivedAudioTranscription(
+            begin: { _ in
+                osGrants += 1
+                return { osReleases += 1 }
+            },
+            start: { finish in await runner.start(finish) },
+            stop: { _, _ in },
+            canStartNewGrant: { allowNewGrant }
+        )
+        received.request()
+        await fulfillment(of: [firstStarted], timeout: 5)
+        // Concurrent arrival while grant 1 is running, followed by proactive finite-budget stop (.backgroundExpired).
+        received.request()
+        await runner.finishCurrent(reason: .backgroundExpired)
+        await fulfillment(of: [secondStarted], timeout: 5)
+        XCTAssertEqual(osGrants, 2, "Queued arrival during proactive budget stop must acquire a fresh OS grant after releasing the first")
+        XCTAssertEqual(osReleases, 1)
+
+        // When OS background budget is exhausted, proactive stop releases cleanly without spin-looping.
+        allowNewGrant = false
+        received.request()
+        await runner.finishCurrent(reason: .backgroundExpired)
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(osGrants, 2)
+        XCTAssertEqual(osReleases, 2)
+        XCTAssertFalse(received.isActive)
+
+        // Arrivals during an active BGProcessingTask / BGContinuedProcessingTask drain immediately once the system task finishes.
+        allowNewGrant = true
+        await received.handOffToSystemTask()
+        received.request()
+        XCTAssertFalse(received.isActive)
+        received.systemTaskFinished()
+        await fulfillment(of: [thirdStarted], timeout: 5)
+        XCTAssertEqual(osGrants, 3)
+        await runner.finishCurrent(reason: .completed)
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(osReleases, 3)
+    }
+
     private enum TestFailure: Error { case stopFailed }
+}
+
+private actor ReceivedAudioHarness {
+    typealias Handle = MoMoAgent.TranscriptionExecutionHandle
+    typealias Completion = MoMoAgent.TranscriptionExecutionCompletion
+    private let expectations: [XCTestExpectation]
+    private var runIndex = 0
+    private var currentHandle: Handle?
+    private var currentFinish: (@Sendable (Completion) -> Void)?
+
+    init(expectations: [XCTestExpectation]) {
+        self.expectations = expectations
+    }
+
+    func start(_ finish: @escaping @Sendable (Completion) -> Void) -> Handle {
+        let handle = Handle(id: UUID(), origin: .backgroundProcessing, batchExecution: nil)
+        currentHandle = handle
+        currentFinish = finish
+        if runIndex < expectations.count {
+            expectations[runIndex].fulfill()
+        }
+        runIndex += 1
+        return handle
+    }
+
+    func finishCurrent(reason: TranscriptionBatchEndReason) {
+        guard let handle = currentHandle, let finish = currentFinish else { return }
+        currentHandle = nil
+        currentFinish = nil
+        finish(Completion(execution: handle, reason: reason, failureCode: nil))
+    }
 }
 
 private actor PreparationGate {

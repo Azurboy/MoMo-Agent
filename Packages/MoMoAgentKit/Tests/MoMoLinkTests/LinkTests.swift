@@ -139,25 +139,35 @@ private func linkEnvelope() throws -> ManifestEnvelope {
 }
 
 @Test func outstandingFileBudgetIncludesTransfersRecoveredFromTheSystemQueue() throws {
-    let envelopes = try (0..<5).map { _ in try linkEnvelope() }
+    let limit = LinkSubmissionState.maximumOutstandingFiles
+    let envelopes = try (0..<(limit + 1)).map { _ in try linkEnvelope() }
     var state = LinkSubmissionState()
     state.update(activation: .activated, isReachable: false)
-    try state.reconcile(Array(envelopes.prefix(4)))
-    let full = try state.shouldSubmit(envelopes[4])
+    try state.reconcile(Array(envelopes.prefix(limit)))
+    let full = try state.shouldSubmit(envelopes[limit])
     #expect(!full)
     state.didFinish(chunkID: envelopes[0].manifest.chunkID)
-    let admitted = try state.shouldSubmit(envelopes[4])
+    let admitted = try state.shouldSubmit(envelopes[limit])
     #expect(admitted)
-    let sixth = try state.shouldSubmit(linkEnvelope())
-    #expect(!sixth)
-    try state.reconcile(Array(repeating: envelopes[0], count: 4))
-    let legacyDuplicateQueue = try state.shouldSubmit(envelopes[4])
+    let overLimit = try state.shouldSubmit(linkEnvelope())
+    #expect(!overLimit)
+    try state.reconcile(Array(repeating: envelopes[0], count: limit))
+    let legacyDuplicateQueue = try state.shouldSubmit(envelopes[limit])
     #expect(!legacyDuplicateQueue)
     state.didFinish(chunkID: envelopes[0].manifest.chunkID)
     let stillOutstanding = try state.shouldSubmit(envelopes[0])
     #expect(!stillOutstanding)
     let freedSlot = try state.shouldSubmit(linkEnvelope())
     #expect(freedSlot)
+
+    let bulkLimit = LinkSubmissionState.bulkMaximumOutstandingFiles
+    #expect(bulkLimit == 12)
+    var bulkState = LinkSubmissionState(maximumOutstandingFiles: bulkLimit)
+    bulkState.update(activation: .activated, isReachable: false)
+    for _ in 0..<bulkLimit {
+        #expect(try bulkState.shouldSubmit(linkEnvelope()))
+    }
+    #expect(try !bulkState.shouldSubmit(linkEnvelope()))
 }
 
 @Test func controlQueueEnforcesCountAndEncodedByteBudgetAndRetriesOnlyFailedMessages() throws {

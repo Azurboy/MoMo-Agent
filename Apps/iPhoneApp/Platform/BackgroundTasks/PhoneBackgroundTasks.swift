@@ -29,27 +29,54 @@ enum BackgroundTranscriptionError: Error, LocalizedError {
 
 extension ReceivedAudioTranscription {
     convenience init(coordinator: TranscriptionCoordinator,
-                     excludingBatchID: @escaping @MainActor @Sendable () -> UUID? = { nil }) {
+                     excludingBatchID: @escaping @MainActor @Sendable () -> UUID? = { nil },
+                     reconcilePendingBatch: @escaping @MainActor @Sendable () async -> Void = {}) {
+        let stageTracker = ReceivedAudioStageTracker()
         self.init(begin: { expiration in
             let id = UIApplication.shared.beginBackgroundTask(withName: "Transcribe received Watch audio",
                 expirationHandler: expiration)
             guard id != .invalid else { return nil }
             return { UIApplication.shared.endBackgroundTask(id) }
-        }, start: { try await coordinator.startBackgroundAutomatic(finiteBudget: true, onFinished: $0) },
+        }, start: { finish in
+            await reconcilePendingBatch()
+            let excluded = await MainActor.run { excludingBatchID() }
+            let priorityFirst = await coordinator.hasUnreservedPriorityWork()
+            if !priorityFirst,
+               let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) {
+                await stageTracker.recordStartedBatchFirst()
+                return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, finiteBudget: true, onFinished: finish)
+            }
+            await stageTracker.recordStartedAutomaticFirst()
+            return try await coordinator.startBackgroundAutomatic(finiteBudget: true, onFinished: finish)
+        },
         followUp: { finish in
             let (sufficientBudget, excluded) = await MainActor.run {
                 let remaining = UIApplication.shared.applicationState == .background
                     ? UIApplication.shared.backgroundTimeRemaining : .infinity
-                return (remaining >= 16, excludingBatchID())
+                return (remaining >= 10, excludingBatchID())
             }
-            guard sufficientBudget,
-                  let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) else {
-                return nil
+            guard sufficientBudget else { return nil }
+            if await stageTracker.ranAutomaticFirst {
+                guard let resumedID = try await coordinator.resumeSystemEndedBatchForBackgroundProcessing(excludingBatchID: excluded) else {
+                    return nil
+                }
+                return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, finiteBudget: true, onFinished: finish)
             }
-            return try await coordinator.startBatch(id: resumedID, origin: .backgroundProcessing, finiteBudget: true, onFinished: finish)
+            return try await coordinator.startBackgroundAutomatic(finiteBudget: true, onFinished: finish)
         },
-        stop: { try await coordinator.stop(execution: $0, reason: $1) })
+        stop: { try await coordinator.stop(execution: $0, reason: $1) },
+        canStartNewGrant: {
+            guard PhoneBackgroundTasks.resourcesAllowProcessing else { return false }
+            guard UIApplication.shared.applicationState == .background else { return true }
+            return UIApplication.shared.backgroundTimeRemaining > 12
+        })
     }
+}
+
+private actor ReceivedAudioStageTracker {
+    private(set) var ranAutomaticFirst = false
+    func recordStartedAutomaticFirst() { ranAutomaticFirst = true }
+    func recordStartedBatchFirst() { ranAutomaticFirst = false }
 }
 
 @MainActor
@@ -258,6 +285,25 @@ final class PhoneBackgroundTasks {
         guard let droppedBatchID = continued.cancelPending(identifier: identifier) else { return nil }
         onContinuedBatchFinished?(droppedBatchID, false)
         return droppedBatchID
+    }
+
+    /// Releases a background-queued continued batch if the OS dropped it or held it unlaunched past `stalledAge`,
+    /// preventing an unlaunched `.queue` request from starving `BGProcessingTask` and `ReceivedAudioTranscription`.
+    @discardableResult
+    func reconcileOrReleaseStalledPendingContinuedBatch(stalledAge: TimeInterval = 60) async -> UUID? {
+        if let dropped = await reconcilePendingContinuedBatch() {
+            return dropped
+        }
+        guard registrationSucceeded,
+              UIApplication.shared.applicationState == .background,
+              let identifier = continued.pendingIdentifier,
+              grants[identifier] == nil,
+              let age = continued.pendingAge, age >= stalledAge else {
+            return nil
+        }
+        guard let releasedBatchID = continued.cancelPending(identifier: identifier) else { return nil }
+        onContinuedBatchFinished?(releasedBatchID, false)
+        return releasedBatchID
     }
 
     static func computeContinuedProgressUnits(batch: TranscriptionBatch,
@@ -538,6 +584,9 @@ final class PhoneBackgroundTasks {
             guard let self else { throw BackgroundTranscriptionError.runtimeUnavailable }
             let coordinator = try await self.prepare()
             guard self.systemTasks[id] === task else { throw CancellationError() }
+            if !continued {
+                _ = await self.reconcileOrReleaseStalledPendingContinuedBatch()
+            }
             await self.onSystemTaskStarting?()
             await holder.set(coordinator)
         }, start: { finish in

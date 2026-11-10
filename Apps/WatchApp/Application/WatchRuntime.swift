@@ -142,6 +142,11 @@ final class WatchRuntime {
     @ObservationIgnored private var flushAudioBatch = false
     @ObservationIgnored private var waitingForAudioBatch = false
     @ObservationIgnored private var invalidAudioBlockSources: Set<UUID> = []
+    @ObservationIgnored private let localSyncClient = LocalSyncClient()
+    @ObservationIgnored private var localBulkSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var localSyncInFlightChunkIDs: Set<UUID> = []
+    @ObservationIgnored private var localSyncRetryAt: TimeInterval = 0
+    @ObservationIgnored private var lastObservedLocalSyncEndpoint: LocalSyncEndpoint?
     @ObservationIgnored private var reconciliationRequested = true
     @ObservationIgnored private var lastReconciliationRoundAt: TimeInterval = -.infinity
     @ObservationIgnored private var inboxSyncFailure: String?
@@ -307,6 +312,7 @@ final class WatchRuntime {
         if connectivityGrant { endConnectivityGrant() }
         transport.allowControlReplay()
         transport.allowAudioBlockReplay()
+        localSyncRetryAt = 0
         controlCursors.removeAll()
         resetAutomaticRecovery()
         statusDirty = true
@@ -634,6 +640,12 @@ final class WatchRuntime {
 
     func confirmReceiverChange() async throws {
         guard let identity = pendingReceiver else { return }
+        localBulkSyncTask?.cancel()
+        localBulkSyncTask = nil
+        localSyncInFlightChunkIDs.removeAll()
+        localSyncClient.closeConnections()
+        localSyncRetryAt = 0
+        lastObservedLocalSyncEndpoint = nil
         transport.cancelAudioBlockTransfer()
         try transport.resetPeerControlState()
         try await store.replaceReceiverAfterUserConfirmation(deviceID: identity.receiverDeviceID, libraryInstanceID: identity.libraryInstanceID)
@@ -747,6 +759,11 @@ final class WatchRuntime {
                 }()
                 try phoneStatuses.receive(snapshot)
                 phoneStatus = phoneStatuses.boundStatus
+                if case .phone(let currentPayload) = phoneStatus?.payload,
+                   currentPayload.localSync != lastObservedLocalSyncEndpoint {
+                    lastObservedLocalSyncEndpoint = currentPayload.localSync
+                    localSyncRetryAt = 0
+                }
                 let hasAudioBlockSupport: Bool = {
                     guard case .phone(let payload) = phoneStatus?.payload else { return false }
                     return payload.audioBlockVersion == AudioBlock.version
@@ -754,8 +771,11 @@ final class WatchRuntime {
                 unlockedAudioBlockRecovery = !hadAudioBlockSupport && hasAudioBlockSupport
                     && !connectivityGrant && pendingReceiver == nil
                     && transport.isReachable && (transport.outstandingFileCount > 0 || pendingChunkCount > 0)
-                if !connectivityGrant, pendingReceiver == nil, !unlockedAudioBlockRecovery {
-                    try await submitAudioBlockCopy()
+                if !connectivityGrant, pendingReceiver == nil {
+                    startLocalBulkSyncIfPossible()
+                    if !unlockedAudioBlockRecovery {
+                        try await submitAudioBlockCopy()
+                    }
                 }
             } catch {
                 transportSyncFailure = String(localized: "无法核对手机状态：\(error.localizedDescription)")
@@ -1509,8 +1529,11 @@ final class WatchRuntime {
                     }
                     try await submitControlBatch(maximumCount: connectivityGrant ? 4 : LinkControlBudget.maximumCount)
                     guard grantID == startingGrant else { return }
-                    if !connectivityGrant { try await submitAudioBlockCopy() }
                     try await submitFileBatch(maximumScanned: connectivityGrant ? 256 : 512)
+                    if !connectivityGrant {
+                        startLocalBulkSyncIfPossible()
+                        try await submitAudioBlockCopy()
+                    }
                 }
                 if pendingChunkCount == 0, !pendingLocalSyncWork, !transport.hasRetryableControls, !transport.hasRetryableFiles {
                     transportSyncFailure = nil
@@ -1528,7 +1551,9 @@ final class WatchRuntime {
     }
 
     private func updateSynchronizationState() {
-        queuedFileCount = transport.outstandingFileCount + (transport.hasActiveAudioBlockTransfer ? 1 : 0)
+        queuedFileCount = transport.outstandingFileCount
+            + (transport.hasActiveAudioBlockTransfer ? 1 : 0)
+            + localSyncInFlightChunkIDs.count
         if pendingReceiver != nil { synchronizationState = .receiverConfirmation }
         else if !linkActivated || transport.peerState != .available { synchronizationState = .waitingForConnection }
         else if queuedFileCount > 0 { synchronizationState = .transferring }
@@ -1674,12 +1699,16 @@ final class WatchRuntime {
             },
             submit: { entry in
                 guard grantID == startingGrant else { return nil }
+                let id = entry.chunk.envelope.manifest.chunkID
+                if transport.activeAudioBlockChunk == id || localSyncInFlightChunkIDs.contains(id) {
+                    return .alreadySubmitted
+                }
                 let result = try transport.transferFileResult(
                     at: entry.chunk.audioURL,
                     envelope: entry.chunk.envelope,
                     refreshQueue: false)
                 if result == .submitted {
-                    try await store.fileReplaysScheduled([entry.chunk.envelope.manifest.chunkID])
+                    try await store.fileReplaysScheduled([id])
                 }
                 return result
             }
@@ -1689,7 +1718,7 @@ final class WatchRuntime {
             try await store.saveFileTransferPosition(fileCursor)
         }
         if outcome.scanned == maximumScanned, !outcome.deferred,
-           outcome.submittedAny || (!outcome.wrapped && transport.outstandingFileCount < LinkSubmissionState.maximumOutstandingFiles) {
+           outcome.submittedAny || (!outcome.wrapped && transport.outstandingFileCount < LinkSubmissionState.bulkMaximumOutstandingFiles) {
             reconcileAgain = true
         }
     }
@@ -1740,7 +1769,9 @@ final class WatchRuntime {
                 for entry in batch {
                     cursor = entry.sequence
                     let id = entry.chunk.envelope.manifest.chunkID
-                    guard !outstandingIDs.contains(id), !invalidAudioBlockSources.contains(id) else { continue }
+                    guard !outstandingIDs.contains(id),
+                          !localSyncInFlightChunkIDs.contains(id),
+                          !invalidAudioBlockSources.contains(id) else { continue }
                     if !transport.hasSubmittedFileTransfer(chunkID: id) {
                         unsubmitted.append((id, entry.sequence))
                         if unsubmitted.count >= LinkSubmissionState.maximumOutstandingFiles { break }
@@ -1777,9 +1808,230 @@ final class WatchRuntime {
                 continue
             }
             if try transport.transferAudioBlocks(at: chunk.audioURL, envelope: chunk.envelope,
-                receiverDeviceID: receiver.deviceID, libraryInstanceID: receiver.libraryInstanceID) {
+                receiverDeviceID: receiver.deviceID, libraryInstanceID: receiver.libraryInstanceID,
+                binaryFraming: payload.binaryAudioBlocks == true) {
                 if let sequence = candidate.sequence { audioBlockCursor = sequence }
                 return
+            }
+        }
+    }
+
+    private func startLocalBulkSyncIfPossible() {
+        guard !connectivityGrant,
+              pendingReceiver == nil,
+              localBulkSyncTask == nil,
+              ProcessInfo.processInfo.systemUptime >= localSyncRetryAt,
+              let status = phoneStatus,
+              case .phone(let payload) = status.payload,
+              let endpoint = payload.localSync,
+              (pendingChunkCount > 0 || pendingLocalSyncWork || payload.pendingReceiptCount > 0) else {
+            return
+        }
+        let expectedDeviceID = status.sourceDeviceID
+        localBulkSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.localSyncInFlightChunkIDs.removeAll()
+                self.localBulkSyncTask = nil
+                self.updateSynchronizationState()
+            }
+            await self.runLocalBulkSync(endpoint: endpoint, expectedDeviceID: expectedDeviceID, expectedLibraryID: payload.libraryInstanceID)
+        }
+    }
+
+    private func runLocalBulkSync(
+        endpoint: LocalSyncEndpoint,
+        expectedDeviceID: UUID,
+        expectedLibraryID: UUID
+    ) async {
+        guard let bound = try? await store.boundReceiver(),
+              bound.deviceID == expectedDeviceID,
+              bound.libraryInstanceID == expectedLibraryID else {
+            return
+        }
+        let client = localSyncClient
+        guard let route = await client.probe(
+            endpoint: endpoint,
+            expectedReceiverDeviceID: expectedDeviceID,
+            expectedLibraryInstanceID: expectedLibraryID
+        ) else {
+            localSyncRetryAt = ProcessInfo.processInfo.systemUptime + 20
+            return
+        }
+        logger.notice("Local bulk sync connected via \(route.transport.rawValue, privacy: .public)")
+        localSyncRetryAt = 0
+        var cursor: Int64 = 0
+        var encounteredNetworkError = false
+
+        while !Task.isCancelled, !connectivityGrant, pendingReceiver == nil {
+            let admittedThrough: Int64
+            do {
+                admittedThrough = try await store.audioTransferBatchEnd(force: true)
+            } catch {
+                break
+            }
+            let page: [RecordingChunkEntry]
+            do {
+                page = try await store.pendingChunkPage(after: cursor, through: admittedThrough, limit: 16)
+            } catch {
+                break
+            }
+            if page.isEmpty {
+                if cursor != 0 {
+                    cursor = 0
+                    let retryPage = (try? await store.pendingChunkPage(after: 0, through: admittedThrough, limit: 16)) ?? []
+                    if retryPage.isEmpty { break }
+                    await uploadLocalBulkPage(retryPage, route: route, receiver: bound, networkFailed: &encounteredNetworkError)
+                    if encounteredNetworkError { break }
+                    continue
+                }
+                break
+            }
+            if let lastSeq = page.last?.sequence {
+                cursor = lastSeq
+            }
+            await uploadLocalBulkPage(page, route: route, receiver: bound, networkFailed: &encounteredNetworkError)
+            if encounteredNetworkError { break }
+        }
+
+        if !encounteredNetworkError, !Task.isCancelled {
+            await flushLocalReceiptsApplied(route: route, receiver: bound)
+        }
+        if encounteredNetworkError {
+            localSyncRetryAt = ProcessInfo.processInfo.systemUptime + 10
+        }
+        await reconcile()
+    }
+
+    private func uploadLocalBulkPage(
+        _ page: [RecordingChunkEntry],
+        route: LocalSyncRoute,
+        receiver: (deviceID: UUID, libraryInstanceID: UUID),
+        networkFailed: inout Bool
+    ) async {
+        let validEntries = page.filter { !invalidAudioBlockSources.contains($0.chunk.envelope.manifest.chunkID) }
+        guard !validEntries.isEmpty else { return }
+        for entry in validEntries {
+            localSyncInFlightChunkIDs.insert(entry.chunk.envelope.manifest.chunkID)
+        }
+        updateSynchronizationState()
+
+        let client = localSyncClient
+        let uploadResults = await withTaskGroup(of: (UUID, Result<Receipt, any Error>).self) { group in
+            var iterator = validEntries.makeIterator()
+            let maxConcurrency = 4
+            for _ in 0..<min(maxConcurrency, validEntries.count) {
+                if let next = iterator.next() {
+                    let id = next.chunk.envelope.manifest.chunkID
+                    let env = next.chunk.envelope
+                    let url = next.chunk.audioURL
+                    group.addTask {
+                        do {
+                            let receipt = try await client.uploadChunk(route: route, envelope: env, audioURL: url)
+                            return (id, .success(receipt))
+                        } catch {
+                            return (id, .failure(error))
+                        }
+                    }
+                }
+            }
+            var collected: [(UUID, Result<Receipt, any Error>)] = []
+            while let result = await group.next() {
+                collected.append(result)
+                if !Task.isCancelled, let next = iterator.next() {
+                    let id = next.chunk.envelope.manifest.chunkID
+                    let env = next.chunk.envelope
+                    let url = next.chunk.audioURL
+                    group.addTask {
+                        do {
+                            let receipt = try await client.uploadChunk(route: route, envelope: env, audioURL: url)
+                            return (id, .success(receipt))
+                        } catch {
+                            return (id, .failure(error))
+                        }
+                    }
+                }
+            }
+            return collected
+        }
+
+        var appliedItems: [ReceiptApplied] = []
+        for (chunkID, outcome) in uploadResults {
+            localSyncInFlightChunkIDs.remove(chunkID)
+            switch outcome {
+            case .success(let receipt):
+                do {
+                    let applied = try await store.applyReceipt(receipt)
+                    invalidAudioBlockSources.remove(chunkID)
+                    try? transport.confirmFileDelivery(applied.receipt)
+                    appliedItems.append(applied)
+                } catch {
+                    reconciliationRequested = true
+                }
+            case .failure(let error):
+                if error as? LocalSyncError == .invalidSource {
+                    invalidAudioBlockSources.insert(chunkID)
+                    if let chunk = try? await store.chunk(id: chunkID) {
+                        _ = try? await store.originalAvailableForTransferRetry(chunk.envelope, maximumValidationBytes: Int64.max)
+                    }
+                } else {
+                    networkFailed = true
+                }
+            }
+        }
+        updateSynchronizationState()
+
+        if !appliedItems.isEmpty {
+            if (try? await client.sendReceiptsApplied(route: route, items: appliedItems)) != nil {
+                for item in appliedItems {
+                    try? await store.markControlPreserved(
+                        .receiptApplied(item),
+                        receiverDeviceID: receiver.deviceID,
+                        libraryInstanceID: receiver.libraryInstanceID)
+                }
+            }
+            _ = try? await store.cleanupAcknowledgedChunks()
+            if let summary = try? await store.queueSummary(sessionID: sessionID) {
+                if summary.pendingChunkCount < pendingChunkCount { resetAutomaticRecovery() }
+                pendingChunkCount = summary.pendingChunkCount
+                pendingDuration = summary.pendingDuration
+                pendingBytes = summary.pendingBytes
+                sealedSeconds = summary.sealedDuration
+                widgetHasQueueObservation = true
+                statusDirty = true
+                requestStatusPublication()
+            }
+        }
+    }
+
+    private func flushLocalReceiptsApplied(
+        route: LocalSyncRoute,
+        receiver: (deviceID: UUID, libraryInstanceID: UUID)
+    ) async {
+        let client = localSyncClient
+        var cursor: Int64 = 0
+        for _ in 0..<128 {
+            guard !Task.isCancelled else { return }
+            guard let entries = try? await store.controlBatch(kind: .receipt, after: cursor, limit: 32),
+                  !entries.isEmpty else {
+                return
+            }
+            var batch: [ReceiptApplied] = []
+            for entry in entries {
+                cursor = entry.sequence
+                if case .receiptApplied(let applied) = entry.message {
+                    batch.append(applied)
+                }
+            }
+            guard !batch.isEmpty else { continue }
+            guard (try? await client.sendReceiptsApplied(route: route, items: batch)) != nil else {
+                return
+            }
+            for item in batch {
+                try? await store.markControlPreserved(
+                    .receiptApplied(item),
+                    receiverDeviceID: receiver.deviceID,
+                    libraryInstanceID: receiver.libraryInstanceID)
             }
         }
     }

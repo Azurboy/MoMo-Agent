@@ -130,7 +130,9 @@ extension ArchiveStore {
             try blockProjection(sessionID: sessionID)
             throw ArchiveError.projectionConflict
         }
-        if files.fileExists(atPath: url.path), try Data(contentsOf: url) == data {
+        if let existingStamp = FileStatStamp.read(at: url),
+           existingStamp.size == Int64(data.count),
+           (try? Data(contentsOf: url)) == data {
             try database.execute("UPDATE sessions SET manifest_projected=1 WHERE id=? AND manifest_projected!=1", [.text(sessionID.uuidString)])
             try saveManifestProjectionHash(sessionID: sessionID, chunkCount: Int64(chunks.count), sha256: ContentHash.sha256(data))
             recordVerifiedManifestProjection(sessionID: sessionID, manifestURL: url, chunkCount: Int64(chunks.count))

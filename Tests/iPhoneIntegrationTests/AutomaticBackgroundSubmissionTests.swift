@@ -102,6 +102,34 @@ final class AutomaticBackgroundSubmissionTests: XCTestCase {
         await first.value
         XCTAssertEqual(cancellations, 1)
     }
+
+    func testReverifiesPendingSubmissionAfterCooldownWithoutSpammingWithinWindow() async {
+        var now = 100.0
+        let counter = SubmissionCounter()
+        let submission = AutomaticBackgroundSubmission(
+            eligible: { true },
+            submit: { await counter.increment() },
+            cancel: {},
+            failure: { XCTFail("Unexpected failure") },
+            uptime: { now }
+        )
+        await submission.request()
+        let firstCount = await counter.value
+        XCTAssertEqual(firstCount, 1)
+        now = 130.0
+        await submission.request()
+        let withinCooldownCount = await counter.value
+        XCTAssertEqual(withinCooldownCount, 1, "Requests within 60s must reuse verified pending state")
+        now = 165.0
+        await submission.request()
+        let afterCooldownCount = await counter.value
+        XCTAssertEqual(afterCooldownCount, 2, "Requests after 60s must re-verify scheduler state in case iOS dropped the BGTaskRequest")
+    }
+}
+
+private actor SubmissionCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
 }
 
 private actor SubmissionGate {

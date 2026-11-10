@@ -56,8 +56,10 @@ public struct TransportFailure: Error, Sendable, Equatable {
 /// Tracks only system transport work; durable retry and deletion belong to the stores.
 public struct LinkSubmissionState: Sendable {
     public static let maximumOutstandingFiles = 4
+    public static let bulkMaximumOutstandingFiles = 12
     public static let initialReceiptWaitDelay: TimeInterval = 120
     public static let maximumReceiptWaitDelay: TimeInterval = 1_800
+    public let maximumOutstandingCount: Int
     public private(set) var activation: LinkActivation = .inactive
     public private(set) var isReachable = false
     private var outstanding: [UUID: (hash: String, count: Int)] = [:]
@@ -97,7 +99,9 @@ public struct LinkSubmissionState: Sendable {
         return [retry, wait].compactMap { $0 }.min()
     }
 
-    public init() {}
+    public init(maximumOutstandingFiles: Int = Self.maximumOutstandingFiles) {
+        self.maximumOutstandingCount = max(1, maximumOutstandingFiles)
+    }
     /// Durable stores choose when a new activation, foreground pass, or explicit missing result permits replay.
     public mutating func allowFileReplay() { submitted.removeAll() }
     public mutating func allowFileReplay(chunkIDs: [UUID]) {
@@ -185,7 +189,7 @@ public struct LinkSubmissionState: Sendable {
             }
         }
         if let retryAt = retryNotBefore[id], now < retryAt { return .retryLater }
-        guard outstanding.values.reduce(0, { $0 + $1.count }) < Self.maximumOutstandingFiles else { return .deferred }
+        guard outstanding.values.reduce(0, { $0 + $1.count }) < maximumOutstandingCount else { return .deferred }
         return nil
     }
 
@@ -251,6 +255,10 @@ public struct LinkSubmissionState: Sendable {
 
     public func hasSubmittedFileTransfer(chunkID: UUID) -> Bool {
         outstanding[chunkID] != nil || submitted[chunkID] != nil
+    }
+
+    public func hasOutstandingFileTransfer(chunkID: UUID) -> Bool {
+        outstanding[chunkID] != nil
     }
 
     private mutating func waitForReceipt(chunkID: UUID, now: TimeInterval) {

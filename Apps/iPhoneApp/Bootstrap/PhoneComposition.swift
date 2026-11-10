@@ -52,6 +52,42 @@ enum PhoneComposition {
         let phoneBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
         let transport: WatchConnectivityTransport?
         if connectsToWatch {
+            let localSync = try? LocalSyncServer(
+                handlers: LocalSyncHandlers(
+                    receiverDeviceID: deviceID,
+                    libraryInstanceID: archive.libraryInstanceID,
+                    receiveChunk: { [weak receiver] envelope, data in
+                        let grant = PhoneConnectivityTask.beginSync()
+                        defer { grant.finish() }
+                        let receipt = try await archive.receiveDirectChunk(
+                            envelope: envelope,
+                            audioData: data,
+                            receiverDeviceID: deviceID,
+                            libraryInstanceID: archive.libraryInstanceID)
+                        Task { @MainActor in
+                            receiver?.noteDirectChunkCommitted(chunkID: receipt.chunkID)
+                        }
+                        return receipt
+                    },
+                    applyReceipts: { [weak receiver] items in
+                        let grant = PhoneConnectivityTask.beginSync()
+                        defer { grant.finish() }
+                        let applied = try await archive.applyReceipts(items)
+                        if applied > 0 {
+                            Task { @MainActor in
+                                await receiver?.noteReceiptsAppliedFromLocalSync(items)
+                            }
+                        }
+                        return applied
+                    }
+                )
+            )
+            receiver.attachLocalSync(localSync)
+            try? localSync?.start(onEndpointChanged: { [weak receiver] in
+                Task { @MainActor in
+                    await receiver?.publishStatus(refreshObservation: true)
+                }
+            })
             let live = try WatchConnectivityTransport(
                 preserveFile: { url, envelope in _ = try inbox.preserve(fileURL: url, envelope: envelope) },
                 preserveControl: { try controls.preserve($0) },
@@ -65,7 +101,12 @@ enum PhoneComposition {
                 },
                 diagnosticsURL: support.appendingPathComponent("file-queue-diagnostic.json"),
                 receiveAudioBlock: { try await PhoneConnectivityTask.receiveAudioBlock($0, archive: archive) },
-                statusReplyProvider: { _ in try await archive.phoneStatus(sourceBuild: phoneBuild, refreshObservation: true) },
+                statusReplyProvider: { [weak localSync] _ in
+                    try await archive.phoneStatus(
+                        sourceBuild: phoneBuild,
+                        localSync: localSync?.currentEndpoint(),
+                        refreshObservation: true)
+                },
                 controlReplyProvider: { [weak receiver] message in
                     let grant = PhoneConnectivityTask.beginSync()
                     defer { grant.finish() }
