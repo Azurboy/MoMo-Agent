@@ -10,24 +10,28 @@ extension WatchConnectivityTransport {
             && audioBlockTask == nil && ProcessInfo.processInfo.systemUptime >= audioBlockRetryAt
     }
     public var hasActiveAudioBlockTransfer: Bool { audioBlockTask != nil }
+    public var activeAudioBlockChunk: UUID? { audioBlockChunkID }
 
     /// Streams sealed originals directly over reachable interactive messaging and deduplicates against background transfers via durable Receipt.
     @discardableResult public func transferAudioBlocks(at file: URL, envelope: ManifestEnvelope,
-        receiverDeviceID: UUID, libraryInstanceID: UUID) throws -> Bool {
+        receiverDeviceID: UUID, libraryInstanceID: UUID, binaryFraming: Bool = false) throws -> Bool {
         guard canTransferAudioBlocks, envelope.manifest.byteCount <= AudioBlock.maximumFileBytes,
               try allowsInteractiveAudioBlockTransfer(envelope) else { return false }
         let generation = UUID()
+        let shouldProbe = resumableAudioBlockChunkID == envelope.manifest.chunkID
+        let sliceBytes = binaryFraming ? AudioBlock.maximumPayloadBytes : AudioBlock.maximumLegacyPayloadBytes
         audioBlockGeneration = generation; audioBlockChunkID = envelope.manifest.chunkID
         resumableAudioBlockChunkID = envelope.manifest.chunkID
-        audioBlockOffset = 0; audioBlockPhase = "probe"
+        audioBlockOffset = 0; audioBlockPhase = shouldProbe ? "probe" : "payload"
         logger.notice("Audio block copy starting; chunk=\(envelope.manifest.chunkID.uuidString, privacy: .public), bytes=\(envelope.manifest.byteCount)")
         audioBlockTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             do {
                 let receipt = try await AudioBlockTransfer.send(file: file, envelope: envelope,
-                    receiverDeviceID: receiverDeviceID, libraryInstanceID: libraryInstanceID) { [weak self] block in
+                    receiverDeviceID: receiverDeviceID, libraryInstanceID: libraryInstanceID,
+                    initialProbe: shouldProbe, maximumSliceBytes: sliceBytes) { [weak self] block in
                         guard let self else { throw CancellationError() }
-                        let reply = try await self.exchangeAudioBlock(block)
+                        let reply = try await self.exchangeAudioBlock(block, binaryFraming: binaryFraming)
                         await self.noteAudioBlockReply(generation: generation, block: block, reply: reply)
                         return reply
                     }
@@ -102,11 +106,17 @@ extension WatchConnectivityTransport {
         }
     }
 
-    private func exchangeAudioBlock(_ block: AudioBlock) async throws -> AudioBlockReply {
+    private func exchangeAudioBlock(_ block: AudioBlock, binaryFraming: Bool) async throws -> AudioBlockReply {
         try Task.checkCancellation()
         guard session.activationState == .activated, session.isReachable else { throw LinkError.notReachable }
-        let data = try WireJSON.encode(block)
-        guard data.count <= AudioBlock.maximumWireBytes else { throw LinkError.invalidMetadata }
+        let message: [String: Any]
+        if binaryFraming {
+            message = try block.binaryWireMetadata()
+        } else {
+            let data = try WireJSON.encode(block)
+            guard data.count <= AudioBlock.maximumWireBytes else { throw LinkError.invalidMetadata }
+            message = ["audio_block": data]
+        }
         let gate = AudioBlockReplyGate()
         activeAudioBlockGate = gate
         defer { if activeAudioBlockGate === gate { activeAudioBlockGate = nil } }
@@ -115,7 +125,7 @@ extension WatchConnectivityTransport {
                 guard gate.install(continuation) else { return }
                 gate.startDeadline(after: .seconds(12))
                 if Task.isCancelled { gate.finish(.failure(CancellationError())); return }
-                session.sendMessage(["audio_block": data], replyHandler: { @Sendable reply in
+                session.sendMessage(message, replyHandler: { @Sendable reply in
                     do {
                         guard let data = reply["audio_block_reply"] as? Data, data.count <= AudioBlock.maximumWireBytes else {
                             throw AudioBlockTransferError.rejected
@@ -127,6 +137,30 @@ extension WatchConnectivityTransport {
                 }, errorHandler: { @Sendable error in gate.finish(.failure(error)) })
             }
         } onCancel: { gate.finish(.failure(CancellationError())) }
+    }
+
+    nonisolated func receiveBinaryAudioBlock(header: Data, payload: Data, replyHandler: @escaping ([String: Any]) -> Void) {
+        let reply = LinkReplyHandler(replyHandler)
+        guard header.count + payload.count <= AudioBlock.maximumWireBytes, let receiveAudioBlock else {
+            reply.send(["audio_block_rejected": true]); return
+        }
+        Task {
+            do {
+                let block = try AudioBlock(binaryHeaderData: header, payload: payload)
+                let value = try await receiveAudioBlock(block)
+                reply.send(["audio_block_reply": try WireJSON.encode(value)])
+                if block.payload.isEmpty || value.receipt != nil {
+                    logger.notice("Audio block reply; chunk=\(block.envelope.manifest.chunkID.uuidString, privacy: .public), offset=\(value.nextOffset), committed=\(value.receipt != nil)")
+                }
+                if value.receipt != nil { event(.audioBlockCommitted(chunkID: block.envelope.manifest.chunkID)) }
+            } catch AudioBlockTransferError.rejected {
+                reply.send(["audio_block_rejected": true])
+                event(.controlSubmissionChanged)
+            } catch {
+                reply.send(["audio_block_rejected": true])
+                event(.failed(TransportFailure(error)))
+            }
+        }
     }
 
     nonisolated func receiveAudioBlockData(_ data: Data, replyHandler: @escaping ([String: Any]) -> Void) {

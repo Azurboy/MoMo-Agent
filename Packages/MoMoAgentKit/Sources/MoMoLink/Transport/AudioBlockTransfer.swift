@@ -17,24 +17,41 @@ public enum AudioBlockTransferError: Error, Sendable, Equatable, LocalizedError 
 public enum AudioBlockTransfer {
     /// One block in memory and no open source handle while waiting for the peer.
     public static func send(file: URL, envelope: ManifestEnvelope, receiverDeviceID: UUID, libraryInstanceID: UUID,
+        initialProbe: Bool = true, maximumSliceBytes: Int = AudioBlock.maximumPayloadBytes,
         exchange: @Sendable (AudioBlock) async throws -> AudioBlockReply) async throws -> Receipt {
         let size = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard size.isRegularFile == true, size.fileSize.map(Int64.init) == envelope.manifest.byteCount else {
             throw AudioBlockTransferError.invalidSource
         }
+        let sliceLimit = max(1, min(AudioBlock.maximumPayloadBytes, maximumSliceBytes))
+        let cachedData: Data?
+        if envelope.manifest.byteCount <= 1_048_576 {
+            let loaded = try Data(contentsOf: file)
+            guard Int64(loaded.count) == envelope.manifest.byteCount else {
+                throw AudioBlockTransferError.invalidSource
+            }
+            cachedData = loaded
+        } else {
+            cachedData = nil
+        }
         var offset: Int64 = 0
-        var probe = true
+        var probe = initialProbe
         var unchanged = 0
         let deadline = ContinuousClock.now.advanced(by: .seconds(120))
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             let payload: Data
             if probe { payload = Data(); probe = false }
-            else {
+            else if let cachedData {
+                let start = Int(offset)
+                let count = min(sliceLimit, cachedData.count - start)
+                guard count > 0 else { throw AudioBlockTransferError.invalidSource }
+                payload = cachedData.subdata(in: start..<(start + count))
+            } else {
                 let handle = try FileHandle(forReadingFrom: file)
                 do {
                     try handle.seek(toOffset: UInt64(offset))
-                    payload = try handle.read(upToCount: min(AudioBlock.maximumPayloadBytes, Int(envelope.manifest.byteCount - offset))) ?? Data()
+                    payload = try handle.read(upToCount: min(sliceLimit, Int(envelope.manifest.byteCount - offset))) ?? Data()
                     try handle.close()
                 } catch { try handle.close(); throw error }
                 guard !payload.isEmpty else { throw AudioBlockTransferError.invalidSource }

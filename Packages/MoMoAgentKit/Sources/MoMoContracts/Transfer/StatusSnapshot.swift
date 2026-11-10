@@ -67,27 +67,62 @@ public struct WatchCaptureStatus: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalSyncEndpoint: Codable, Equatable, Sendable {
+    public let baseURLs: [String]
+    public let bearerToken: String
+
+    public init(baseURLs: [String], bearerToken: String) throws {
+        let cleaned = baseURLs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard (1...8).contains(cleaned.count),
+              (32...128).contains(bearerToken.utf8.count),
+              bearerToken.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }) else {
+            throw ContractError.invalidField("local_sync_endpoint")
+        }
+        for raw in cleaned {
+            guard raw.utf8.count <= 256,
+                  let comps = URLComponents(string: raw),
+                  comps.scheme == "http",
+                  let host = comps.host, !host.isEmpty,
+                  let port = comps.port, (1...65_535).contains(port),
+                  comps.path.isEmpty || comps.path == "/" else {
+                throw ContractError.invalidField("local_sync_url")
+            }
+        }
+        self.baseURLs = cleaned
+        self.bearerToken = bearerToken
+    }
+}
+
 public struct PhoneArchiveStatus: Codable, Equatable, Sendable {
     public let libraryInstanceID: UUID
     public let recordingCount: Int
     public let pendingAnalysisCount: Int
     public let pendingReceiptCount: Int
     public let audioBlockVersion: Int?
+    public let binaryAudioBlocks: Bool?
+    public let localSync: LocalSyncEndpoint?
     public init(libraryInstanceID: UUID, recordingCount: Int, pendingAnalysisCount: Int, pendingReceiptCount: Int,
-                audioBlockVersion: Int? = nil) throws {
+                audioBlockVersion: Int? = nil, binaryAudioBlocks: Bool? = nil, localSync: LocalSyncEndpoint? = nil) throws {
         guard recordingCount >= 0, pendingAnalysisCount >= 0, pendingReceiptCount >= 0 else {
             throw ContractError.invalidField("phone_status_counts")
         }
         self.libraryInstanceID = libraryInstanceID; self.recordingCount = recordingCount
         self.pendingAnalysisCount = pendingAnalysisCount; self.pendingReceiptCount = pendingReceiptCount
         self.audioBlockVersion = audioBlockVersion
+        self.binaryAudioBlocks = binaryAudioBlocks
+        self.localSync = localSync
     }
-    private enum CodingKeys: String, CodingKey { case libraryInstanceID, recordingCount, pendingAnalysisCount, pendingReceiptCount, audioBlockVersion }
+    private enum CodingKeys: String, CodingKey {
+        case libraryInstanceID, recordingCount, pendingAnalysisCount, pendingReceiptCount
+        case audioBlockVersion, binaryAudioBlocks, localSync
+    }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(libraryInstanceID: c.decode(UUID.self, forKey: .libraryInstanceID), recordingCount: c.decode(Int.self, forKey: .recordingCount),
                       pendingAnalysisCount: c.decode(Int.self, forKey: .pendingAnalysisCount), pendingReceiptCount: c.decode(Int.self, forKey: .pendingReceiptCount),
-                      audioBlockVersion: c.decodeIfPresent(Int.self, forKey: .audioBlockVersion))
+                      audioBlockVersion: c.decodeIfPresent(Int.self, forKey: .audioBlockVersion),
+                      binaryAudioBlocks: c.decodeIfPresent(Bool.self, forKey: .binaryAudioBlocks),
+                      localSync: c.decodeIfPresent(LocalSyncEndpoint.self, forKey: .localSync))
     }
 }
 

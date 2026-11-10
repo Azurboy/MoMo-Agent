@@ -3,8 +3,9 @@ import Foundation
 /// A resumable copy of an already sealed original, addressed to one receiver library.
 public struct AudioBlock: Codable, Sendable {
     public static let version = 1
-    public static let maximumPayloadBytes = 32 * 1024
-    public static let maximumWireBytes = 60 * 1024
+    public static let maximumLegacyPayloadBytes = 32 * 1024
+    public static let maximumPayloadBytes = 44 * 1024
+    public static let maximumWireBytes = 62 * 1024
     public static let maximumFileBytes: Int64 = 64 * 1024 * 1024
     public let protocolVersion: Int
     public let receiverDeviceID: UUID
@@ -14,12 +15,50 @@ public struct AudioBlock: Codable, Sendable {
     public let payload: Data
     public let payloadSHA256: String
 
+    private struct BinaryHeader: Codable {
+        let protocolVersion: Int
+        let receiverDeviceID: UUID
+        let libraryInstanceID: UUID
+        let envelope: ManifestEnvelope
+        let offset: Int64
+        let payloadSHA256: String
+    }
+
     public init(receiverDeviceID: UUID, libraryInstanceID: UUID, envelope: ManifestEnvelope,
                 offset: Int64, payload: Data) throws {
         protocolVersion = Self.version
         self.receiverDeviceID = receiverDeviceID; self.libraryInstanceID = libraryInstanceID
         self.envelope = envelope; self.offset = offset; self.payload = payload
         payloadSHA256 = ContentHash.sha256(payload)
+        try validate()
+    }
+
+    public func binaryWireMetadata() throws -> [String: Any] {
+        let header = try WireJSON.encode(BinaryHeader(
+            protocolVersion: protocolVersion,
+            receiverDeviceID: receiverDeviceID,
+            libraryInstanceID: libraryInstanceID,
+            envelope: envelope,
+            offset: offset,
+            payloadSHA256: payloadSHA256))
+        guard header.count + payload.count <= Self.maximumWireBytes else {
+            throw ContractError.invalidField("audio_block_wire")
+        }
+        return ["audio_block_header": header, "audio_block_payload": payload]
+    }
+
+    public init(binaryHeaderData: Data, payload: Data) throws {
+        guard binaryHeaderData.count + payload.count <= Self.maximumWireBytes else {
+            throw ContractError.invalidField("audio_block_wire")
+        }
+        let header = try WireJSON.decode(BinaryHeader.self, from: binaryHeaderData)
+        self.protocolVersion = header.protocolVersion
+        self.receiverDeviceID = header.receiverDeviceID
+        self.libraryInstanceID = header.libraryInstanceID
+        self.envelope = header.envelope
+        self.offset = header.offset
+        self.payload = payload
+        self.payloadSHA256 = header.payloadSHA256
         try validate()
     }
 

@@ -45,6 +45,8 @@ final class PhoneRuntime {
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var fileReconciliationRequested = false
     @ObservationIgnored private var lastFullFileReconciliationAt: Date?
+    @ObservationIgnored private var lastDocumentProjectionUptime: Double = -.infinity
+    @ObservationIgnored private var deferredProjectionTask: Task<Void, Never>?
     @ObservationIgnored private var starting = false
     @ObservationIgnored private var startWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var foregrounding = false
@@ -364,7 +366,7 @@ final class PhoneRuntime {
             await transcription?.requestWork()
         }
         await backgroundTasks?.scheduleAutomatic()
-        if !libraryPresentationDeferred { await refresh(reconcileFiles: false) }
+        if !libraryPresentationDeferred { await refresh(reconcileFiles: false, deferBurstProjection: true) }
         let currentSnapshot = await transcription?.snapshot()
         if isForeground, !preparingTranscriptionContinuation,
            currentSnapshot?.execution == nil,
@@ -908,11 +910,20 @@ final class PhoneRuntime {
         await refresh(reconcileFiles: false)
     }
 
-    func refresh(reconcileFiles: Bool = true) async {
+    func refresh(reconcileFiles: Bool = true, deferBurstProjection: Bool = false) async {
         if reconcileFiles {
             remoteAgent.sourcesChanged()
             lifeIllustrations.requestRefresh()
         }
+        let nowUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
+        if deferBurstProjection, !reconcileFiles, nowUptime - lastDocumentProjectionUptime < 10.0 {
+            await refreshBatches()
+            await library.refresh(inspectFiles: false)
+            scheduleDeferredDocumentProjection()
+            return
+        }
+        deferredProjectionTask?.cancel()
+        deferredProjectionTask = nil
         refreshRequested = true
         fileReconciliationRequested = fileReconciliationRequested || reconcileFiles
         guard !refreshing else { return }
@@ -932,6 +943,7 @@ final class PhoneRuntime {
                 // reconcileDocumentFiles above already inspected unchanged sessions on disk when reconcileFiles == true;
                 // only project sessions with pending transcript/manifest updates (plus pending/deleted plans).
                 try await archive.projectPendingDocuments(includeUnchanged: false)
+                lastDocumentProjectionUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
                 stage = String(localized: "更新资料引用")
                 try await invalidatePendingContexts()
                 stage = String(localized: "清理失效聊天引用")
@@ -945,6 +957,17 @@ final class PhoneRuntime {
             // A failed file projection must not hide recordings already committed to the archive.
             await library.refresh(inspectFiles: reconcileFiles)
             requestAudioMaintenance()
+        }
+    }
+
+    private func scheduleDeferredDocumentProjection() {
+        guard deferredProjectionTask == nil else { return }
+        deferredProjectionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, let self else { return }
+            self.deferredProjectionTask = nil
+            guard !self.libraryPresentationDeferred else { return }
+            await self.refresh(reconcileFiles: false, deferBurstProjection: false)
         }
     }
 
