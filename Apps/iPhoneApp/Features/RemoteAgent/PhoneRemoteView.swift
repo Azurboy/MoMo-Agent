@@ -194,31 +194,34 @@ private struct RemoteConversationView: View {
         VStack(spacing: 0) {
             if isEmpty {
                 identityHeader(isEmpty: true)
-                if draftEmpty, let doc = briefingDocument {
-                    DreamHomeCardsSection(
-                        document: doc,
-                        dismissedIDs: $dismissedBriefingCardIDs,
-                        onSelectCard: { card in
-                            store.setDraft(card.prompt)
-                            do {
-                                try store.enqueue()
-                                sendFailure = nil
-                                composeRevision += 1
-                                Task { await store.refresh(userInitiated: true) }
-                            } catch {
-                                sendFailure = error.localizedDescription
-                            }
-                        },
-                        onOpenBriefing: { showingBriefingDetail = true },
-                        onOpenNotebook: openNotebook
-                    )
-                    .padding(.bottom, 12)
-                }
             } else {
                 PhoneHeaderViewport { inset in
                     transcript(snapshot, headerInset: inset)
                 }
                 .phoneScrollHeader { identityHeader(isEmpty: false) }
+            }
+            if draftEmpty, !store.hasActiveTask, let doc = briefingDocument,
+               !doc.cards.filter({ !dismissedBriefingCardIDs.contains($0.id) }).isEmpty {
+                DreamHomeCardsSection(
+                    document: doc,
+                    dismissedIDs: $dismissedBriefingCardIDs,
+                    compact: !isEmpty,
+                    onSelectCard: { card in
+                        store.setDraft(card.prompt)
+                        do {
+                            try store.enqueue()
+                            sendFailure = nil
+                            composeRevision += 1
+                            Task { await store.refresh(userInitiated: true) }
+                        } catch {
+                            sendFailure = error.localizedDescription
+                        }
+                    },
+                    onOpenBriefing: { showingBriefingDetail = true },
+                    onOpenNotebook: openNotebook
+                )
+                .padding(.top, isEmpty ? 0 : 8)
+                .padding(.bottom, 8)
             }
             RemoteTaskControlsView(store: store, viewport: viewport, onControlVisibility: agent.notifications.controlVisible,
                                    openDesktop: openDesktop)
@@ -228,6 +231,7 @@ private struct RemoteConversationView: View {
         .onChange(of: agent.notifications.navigationRevision) { _, _ in
             if agent.notifications.focusedTarget?.messageID == nil { composeRevision += 1 }
         }
+        .task { await agent.context?.refresh() }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { viewport = $0 }
         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: isEmpty)
         .scrollDismissesKeyboard(.interactively)

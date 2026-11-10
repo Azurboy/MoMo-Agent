@@ -224,4 +224,63 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
             latitude: 39.9 + Double(index) * 0.1, longitude: 116.4 + Double(index) * 0.1,
             placeStart: Double(index * 200 + 100), placeEnd: Double(index * 200 + 200), routePoints: points)
     }
+
+    func testMemoryCardDigestAndSectionGroupingExtractsCleanHierarchy() throws {
+        func makeMemory(id: String, text: String, kind: String, basis: String) throws -> ContextMemory {
+            let payload: [String: Any] = [
+                "id": id,
+                "text": text,
+                "kind": kind,
+                "basis": basis,
+                "status": "current",
+                "revision": 1,
+                "evidence": []
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            return try JSONDecoder().decode(ContextMemory.self, from: data)
+        }
+
+        let journal = try makeMemory(
+            id: "hermes-journal-1",
+            text: """
+            # 2026-11-10 · 日记法规则细化与团队沟通线索
+
+            ## 时空与事件脉络
+            - [12:06 原音](momoagent://source/48c48995-8cfe-43e9-991e-e5f41497cd40/bb55ee74?version=82&generation=0)：围绕日记法继续讨论活动起止日期。
+            - [15:37 原音](momoagent://source/1d2d40a0-d487-4b26-9dbd-b650a448a8f9/58a037f9?version=39&generation=0)：跟进安克项目测试反馈。
+
+            ## 承诺与待办对账
+            - 待与书雅确认补答窗口规则。
+            """,
+            kind: "journal",
+            basis: "dream"
+        )
+        let journalDigest = MemoryCardDigest(memory: journal)
+        XCTAssertEqual(journalDigest.badge.title, "生活日志")
+        XCTAssertEqual(journalDigest.dateBadge, "2026-11-10")
+        XCTAssertEqual(journalDigest.title, "日记法规则细化与团队沟通线索")
+        XCTAssertEqual(journalDigest.sectionPills, ["时空与事件脉络", "承诺与待办对账"])
+        XCTAssertEqual(journalDigest.highlights.first, "[12:06]：围绕日记法继续讨论活动起止日期。")
+        XCTAssertTrue(journalDigest.cleanedNotebookMarkdown.contains("`⏱ 12:06 原音`"))
+        XCTAssertFalse(journalDigest.cleanedNotebookMarkdown.contains("momoagent://source"))
+
+        let legacyCore = try makeMemory(
+            id: "hermes-memory-legacy",
+            text: "10/28 3d1a1f88-6daf-441c-b358-b2baad897def（归属/执行未核）：v435称微调不用客户数据（与e0b5c310 1792738925有差异）；议补追问/去最低5轮；1793179516–9634伊利澄清计轮致早跳。",
+            kind: "memory",
+            basis: "hermes"
+        )
+        let coreDigest = MemoryCardDigest(memory: legacyCore)
+        XCTAssertEqual(coreDigest.dateBadge, "10/28")
+        XCTAssertFalse(coreDigest.title.contains("3d1a1f88"))
+        XCTAssertFalse(coreDigest.title.contains("1792738925"))
+        XCTAssertFalse(coreDigest.title.contains("归属/执行未核"))
+        XCTAssertEqual(coreDigest.highlights.count, 2)
+        XCTAssertFalse(coreDigest.highlights.joined().contains("1793179516"))
+
+        let sections = DreamMemoryCategory.sections(from: [legacyCore, journal], category: .all)
+        XCTAssertEqual(sections.map { $0.id }, ["notebook", "core"])
+        XCTAssertEqual(sections[0].items.map { $0.id }, ["hermes-journal-1"])
+        XCTAssertEqual(sections[1].items.map { $0.id }, ["hermes-memory-legacy"])
+    }
 }

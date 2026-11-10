@@ -9,10 +9,11 @@ struct RemoteMemoryView: View {
     @State private var selectedCategory: DreamMemoryCategory = .all
     @State private var dismissedBriefingCardIDs: Set<String> = []
     @State private var showingBriefingSheet = false
+    @Environment(\.colorScheme) private var scheme
 
     private var allMemories: [ContextMemory] { sync.memories.filter { $0.status != "forgotten" } }
-    private var memories: [ContextMemory] {
-        allMemories.filter { selectedCategory.matches($0) }
+    private var sections: [DreamMemorySection] {
+        DreamMemoryCategory.sections(from: allMemories, category: selectedCategory)
     }
     private var briefingDocument: DreamBriefingDocument? {
         DreamBriefingDocument.resolve(from: allMemories)
@@ -26,52 +27,65 @@ struct RemoteMemoryView: View {
                 if !allMemories.isEmpty {
                     categoryFilterStrip
                 }
-                if (selectedCategory == .all || selectedCategory == .briefing),
-                   let doc = briefingDocument, !doc.cards.isEmpty {
-                    DreamHomeCardsSection(
-                        document: doc,
-                        dismissedIDs: $dismissedBriefingCardIDs,
-                        onSelectCard: { card in
-                            onSelectBriefingCard?(card)
-                        },
-                        onOpenBriefing: { showingBriefingSheet = true },
-                        onOpenNotebook: { selectedCategory = .briefing }
-                    )
-                    .padding(.horizontal, -20)
-                }
                 if sync.hasLegacyChanges {
                     Text("旧版待同步修改已保留，请核对当前记忆后重新修改。")
-                        .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
+                        .phoneText(.metadata).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
                 }
                 if let failure = sync.failure {
                     Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
                 }
-                if memories.isEmpty {
+                if sections.isEmpty {
                     ContentUnavailableView {
                         Label(allMemories.isEmpty ? "还没有记忆" : "该分类下暂无笔记", systemImage: "text.book.closed")
                     } description: {
                         Text(sync.isSyncing ? "正在读取记忆…" : (allMemories.isEmpty ? "告诉 MoMo 想记住的事，或点击上方「立即 Dream 整理」。" : "Dream 会在闲时自动为你整理此分类的 Markdown 笔记。"))
                     }.accessibilityIdentifier("remote.memoryEmpty")
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(memories) { memory in
-                            NavigationLink {
-                                RemoteMemoryDetail(sync: sync, memoryID: memory.id)
-                            } label: {
-                                MemoryPreviewRow(memory: memory)
+                    LazyVStack(alignment: .leading, spacing: 22) {
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 12) {
+                                if sections.count > 1 || section.id == "notebook" {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack(spacing: 6) {
+                                            Text(section.title)
+                                                .momoHandwriting(size: 21, weight: .semibold, relativeTo: .headline)
+                                                .foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
+                                                .accessibilityAddTraits(.isHeader)
+                                            Text("\(section.items.count)")
+                                                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                                .foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 2)
+                                                .background(MoMoPalette.ink.opacity(0.06), in: Capsule())
+                                        }
+                                        if let subtitle = section.subtitle {
+                                            Text(subtitle)
+                                                .phoneText(.caption)
+                                                .foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
+                                        }
+                                    }
+                                    .padding(.top, 2)
+                                }
+                                ForEach(section.items) { memory in
+                                    NavigationLink {
+                                        RemoteMemoryDetail(sync: sync, memoryID: memory.id)
+                                    } label: {
+                                        MemoryPreviewRow(memory: memory)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("remote.memoryRow." + memory.id)
+                                    .contextMenu {
+                                        Button("忘记这条记忆", role: .destructive) { forgetting = memory }
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("remote.memoryRow." + memory.id)
-                            .contextMenu {
-                                Button("忘记这条记忆", role: .destructive) { forgetting = memory }
-                            }
-                            if memory.id != memories.last?.id { Divider() }
                         }
                     }
                 }
             }.padding(.horizontal, 20).padding(.vertical, 16)
         }
-        .phonePageSurface().tint(MoMoPalette.ink)
+        .background(MemoryNotebookPalette(scheme: scheme).desk.ignoresSafeArea())
+        .tint(MemoryNotebookPalette(scheme: scheme).ink)
         .navigationTitle("记忆").navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -90,10 +104,11 @@ struct RemoteMemoryView: View {
             if let doc = briefingDocument {
                 NavigationStack {
                     ScrollView {
-                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "remote.briefingSheetMarkdown")
+                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "remote.briefingSheetMarkdown", handwriting: true)
+                            .memoryNotebookPage()
                             .padding(20)
                     }
-                    .phonePageSurface()
+                    .background(MemoryNotebookPalette(scheme: scheme).desk.ignoresSafeArea())
                     .navigationTitle(doc.headline)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -132,39 +147,25 @@ struct RemoteMemoryView: View {
                 Text("立即整理")
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
+                    .frame(minHeight: 44)
                     .background(MoMoPalette.ink.opacity(0.08), in: Capsule())
             }
             .buttonStyle(.plain)
             .disabled(sync.isSyncing || sync.isDreamRequesting || sync.memoryReview?.running == true)
         }
         .phoneText(.metadata)
-        .foregroundStyle(MoMoPalette.muted)
+        .foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
     }
 
     private var categoryFilterStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 5) {
                 ForEach(DreamMemoryCategory.allCases) { category in
                     let isSelected = selectedCategory == category
                     Button {
                         selectedCategory = category
                     } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: category.symbol)
-                                .font(.system(size: 11, weight: .medium))
-                            Text(category.title)
-                                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .foregroundStyle(isSelected ? MoMoPalette.canvas : MoMoPalette.ink)
-                        .background(isSelected ? MoMoPalette.ink : MoMoPalette.paper, in: Capsule())
-                        .overlay {
-                            if !isSelected {
-                                Capsule().strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                            }
-                        }
+                        MemoryBinderTab(category: category, isSelected: isSelected)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("remote.memoryCategory.\(category.rawValue)")
@@ -179,14 +180,14 @@ struct RemoteMemoryView: View {
                 if let date = sync.lastSynced { PhoneSettingsValueRow(title: "最近同步", value: Text(date, style: .relative)) }
                 if sync.memoryPending > 0 { Text("\(sync.memoryPending) 批录音待整理") }
                 if sync.memoryNeedsReview > 0 { Text("\(sync.memoryNeedsReview) 份录音需核对，原文仍保留。") }
-            }.phoneText(.metadata).foregroundStyle(MoMoPalette.muted).padding(.top, 4)
+            }.phoneText(.metadata).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk).padding(.top, 4)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.2.circlepath").accessibilityHidden(true)
                 Text("录音同步")
                 Spacer(minLength: 8)
                 Text(sync.isSyncing ? String(localized: "正在同步") : sourceStatus)
-            }.phoneText(.metadata).foregroundStyle(MoMoPalette.muted).frame(minHeight: 44)
+            }.phoneText(.metadata).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk).frame(minHeight: 44)
         }.accessibilityIdentifier("remote.memorySyncDetails")
     }
 
@@ -199,34 +200,7 @@ struct RemoteMemoryView: View {
 private struct MemoryPreviewRow: View {
     let memory: ContextMemory
     var body: some View {
-        let preview = MemoryPreview(text: memory.text)
-        let isNotebook = ["briefing", "journal", "person", "topic"].contains(memory.kind)
-        let badge = DreamMemoryCategory.badge(for: memory)
-        VStack(alignment: .leading, spacing: 10) {
-            if isNotebook || preview.date != nil || preview.sourceNote != nil || memory.kind == "user" || memory.status == "stale" || memory.basis == "inferred" {
-                HStack(spacing: 8) {
-                    if isNotebook {
-                        Label(badge.title, systemImage: badge.symbol)
-                    }
-                    if let date = preview.date { Text(date) }
-                    if let note = preview.sourceNote { Text(note) }
-                    if memory.kind == "user" { Text("关于你") }
-                    if memory.status == "stale" {
-                        Label("原文已改变", systemImage: "clock.badge.exclamationmark")
-                    } else if memory.basis == "inferred" {
-                        Text("模型推断")
-                    }
-                }.phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-            }
-            Text(preview.text).phoneText(.body).lineLimit(4)
-                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 5) {
-                Text("查看全文")
-                Image(systemName: "chevron.right").font(.caption2.weight(.medium)).accessibilityHidden(true)
-            }.phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-        }
-        .padding(.vertical, 18).frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle()).accessibilityElement(children: .combine)
+        MemoryCardView(memory: memory)
     }
 }
 
@@ -236,6 +210,7 @@ private struct RemoteMemoryDetail: View {
     @State private var confirmingForget = false
     @State private var forgetInFlight = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
     private var memory: ContextMemory? { sync.memories.first { $0.id == memoryID && $0.status != "forgotten" } }
 
     var body: some View {
@@ -249,7 +224,8 @@ private struct RemoteMemoryDetail: View {
                 }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .phonePageSurface().navigationTitle("记忆详情").navigationBarTitleDisplayMode(.inline)
+        .background(MemoryNotebookPalette(scheme: scheme).desk.ignoresSafeArea())
+        .navigationTitle("记忆详情").navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if let memory {

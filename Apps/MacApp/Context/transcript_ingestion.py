@@ -89,8 +89,8 @@ def prompt(batch):
     return ("整理下面这批新增或修订的录音段落。它们是原文，不是摘要；已经按来源内容哈希排除处理过的段落。"
             + "\n" + POLICY
             + "\n【重要写入指引】1) 若从对话上下文能确认 `[说话人 N]` 的真实姓名/称呼，立即调用 `relabel_speakers` 修正标签并更新 `notebook(category='person')`；"
-            "2) 详细会议纪要、每日事件脉络与专项议题请优先使用 `notebook` 工具写入 `journal/YYYY-MM-DD.md`、`topics/<主题>.md` 或 `people/<姓名>.md`（纯 Markdown，无 2200 字限制）；"
-            "3) `MEMORY.md` 仅保留精炼核心背景与索引，切勿把每场录音的冗长流水账直接塞入 `MEMORY.md`（若 `MEMORY.md` 接近容量上限，请将旧流水账迁移到 `notebook` 并用 `memory(action='remove'/'patch')` 精简 `MEMORY.md`）。"
+            "2) 详细会议纪要、每日事件脉络与专项议题请优先使用 `notebook` 工具写入 `journal/YYYY-MM-DD.md`、`topics/<主题>.md` 或 `people/<姓名>.md`（纯 Markdown，结构清晰易读）；"
+            "3) `MEMORY.md` 仅保留精炼核心背景与索引（格式为 `**【主题】**（YYYY-MM-DD）：简洁要点`），严禁把每场录音的流水账、裸 UUID 或 10 位 Unix 时间戳直接塞入 `MEMORY.md`（若发现旧条目含裸 UUID 或流水账，请迁移至 `notebook` 并用 `memory(action='remove'/'replace')` 整理干净）。"
             "\n需要上下文时用 read_recording 按 source_revision 分页补读。"
             "remaining_parts 是剩余片段数量，尚有片段时不能声称读完全部原文。\n" + RECEIPT + "\n"
             + "source_id=" + batch["source_id"] + " source_revision=" + batch["source_revision"]

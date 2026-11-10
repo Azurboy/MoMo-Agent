@@ -1,4 +1,7 @@
 import SwiftUI
+import CoreText
+import Observation
+import OSLog
 import UniformTypeIdentifiers
 import MoMoAgentClient
 #if os(macOS)
@@ -320,61 +323,668 @@ struct ClientComposer: View {
     }
 }
 
+@MainActor @Observable
+final class MoMoHandwritingFont {
+    static let shared = MoMoHandwritingFont()
+    private(set) var regularName: String?
+    private(set) var emphasizedName: String?
+
+    private init() {
+        refreshAvailableFonts()
+        // Asset discovery and registration run once, without blocking the first page draw.
+        Task.detached(priority: .userInitiated) {
+            Self.registerLocalAssets()
+            await self.refreshAvailableFonts()
+            let descriptors = ["HanziPenSC-W3", "HanziPenSC-W5"].map {
+                CTFontDescriptorCreateWithAttributes([
+                    kCTFontNameAttribute: $0,
+                    kCTFontDownloadableAttribute: true
+                ] as CFDictionary)
+            }
+            let started = CTFontDescriptorMatchFontDescriptorsWithProgressHandler(descriptors as CFArray, nil) { state, _ in
+                if state == .didMatch || state == .didFinish {
+                    Task { @MainActor in self.refreshAvailableFonts() }
+                } else if state == .didFailWithError {
+                    Logger(subsystem: "com.momoagent.client", category: "Handwriting")
+                        .notice("System handwriting activation unavailable; keeping the installed fallback.")
+                }
+                return true
+            }
+            if !started {
+                Logger(subsystem: "com.momoagent.client", category: "Handwriting")
+                    .notice("System handwriting matching could not start.")
+            }
+        }
+    }
+
+    private func refreshAvailableFonts() {
+        let fallbacks = ["Klee-Medium", "YuppySC-Regular", "STKaitiSC-Regular", "Kaiti SC", "Noteworthy-Light"]
+        regularName = Self.availableName(in: ["HanziPenSC-W3", "HanziPenSC-W5"] + fallbacks)
+        emphasizedName = Self.availableName(in: ["HanziPenSC-W5", "HanziPenSC-W3"] + fallbacks)
+    }
+
+    private static func availableName(in names: [String]) -> String? {
+        for name in names {
+            #if os(macOS)
+            if let font = NSFont(name: name, size: 18) { return font.fontName }
+            #else
+            if let font = UIFont(name: name, size: 18) { return font.fontName }
+            #endif
+        }
+        return nil
+    }
+
+    private nonisolated static func registerLocalAssets() {
+        #if os(macOS) || targetEnvironment(simulator)
+        let filenames: Set<String> = ["hanzipen.ttc", "klee.ttc", "yuppysc-regular.otf", "kaiti.ttc"]
+        var registered: Set<String> = []
+        for version in [8, 7] {
+            let root = URL(fileURLWithPath: "/System/Library/AssetsV2/com_apple_MobileAsset_Font\(version)", isDirectory: true)
+            guard FileManager.default.fileExists(atPath: root.path),
+                  let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
+                                                            options: [.skipsHiddenFiles]) else { continue }
+            for case let url as URL in files {
+                let name = url.lastPathComponent.lowercased()
+                guard filenames.contains(name), !registered.contains(name) else { continue }
+                var error: Unmanaged<CFError>?
+                if CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error) {
+                    registered.insert(name)
+                } else if let failure = error?.takeRetainedValue(),
+                          CFErrorGetCode(failure) != CTFontManagerError.alreadyRegistered.rawValue {
+                    Logger(subsystem: "com.momoagent.client", category: "Handwriting")
+                        .notice("Local handwriting registration failed: \(String(describing: failure), privacy: .public)")
+                }
+            }
+        }
+        #endif
+    }
+}
+
+private struct MoMoHandwritingModifier: ViewModifier {
+    let size: CGFloat
+    let weight: Font.Weight
+    let relativeTo: Font.TextStyle
+    @ScaledMetric private var fallbackSize: CGFloat
+    @Environment(\.legibilityWeight) private var legibilityWeight
+
+    init(size: CGFloat, weight: Font.Weight, relativeTo: Font.TextStyle) {
+        self.size = size
+        self.weight = weight
+        self.relativeTo = relativeTo
+        _fallbackSize = ScaledMetric(wrappedValue: size, relativeTo: relativeTo)
+    }
+
+    func body(content: Content) -> some View {
+        let fonts = MoMoHandwritingFont.shared
+        let weight = legibilityWeight == .bold ? Font.Weight.bold : weight
+        let emphasized = [Font.Weight.medium, .semibold, .bold, .heavy, .black].contains(weight)
+        let name = emphasized ? fonts.emphasizedName : fonts.regularName
+        content
+            .font(name.map { Font.custom($0, size: size, relativeTo: relativeTo).weight(weight) }
+                  ?? .system(size: fallbackSize, weight: weight, design: .serif))
+            .tracking(0.4)
+    }
+}
+
+extension View {
+    func momoHandwriting(size: CGFloat, weight: Font.Weight = .regular,
+                         relativeTo: Font.TextStyle = .body) -> some View {
+        modifier(MoMoHandwritingModifier(size: size, weight: weight, relativeTo: relativeTo))
+    }
+
+    func memoryNotebookPage() -> some View {
+        self.padding(.leading, 46).padding(.trailing, 18).padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(MemoryNotebookPaper())
+            .padding(.bottom, 6)
+    }
+}
+
+struct MemoryNotebookPalette {
+    let scheme: ColorScheme
+    private var dark: Bool { scheme == .dark }
+    var paper: Color { dark ? Self.rgb(0x1E1C19) : Self.rgb(0xFBF7EE) }
+    var desk: Color { dark ? Self.rgb(0x141310) : Self.rgb(0xEEE8DD) }
+    var ink: Color { dark ? Self.rgb(0xF3EBDD) : Self.rgb(0x302B25) }
+    var secondaryInk: Color { dark ? Self.rgb(0xC9BDAA) : Self.rgb(0x695C4B) }
+    var margin: Color { dark ? Self.rgb(0xD29C85) : Self.rgb(0x9E5040) }
+
+    func tab(_ kind: String) -> Color {
+        switch kind {
+        case "briefing": dark ? Self.rgb(0x665333) : Self.rgb(0xEBD9AF)
+        case "journal": dark ? Self.rgb(0x405446) : Self.rgb(0xD6E0CA)
+        case "person": dark ? Self.rgb(0x674941) : Self.rgb(0xEACDC0)
+        case "topic": dark ? Self.rgb(0x42545F) : Self.rgb(0xCFDEE4)
+        default: dark ? Self.rgb(0x554A60) : Self.rgb(0xDFD5E5)
+        }
+    }
+
+    private static func rgb(_ value: UInt32) -> Color {
+        Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+              green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
+    }
+}
+
+private struct MemoryNotebookPaper: View {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        ZStack {
+            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(0.24), lineWidth: 0.5) }
+                .padding(.horizontal, 7).offset(y: 6)
+            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(0.2), lineWidth: 0.5) }
+                .padding(.horizontal, 3).offset(y: 3)
+            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
+                .overlay {
+                    Canvas { context, size in
+                        var rules = Path()
+                        for y in stride(from: 35.0, through: size.height, by: 27.0) {
+                            rules.move(to: CGPoint(x: 25, y: y))
+                            rules.addLine(to: CGPoint(x: size.width - 12, y: y))
+                        }
+                        context.stroke(rules, with: .color(colors.secondaryInk.opacity(contrast == .increased ? 0.06 : 0.13)), lineWidth: 0.5)
+                        var margin = Path()
+                        margin.move(to: CGPoint(x: 33, y: 0))
+                        margin.addLine(to: CGPoint(x: 33, y: size.height))
+                        context.stroke(margin, with: .color(colors.margin.opacity(0.5)), lineWidth: 0.8)
+                        for y in stride(from: 40.0, through: size.height - 18, by: 108.0) {
+                            let hole = Path(ellipseIn: CGRect(x: 9, y: y - 5, width: 10, height: 10))
+                            context.fill(hole, with: .color(colors.desk))
+                            context.stroke(hole, with: .color(.black.opacity(0.24)), lineWidth: 1)
+                            var innerShadow = Path()
+                            innerShadow.addArc(center: CGPoint(x: 14, y: y), radius: 4,
+                                               startAngle: .degrees(180), endAngle: .degrees(360), clockwise: false)
+                            context.stroke(innerShadow, with: .color(.black.opacity(0.22)), lineWidth: 1.5)
+                            let ring = Path(roundedRect: CGRect(x: -3, y: y - 2.5, width: 18, height: 5), cornerRadius: 2.5)
+                            context.fill(ring, with: .linearGradient(
+                                Gradient(colors: [Color(white: 0.42), Color(white: 0.94), Color(white: 0.56)]),
+                                startPoint: CGPoint(x: 0, y: y - 2.5), endPoint: CGPoint(x: 0, y: y + 2.5)))
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(contrast == .increased ? 0.6 : 0.18), lineWidth: 0.5) }
+        }
+        .shadow(color: .black.opacity(scheme == .dark ? 0.2 : 0.07), radius: 3, x: 0, y: 3)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct MemoryWashiLabel: View {
+    let title: String
+    let symbol: String
+    let kind: String
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        Label(title, systemImage: symbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(colors.ink)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(colors.tab(kind).opacity(reduceTransparency ? 1 : 0.78), in: RoundedRectangle(cornerRadius: 2))
+            .overlay(alignment: .top) { Rectangle().fill(colors.paper.opacity(0.5)).frame(height: 1).accessibilityHidden(true) }
+    }
+}
+
+struct MemoryBinderTab: View {
+    let category: DreamMemoryCategory
+    let isSelected: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        HStack(spacing: 6) {
+            Image(systemName: isSelected ? "checkmark" : category.symbol)
+                .font(.caption.weight(.semibold)).accessibilityHidden(true)
+            Text(category.title).font(.subheadline.weight(isSelected ? .semibold : .regular))
+        }
+        .foregroundStyle(colors.ink)
+        .padding(.horizontal, 13).frame(minHeight: 44)
+        .background(isSelected ? colors.paper : colors.tab(category.rawValue),
+                    in: UnevenRoundedRectangle(topLeadingRadius: 9, topTrailingRadius: 9))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(isSelected ? colors.margin : colors.secondaryInk.opacity(0.25))
+                .frame(height: isSelected ? 2 : 0.5).accessibilityHidden(true)
+        }
+        .contentShape(Rectangle())
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+struct MemoryCardDigest: Equatable, Sendable {
+    let badge: (title: String, symbol: String)
+    let dateBadge: String?
+    let sourceNote: String?
+    let statusBadge: String?
+    let title: String
+    let highlights: [String]
+    let sectionPills: [String]
+    let cleanedNotebookMarkdown: String
+    let isNotebookMarkdown: Bool
+
+    static func == (lhs: MemoryCardDigest, rhs: MemoryCardDigest) -> Bool {
+        lhs.badge.title == rhs.badge.title
+            && lhs.dateBadge == rhs.dateBadge
+            && lhs.title == rhs.title
+            && lhs.highlights == rhs.highlights
+            && lhs.sectionPills == rhs.sectionPills
+    }
+
+    init(memory: ContextMemory) {
+        self.badge = DreamMemoryCategory.badge(for: memory)
+        self.isNotebookMarkdown = ["briefing", "journal", "person", "topic"].contains(memory.kind)
+        if memory.status == "stale" {
+            self.statusBadge = "原文已改变"
+        } else if memory.basis == "inferred" {
+            self.statusBadge = "模型推断"
+        } else {
+            self.statusBadge = nil
+        }
+
+        let trimmed = memory.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var extractedDate: String? = nil
+        var extractedNote: String? = nil
+        var bodyText = trimmed
+
+        // Strip leading machine source stamp (e.g. "10/29–30 录音 0fcdf941-... v78 (归属/执行未核)：")
+        let stampPattern = #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s*(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?\s*(?:[（(]([^）)]*)[）)])?\s*[：:]?\s*"#
+        if let regex = try? NSRegularExpression(pattern: stampPattern),
+           let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+           let stampRange = Range(match.range, in: trimmed),
+           let dateRange = Range(match.range(at: 1), in: trimmed) {
+            let remainder = String(trimmed[stampRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remainder.isEmpty {
+                extractedDate = String(trimmed[dateRange])
+                if let noteRange = Range(match.range(at: 2), in: trimmed) {
+                    let note = String(trimmed[noteRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !note.isEmpty && !note.contains("未核") {
+                        extractedNote = note
+                    }
+                }
+                bodyText = remainder
+            }
+        }
+
+        if isNotebookMarkdown {
+            let lines = bodyText.components(separatedBy: .newlines)
+            var rawHeading: String? = nil
+            var sections: [String] = []
+            var bullets: [String] = []
+            var paragraphs: [String] = []
+
+            for rawLine in lines {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard !line.isEmpty, !line.hasPrefix("```") else { continue }
+                if line.hasPrefix("# ") && rawHeading == nil {
+                    rawHeading = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                    continue
+                }
+                if line.hasPrefix("## ") || line.hasPrefix("### ") {
+                    var sec = line.replacingOccurrences(of: #"^#{2,3}\s*"#, with: "", options: .regularExpression)
+                    sec = sec.replacingOccurrences(of: #"^(卡片|建议)[：:]\s*"#, with: "", options: .regularExpression)
+                    sec = sec.replacingOccurrences(of: #"（注绝对日期）"#, with: "")
+                    let cleanSec = Self.cleanInlineNoise(sec)
+                    if !cleanSec.isEmpty && !sections.contains(cleanSec) {
+                        sections.append(cleanSec)
+                    }
+                    continue
+                }
+                if line.hasPrefix("- 纹样：") || line.hasPrefix("- 纹样:") || line.hasPrefix("- 语境：") || line.hasPrefix("- 语境:") {
+                    continue
+                }
+                if line.hasPrefix("- ") || line.hasPrefix("* ") {
+                    let item = Self.cleanInlineNoise(String(line.dropFirst(2)))
+                    if !item.isEmpty {
+                        bullets.append(item)
+                    }
+                } else if !line.hasPrefix("#") {
+                    let para = Self.cleanInlineNoise(line)
+                    if !para.isEmpty {
+                        paragraphs.append(para)
+                    }
+                }
+            }
+
+            var resolvedHeading = rawHeading ?? Self.badgeTitleFallback(for: memory.kind)
+            if extractedDate == nil,
+               let dateRegex = try? NSRegularExpression(pattern: #"\b(20\d{2}-\d{2}-\d{2})\b"#),
+               let m = dateRegex.firstMatch(in: resolvedHeading, range: NSRange(resolvedHeading.startIndex..., in: resolvedHeading)),
+               let r = Range(m.range(at: 1), in: resolvedHeading) {
+                extractedDate = String(resolvedHeading[r])
+                let stripped = resolvedHeading
+                    .replacingOccurrences(of: #"^20\d{2}-\d{2}-\d{2}\s*[·•\-—–:：]\s*"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"\s*[·•\-—–:：]\s*20\d{2}-\d{2}-\d{2}$"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !stripped.isEmpty {
+                    resolvedHeading = stripped
+                }
+            }
+            self.title = Self.cleanInlineNoise(resolvedHeading)
+            let candidateHighlights = bullets.isEmpty ? paragraphs : bullets
+            self.highlights = Array(candidateHighlights.prefix(3))
+            self.sectionPills = Array(sections.prefix(4))
+            self.cleanedNotebookMarkdown = Self.cleanNotebookMarkdownForDetail(bodyText)
+        } else {
+            // Core memory (`MEMORY.md`) or User profile (`USER.md`)
+            var working = bodyText
+            var explicitTitle: String? = nil
+
+            // Pattern 1: **【标题】**（2026-11-10）：内容 or **标题**（2026-11-10）：内容
+            let boldHeaderPattern = #"^\*\*【?([^】*]+)】?\*\*\s*(?:[（(](\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)[）)])?\s*[：:]\s*"#
+            if let regex = try? NSRegularExpression(pattern: boldHeaderPattern),
+               let m = regex.firstMatch(in: working, range: NSRange(working.startIndex..., in: working)),
+               let fullRange = Range(m.range, in: working),
+               let titleRange = Range(m.range(at: 1), in: working) {
+                explicitTitle = Self.cleanInlineNoise(String(working[titleRange]))
+                if extractedDate == nil, let dRange = Range(m.range(at: 2), in: working) {
+                    extractedDate = String(working[dRange])
+                }
+                working = String(working[fullRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if extractedDate == nil {
+                // Pattern 2: Leading date like "2026-11-10 " or "11/2 "
+                let leadDatePattern = #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s+"#
+                if let regex = try? NSRegularExpression(pattern: leadDatePattern),
+                   let m = regex.firstMatch(in: working, range: NSRange(working.startIndex..., in: working)),
+                   let fullRange = Range(m.range, in: working),
+                   let dRange = Range(m.range(at: 1), in: working) {
+                    let rem = String(working[fullRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !rem.isEmpty {
+                        extractedDate = String(working[dRange])
+                        working = rem
+                    }
+                }
+            }
+
+            let cleanedBody = Self.cleanInlineNoise(working)
+            let clauses = cleanedBody
+                .components(separatedBy: CharacterSet(charactersIn: "；;\n"))
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            if let explicitTitle, !explicitTitle.isEmpty {
+                self.title = explicitTitle
+                if clauses.count > 1 {
+                    self.highlights = Array(clauses.prefix(3))
+                } else {
+                    let sentences = Self.splitSentences(cleanedBody)
+                    self.highlights = Array(sentences.prefix(3))
+                }
+            } else if clauses.count >= 2 {
+                self.title = clauses[0]
+                self.highlights = Array(clauses.dropFirst().prefix(3))
+            } else {
+                let sentences = Self.splitSentences(cleanedBody)
+                if sentences.count >= 2 {
+                    self.title = sentences[0]
+                    self.highlights = Array(sentences.dropFirst().prefix(3))
+                } else {
+                    self.title = cleanedBody.isEmpty ? trimmed : cleanedBody
+                    self.highlights = []
+                }
+            }
+            self.sectionPills = []
+            self.cleanedNotebookMarkdown = bodyText
+        }
+
+        self.dateBadge = extractedDate
+        self.sourceNote = extractedNote
+    }
+
+    private static func badgeTitleFallback(for kind: String) -> String {
+        switch kind {
+        case "briefing": return "晨间简报"
+        case "journal": return "每日生活日志"
+        case "person": return "人物脉络笔记"
+        case "topic": return "主题活页笔记"
+        case "user": return "关于你的偏好"
+        default: return "核心记忆"
+        }
+    }
+
+    private static func splitSentences(_ text: String) -> [String] {
+        text.components(separatedBy: "。")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { $0.hasSuffix("。") ? $0 : $0 + "。" }
+    }
+
+    static func cleanInlineNoise(_ raw: String) -> String {
+        var s = raw
+        // Replace [12:06 原音](momoagent://source/...) with [12:06] or label
+        s = s.replacingOccurrences(
+            of: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#,
+            with: "[$1]",
+            options: .regularExpression
+        )
+        s = s.replacingOccurrences(of: #"\[(\d{1,2}:\d{2})\s*原音\]"#, with: "[$1]", options: .regularExpression)
+        // Strip raw UUIDs and optional preceding "录音" or trailing version tags
+        s = s.replacingOccurrences(
+            of: #"(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?"#,
+            with: "",
+            options: .regularExpression
+        )
+        // Strip 8-hex session prefix + 10-digit Unix epoch timestamps
+        s = s.replacingOccurrences(
+            of: #"(?<![0-9a-fA-F])[0-9a-fA-F]{8}\s+17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#,
+            with: "",
+            options: .regularExpression
+        )
+        // Strip standalone 10-digit Unix epoch timestamps (1780000000 - 1799999999)
+        s = s.replacingOccurrences(
+            of: #"(?<![0-9a-fA-F])17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#,
+            with: "",
+            options: .regularExpression
+        )
+        // Strip pedantic audit disclaimers
+        s = s.replacingOccurrences(
+            of: #"[（(]\s*(?:归属\s*/\s*执行未核|归属未核|执行未核)\s*[）)]\s*[：:]?"#,
+            with: "",
+            options: .regularExpression
+        )
+        // Strip Markdown emphasis markers for plain-text card preview
+        s = s.replacingOccurrences(of: "**", with: "")
+        s = s.replacingOccurrences(of: "__", with: "")
+        s = s.replacingOccurrences(of: "`", with: "")
+        s = s.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func cleanNotebookMarkdownForDetail(_ markdown: String) -> String {
+        var s = markdown
+        // Replace custom momoagent://source/... links with readable inline code time badges
+        s = s.replacingOccurrences(
+            of: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#,
+            with: "`⏱ $1`",
+            options: .regularExpression
+        )
+        // Strip raw 36-char UUIDs if any leaked into prose
+        s = s.replacingOccurrences(
+            of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
+            with: "",
+            options: .regularExpression
+        )
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct MemoryCardView: View {
+    let memory: ContextMemory
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let digest = MemoryCardDigest(memory: memory)
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                MemoryWashiLabel(title: digest.badge.title, symbol: digest.badge.symbol, kind: memory.kind)
+                Spacer(minLength: 0)
+                if let date = digest.dateBadge {
+                    Text(date).font(.caption.monospacedDigit()).foregroundStyle(colors.secondaryInk)
+                }
+            }
+
+            Text(digest.title)
+                .momoHandwriting(size: 21, weight: .semibold, relativeTo: .headline)
+                .foregroundStyle(colors.ink)
+                .lineSpacing(5)
+                .lineLimit(digest.highlights.isEmpty ? 3 : 2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !digest.highlights.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("·").foregroundStyle(colors.secondaryInk).accessibilityHidden(true)
+                            Text(point)
+                                .lineSpacing(6).lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .momoHandwriting(size: 18)
+                        .foregroundStyle(colors.ink)
+                    }
+                }
+            }
+
+            if !digest.sectionPills.isEmpty {
+                Text(digest.sectionPills.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(colors.secondaryInk)
+                    .lineLimit(2)
+            }
+            if let status = digest.statusBadge {
+                Label(status, systemImage: memory.status == "stale" ? "clock.badge.exclamationmark" : "sparkles")
+                    .font(.caption).foregroundStyle(colors.secondaryInk)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline) {
+                    signature
+                    Spacer(minLength: 12)
+                    readMore
+                }
+                VStack(alignment: .leading, spacing: 8) { signature; readMore }
+            }
+            .foregroundStyle(colors.secondaryInk)
+            .padding(.top, 4)
+        }
+        .memoryNotebookPage()
+        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(([digest.badge.title, digest.dateBadge, digest.statusBadge, digest.title]
+            .compactMap { $0 } + digest.highlights + ["查看全文"]).joined(separator: "，"))
+    }
+
+    private var signature: some View {
+        Text("✍️ MoMo 手写手账")
+            .momoHandwriting(size: 13, weight: .medium, relativeTo: .caption)
+            .accessibilityHidden(true)
+    }
+
+    private var readMore: some View {
+        HStack(spacing: 4) {
+            Text("查看全文")
+            Image(systemName: "chevron.right").accessibilityHidden(true)
+        }.font(.caption.weight(.medium))
+    }
+}
+
 struct ClientMemoryContent: View {
     let memory: ContextMemory
-
-    private var isNotebookMarkdown: Bool {
-        ["briefing", "journal", "person", "topic"].contains(memory.kind)
-    }
+    @Environment(\.colorScheme) private var scheme
 
     private var headerTitle: String {
         if memory.status == "stale" { return "原文已改变，暂不作为当前记忆" }
         switch memory.kind {
-        case "briefing": return "Dream · 晨间简报（Markdown）"
-        case "journal": return "Dream · 每日生活日志（Markdown）"
-        case "person": return "Dream · 人物脉络活页（Markdown）"
-        case "topic": return "Dream · 主题与项目活页（Markdown）"
+        case "briefing": return "Dream · 晨间简报"
+        case "journal": return "Dream · 每日生活日志"
+        case "person": return "Dream · 人物脉络活页"
+        case "topic": return "Dream · 主题与项目活页"
         case "user": return "关于你（USER.md）"
         default:
-            if memory.basis == "hermes" { return "MoMo 的记忆（MEMORY.md）" }
+            if memory.basis == "hermes" { return "核心记忆（MEMORY.md）" }
             if memory.basis == "inferred" { return "模型推断" }
             return "根据录音中的陈述"
         }
     }
 
-    private var headerIcon: String {
-        if memory.status == "stale" { return "clock.badge.exclamationmark" }
-        switch memory.kind {
-        case "briefing": return "sun.max"
-        case "journal": return "calendar.day.timeline.left"
-        case "person": return "person.text.rectangle"
-        case "topic": return "doc.richtext"
-        case "user": return "person.crop.circle"
-        default: return "quote.bubble"
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(headerTitle, systemImage: headerIcon)
-                .phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-            if isNotebookMarkdown {
-                MarkdownReadingView(markdown: memory.text, accessibilityID: "remote.memoryText")
-            } else {
-                Text(memory.text)
-                    .lineSpacing(6)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled).accessibilityIdentifier("remote.memoryText")
+        let digest = MemoryCardDigest(memory: memory)
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 8) {
+                MemoryWashiLabel(title: digest.badge.title, symbol: digest.badge.symbol, kind: memory.kind)
+                Text(headerTitle).font(.caption).foregroundStyle(colors.secondaryInk)
+                if let date = digest.dateBadge {
+                    Text(date).font(.caption.monospacedDigit()).foregroundStyle(colors.secondaryInk)
+                }
             }
+
+            if digest.isNotebookMarkdown {
+                MarkdownReadingView(markdown: digest.cleanedNotebookMarkdown,
+                                    accessibilityID: "remote.memoryText", handwriting: true)
+            } else {
+                if !digest.highlights.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(digest.title)
+                            .momoHandwriting(size: 22, weight: .semibold, relativeTo: .headline)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("·").accessibilityHidden(true)
+                                Text(point).fixedSize(horizontal: false, vertical: true)
+                            }.momoHandwriting(size: 18)
+                        }
+                    }.lineSpacing(7)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    if !digest.highlights.isEmpty {
+                        Text("原文记录").font(.caption).foregroundStyle(colors.secondaryInk)
+                    }
+                    Text(memory.text)
+                        .momoHandwriting(size: 18)
+                        .lineSpacing(8)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("remote.memoryText")
+                }
+            }
+
             ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(evidence.quote).phoneText(.metadata).textSelection(.enabled)
-                    if let time = evidence.recordedAt { Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute()).phoneText(.caption) }
-                }.foregroundStyle(MoMoPalette.muted)
+                    Text(evidence.quote).momoHandwriting(size: 16).lineSpacing(6).textSelection(.enabled)
+                    if let time = evidence.recordedAt {
+                        Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
+                            .font(.caption)
+                    }
+                }
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) { Rectangle().fill(colors.margin.opacity(0.5)).frame(width: 2).accessibilityHidden(true) }
+                .foregroundStyle(colors.secondaryInk)
             }
-        }.phoneText(.body)
+            Text("✍️ MoMo 手写手账")
+                .momoHandwriting(size: 14, weight: .medium, relativeTo: .caption)
+                .foregroundStyle(colors.secondaryInk)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .accessibilityHidden(true)
+        }
+        .foregroundStyle(colors.ink)
+        .memoryNotebookPage()
     }
+}
+
+struct DreamMemorySection: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String?
+    let items: [ContextMemory]
 }
 
 enum DreamMemoryCategory: String, CaseIterable, Identifiable {
@@ -429,6 +1039,81 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         case "user": return ("关于你", "person.crop.circle")
         default: return ("核心记忆", "sparkles")
         }
+    }
+
+    static func sortKey(for memory: ContextMemory) -> (Int, String) {
+        let rank: Int
+        switch memory.kind {
+        case "briefing": rank = 0
+        case "journal": rank = 1
+        case "topic": rank = 2
+        case "person": rank = 3
+        case "user": rank = 4
+        default: rank = 5
+        }
+        let digest = MemoryCardDigest(memory: memory)
+        let dateKey = Self.normalizedSortDate(digest.dateBadge)
+        return (rank, dateKey)
+    }
+
+    private static func normalizedSortDate(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "" }
+        if raw.count == 10 && raw.contains("-") { return raw }
+        let parts = raw.split(separator: "/")
+        if parts.count >= 2, let m = Int(parts[0]) {
+            let dPart = parts[1].prefix(while: { $0.isNumber })
+            if let d = Int(dPart) {
+                return String(format: "2026-%02d-%02d", m, d)
+            }
+        }
+        return raw
+    }
+
+    static func sections(from memories: [ContextMemory], category: DreamMemoryCategory) -> [DreamMemorySection] {
+        let filtered = memories.filter { category.matches($0) }
+        guard !filtered.isEmpty else { return [] }
+        if category != .all {
+            let ordered = sortMemories(filtered)
+            return [DreamMemorySection(id: category.rawValue, title: category.title, subtitle: nil, items: ordered)]
+        }
+        let notebooks = sortMemories(filtered.filter { ["briefing", "journal", "topic", "person"].contains($0.kind) })
+        let coreItems = sortMemories(filtered.filter { !["briefing", "journal", "topic", "person"].contains($0.kind) })
+        if notebooks.isEmpty {
+            return [DreamMemorySection(id: "core", title: "核心记忆与偏好", subtitle: nil, items: coreItems)]
+        }
+        var result: [DreamMemorySection] = [
+            DreamMemorySection(
+                id: "notebook",
+                title: "Dream 活页笔记本",
+                subtitle: "闲时自动整理的晨间简报、每日日志、人物脉络与专项主题",
+                items: notebooks
+            )
+        ]
+        if !coreItems.isEmpty {
+            result.append(
+                DreamMemorySection(
+                    id: "core",
+                    title: "核心记忆与偏好",
+                    subtitle: "长期保留的个人偏好与关键事实索引",
+                    items: coreItems
+                )
+            )
+        }
+        return result
+    }
+
+    static func sortMemories(_ items: [ContextMemory]) -> [ContextMemory] {
+        // Keep stable relative order for items with identical kind and no date (e.g. UI layout fixtures)
+        let indexed = Array(items.enumerated())
+        return indexed.sorted { lhs, rhs in
+            let lKey = sortKey(for: lhs.element)
+            let rKey = sortKey(for: rhs.element)
+            if lKey.0 != rKey.0 { return lKey.0 < rKey.0 }
+            if !lKey.1.isEmpty && !rKey.1.isEmpty && lKey.1 != rKey.1 {
+                return lKey.1 > rKey.1 // Newer dates first
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
     }
 }
 
@@ -747,11 +1432,13 @@ struct DreamBriefingDocument: Equatable, Sendable {
             }
         }
 
-        let overview = overviewLines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let overview = MemoryCardDigest.cleanInlineNoise(
+            overviewLines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        )
         return DreamBriefingDocument(
-            headline: headline,
+            headline: MemoryCardDigest.cleanInlineNoise(headline),
             overview: overview.isEmpty ? "Dream 已在闲时为你整理好近期生活脉络与重点。" : overview,
-            rawMarkdown: markdown,
+            rawMarkdown: MemoryCardDigest.cleanNotebookMarkdownForDetail(markdown),
             cards: Array(cards.prefix(2))
         )
     }
@@ -804,6 +1491,7 @@ struct DreamBriefingDocument: Equatable, Sendable {
 struct DreamHomeCardsSection: View {
     let document: DreamBriefingDocument
     @Binding var dismissedIDs: Set<String>
+    var compact: Bool = false
     let onSelectCard: (DreamBriefingCard) -> Void
     let onOpenBriefing: () -> Void
     let onOpenNotebook: () -> Void
@@ -815,48 +1503,69 @@ struct DreamHomeCardsSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button(action: onOpenBriefing) {
+        if !visibleCards.isEmpty {
+            VStack(alignment: .leading, spacing: compact ? 8 : 12) {
                 HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(MoMoPalette.ink)
-                    Text(document.headline)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(MoMoPalette.ink)
-                    Text("·")
-                        .foregroundStyle(MoMoPalette.muted)
-                    Text(document.overview)
-                        .font(.system(size: 12))
-                        .foregroundStyle(MoMoPalette.muted)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(MoMoPalette.muted)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("assistant.dreamBriefingBanner")
+                    Button(action: onOpenBriefing) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(MoMoPalette.ink)
+                            Text(document.headline)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(MoMoPalette.ink)
+                            Text("·")
+                                .foregroundStyle(MoMoPalette.muted)
+                            Text(document.overview)
+                                .font(.system(size: 12))
+                                .foregroundStyle(MoMoPalette.muted)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(MoMoPalette.muted)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("assistant.dreamBriefingBanner")
 
-            if visibleCards.count == 1, let single = visibleCards.first {
-                singleCardView(single)
-            } else if visibleCards.count >= 2 {
-                HStack(spacing: 12) {
-                    ForEach(visibleCards.prefix(2)) { card in
-                        dualCardView(card)
+                    Button {
+                        for card in visibleCards {
+                            dismissedIDs.insert(card.id)
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(MoMoPalette.muted)
+                            .frame(width: 30, height: 30)
+                            .background(MoMoPalette.paper, in: Circle())
+                            .overlay {
+                                Circle().strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("收起晨间卡片")
+                }
+
+                if visibleCards.count == 1, let single = visibleCards.first {
+                    singleCardView(single)
+                } else if visibleCards.count >= 2 {
+                    HStack(spacing: 12) {
+                        ForEach(visibleCards.prefix(2)) { card in
+                            dualCardView(card)
+                        }
                     }
                 }
             }
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
     }
 
     private func dualCardView(_ card: DreamBriefingCard) -> some View {
@@ -866,18 +1575,18 @@ struct DreamHomeCardsSection: View {
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 DreamDotMatrixArtwork(kind: card.motif, isDark: isDark)
-                    .frame(height: 86)
+                    .frame(height: compact ? 64 : 86)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 8)
                     .padding(.horizontal, 8)
-                Spacer(minLength: 8)
+                Spacer(minLength: compact ? 6 : 8)
                 Text(card.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: compact ? 14 : 15, weight: .semibold))
                     .foregroundStyle(card.motif.titleColor(isDark: isDark))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 14)
-                Spacer(minLength: 8)
+                Spacer(minLength: compact ? 6 : 8)
                 HStack(spacing: 6) {
                     Text(card.subtitle)
                         .font(.system(size: 12))
@@ -889,9 +1598,9 @@ struct DreamHomeCardsSection: View {
                         .foregroundStyle(card.motif.subtitleColor(isDark: isDark))
                 }
                 .padding(.horizontal, 14)
-                .padding(.bottom, 14)
+                .padding(.bottom, compact ? 12 : 14)
             }
-            .frame(maxWidth: .infinity, minHeight: 192, maxHeight: 204, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: compact ? 156 : 192, maxHeight: compact ? 168 : 204, alignment: .topLeading)
             .background(card.motif.surfaceColor(isDark: isDark), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }

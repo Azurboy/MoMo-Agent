@@ -269,7 +269,22 @@ class MemoryReviewTests(unittest.TestCase):
         gateway.data=self.data
         session='momo-review-prose-1'
         _, _, execute_tool=gateway._build_memory_review_session(session)
-        execute_tool('notebook',{'action':'write','category':'briefing','content':'# 今日晨间卡片\n\n- 重点推进 Dream 稳定运行。'})
+        execute_tool('notebook',{
+            'action':'write',
+            'category':'briefing',
+            'content':'# 晨间简报 · 2026-11-10\n\n## 今日脉络\n重点推进 Dream 稳定运行。\n\n## 卡片：理清日记法边界\n- 纹样：片段关联\n- 语境：承接昨日讨论\n\n请帮我梳理日记法边界。',
+        })
+        msgs=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
+        self.assertEqual(1,len(msgs))
+        self.assertIn('晨间简报 · 2026-11-10',msgs[0]['content'])
+        self.assertIn('「理清日记法边界」',msgs[0]['content'])
+        self.assertNotIn('- 纹样：',msgs[0]['content'])
+        self.assertTrue(msgs[0]['operation_id'].startswith('dream-briefing:'))
+        # Idempotent when BRIEFING.md has not changed
+        again=review.deliver_briefing_to_conversation(self.data)
+        self.assertEqual('already_delivered',again['status'])
+        self.assertEqual(1,len(self.chat.execute('SELECT seq FROM messages WHERE role="assistant"').fetchall()))
+
         synthesized=gateway._finalize_memory_review_output(session,'')
         verified=review.outcome(self.data/'hermes',session,synthesized)
         self.assertEqual('updated',verified['outcome'])
