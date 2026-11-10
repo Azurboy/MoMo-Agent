@@ -89,19 +89,28 @@ final class PhoneConnectivityGrant: Sendable {
         var finished = false
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
+    private let onExpire: (@Sendable () -> Void)?
 
-    init(name: String = "Receive Watch recordings") {
+    init(name: String = "Receive Watch recordings", onExpire: (@Sendable () -> Void)? = nil) {
+        self.onExpire = onExpire
         let id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
             self?.expire()
         }
         let finishImmediately = state.withLock { state -> Bool in
-            if state.finished { return true }
+            if state.finished || id == .invalid {
+                state.finished = true
+                return true
+            }
             state.identifier = id
             return false
         }
         if finishImmediately, id != .invalid {
             UIApplication.shared.endBackgroundTask(id)
         }
+    }
+
+    var isFinished: Bool {
+        state.withLock { $0.finished }
     }
 
     func attach(_ task: Task<Void, Never>) {
@@ -139,6 +148,7 @@ final class PhoneConnectivityGrant: Sendable {
         if id != .invalid {
             UIApplication.shared.endBackgroundTask(id)
         }
+        onExpire?()
     }
 }
 
@@ -146,6 +156,17 @@ final class PhoneConnectivityGrant: Sendable {
 enum PhoneConnectivityTask {
     nonisolated static func beginSync() -> PhoneConnectivityGrant {
         PhoneConnectivityGrant()
+    }
+
+    @MainActor
+    static func beginHoldWindow(onExpire: (@Sendable () -> Void)? = nil) -> (@Sendable () -> Void)? {
+        if UIApplication.shared.applicationState == .background,
+           UIApplication.shared.backgroundTimeRemaining < 8 {
+            return nil
+        }
+        let grant = PhoneConnectivityGrant(name: "Hold Watch LocalSync Window", onExpire: onExpire)
+        guard !grant.isFinished else { return nil }
+        return { grant.finish() }
     }
 
     @MainActor

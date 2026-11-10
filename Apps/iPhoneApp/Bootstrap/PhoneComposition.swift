@@ -48,6 +48,13 @@ enum PhoneComposition {
         let identity = ReceiverIdentity(messageID: archive.libraryInstanceID, receiverDeviceID: deviceID,
                                         libraryInstanceID: archive.libraryInstanceID)
         let receiver = PhoneReceiveCoordinator(archive: archive, controls: controls, identity: identity)
+        receiver.beginBackgroundSyncGrant = { [weak receiver] in
+            PhoneConnectivityTask.beginHoldWindow {
+                Task { @MainActor in
+                    receiver?.releaseBackgroundSyncWindow()
+                }
+            }
+        }
         let inbox = archive.inbox
         let phoneBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
         let transport: WatchConnectivityTransport?
@@ -100,9 +107,19 @@ enum PhoneComposition {
                     grant.attach(task)
                 },
                 diagnosticsURL: support.appendingPathComponent("file-queue-diagnostic.json"),
-                receiveAudioBlock: { try await PhoneConnectivityTask.receiveAudioBlock($0, archive: archive) },
-                statusReplyProvider: { [weak localSync] _ in
-                    try await archive.phoneStatus(
+                receiveAudioBlock: { [weak receiver] block in
+                    Task { @MainActor in
+                        receiver?.holdBackgroundSyncWindow(seconds: 15)
+                    }
+                    return try await PhoneConnectivityTask.receiveAudioBlock(block, archive: archive)
+                },
+                statusReplyProvider: { [weak localSync, weak receiver] _ in
+                    let grant = PhoneConnectivityTask.beginSync()
+                    defer { grant.finish() }
+                    Task { @MainActor in
+                        receiver?.holdBackgroundSyncWindow(seconds: 15)
+                    }
+                    return try await archive.phoneStatus(
                         sourceBuild: phoneBuild,
                         localSync: localSync?.currentEndpoint(),
                         refreshObservation: true)

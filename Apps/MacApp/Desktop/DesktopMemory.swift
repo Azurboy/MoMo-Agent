@@ -7,6 +7,7 @@ struct DesktopMemory: View {
     @State private var listMode = true
     @State private var selectedCategory: DreamMemoryCategory? = nil
     @State private var selectedMemoryID: String? = nil
+    @State private var readerBackStack: [(category: DreamMemoryCategory, memoryID: String?)] = []
     @State private var inspecting: ContextMemory?
     @State private var deletingMemory: ContextMemory?
     @State private var expandedFolderIDs: Set<String>? = nil
@@ -108,6 +109,7 @@ struct DesktopMemory: View {
                         ForEach(visibleCategories) { category in
                             let isSelected = activeCategory == category
                             Button {
+                                readerBackStack.removeAll()
                                 selectedCategory = category
                                 selectedMemoryID = nil
                                 if category != .all { listMode = true }
@@ -132,8 +134,31 @@ struct DesktopMemory: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if listMode || reducedMotion || webFailure != nil || activeCategory != .all {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if activeCategory.isNotebookReaderCategory, let memory = activeReaderMemory {
+                            if let prev = readerBackStack.last {
+                                HStack(spacing: 8) {
+                                    Button {
+                                        _ = readerBackStack.popLast()
+                                        selectedCategory = prev.category
+                                        selectedMemoryID = prev.memoryID
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "chevron.left")
+                                                .font(.system(size: 10.5, weight: .semibold))
+                                            Text(prev.category == .all ? "返回目录" : "返回上一页")
+                                                .font(.system(size: 11.5, weight: .medium))
+                                        }
+                                        .foregroundStyle(colors.ink)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(colors.paper, in: Capsule())
+                                        .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
+                                    }
+                                    .buttonStyle(.plain)
+                                    Spacer()
+                                }
+                            }
                             MemoryBinderPageSwitcher(
                                 items: currentReaderItems,
                                 selectedID: memory.id,
@@ -149,6 +174,7 @@ struct DesktopMemory: View {
                                 .textSelection(.enabled)
                                 .environment(\.openURL, OpenURLAction { url in
                                     if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
+                                        readerBackStack.append((category: activeCategory, memoryID: memory.id))
                                         selectedCategory = DreamMemoryCategory.category(for: next)
                                         selectedMemoryID = next.id
                                         return .handled
@@ -211,6 +237,18 @@ struct DesktopMemory: View {
         }
     }
 
+    private func openMemoryFromDirectory(_ memory: ContextMemory) {
+        let targetCat = DreamMemoryCategory.category(for: memory)
+        if targetCat.isNotebookReaderCategory {
+            readerBackStack.append((category: activeCategory, memoryID: selectedMemoryID))
+            selectedCategory = targetCat
+            selectedMemoryID = memory.id
+            listMode = true
+        } else {
+            inspecting = memory
+        }
+    }
+
     @ViewBuilder
     private func desktopDirectoryItemView(_ memory: ContextMemory, colors: MemoryNotebookPalette) -> some View {
         let childMemories = MemoryCardDigest.linkedChildren(for: memory, in: allMemories)
@@ -219,7 +257,7 @@ struct DesktopMemory: View {
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Button { inspecting = memory } label: {
+                Button { openMemoryFromDirectory(memory) } label: {
                     MemoryCardView(memory: memory)
                 }
                 .buttonStyle(.plain)
@@ -280,7 +318,7 @@ struct DesktopMemory: View {
             if !childMemories.isEmpty && isParentExpanded {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(childMemories.enumerated()), id: \.element.id) { idx, child in
-                        Button { inspecting = child } label: {
+                        Button { openMemoryFromDirectory(child) } label: {
                             MemoryDirectoryChildRowLabel(
                                 child: child,
                                 isLast: idx == childMemories.count - 1
@@ -310,6 +348,7 @@ struct DesktopMemory: View {
 private struct DesktopMemoryDetail: View {
     let model: DesktopModel
     @State var memory: ContextMemory
+    @State private var navigationStack: [ContextMemory] = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @State private var confirming = false
@@ -319,7 +358,8 @@ private struct DesktopMemoryDetail: View {
     @State private var contentHeight: CGFloat = 120
     var body: some View {
         let base = content.environment(\.openURL, OpenURLAction { url in
-            if let next = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+            if let next = DreamMemoryLinkResolver.resolve(url: url, in: model.memories), next.id != memory.id {
+                navigationStack.append(memory)
                 memory = next
                 return .handled
             }
@@ -351,26 +391,48 @@ private struct DesktopMemoryDetail: View {
 
     private var content: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        return VStack(alignment: .leading, spacing: 10) {
+        let isNotebook = ["project", "briefing", "topic", "person", "journal"].contains(memory.kind)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
-                    MemoryBinderPageSwitcher(
+                if let previous = navigationStack.last {
+                    Button {
+                        _ = navigationStack.popLast()
+                        memory = previous
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text("返回「\(MemoryCardDigest.cached(for: previous).title)」")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(colors.ink)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(colors.paper, in: Capsule())
+                        .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer(minLength: 4)
+
+                if isNotebook {
+                    MemoryPageStepper(
                         items: siblingMemories,
                         selectedID: memory.id,
-                        onSelect: { memory = $0 }
+                        onSelect: {
+                            navigationStack.removeAll()
+                            memory = $0
+                        }
                     )
                 }
-                Spacer(minLength: 4)
-                Button("忘记", role: .destructive) { confirming = true }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(MoMoPalette.failure)
-                    .disabled(forgetting)
+
                 Button {
                     dismiss()
                 } label: {
                     Text("完成")
-                        .font(.caption.weight(.semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(colors.paper)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
@@ -378,6 +440,19 @@ private struct DesktopMemoryDetail: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            if isNotebook && siblingMemories.count > 1 {
+                MemoryBinderPageSwitcher(
+                    items: siblingMemories,
+                    selectedID: memory.id,
+                    showStepper: false,
+                    onSelect: {
+                        navigationStack.removeAll()
+                        memory = $0
+                    }
+                )
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ClientMemoryContent(memory: memory, onDelete: { confirming = true }).textSelection(.enabled)
@@ -390,9 +465,9 @@ private struct DesktopMemoryDetail: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
-            }.frame(height: min(contentHeight, 340))
+            }.frame(height: min(contentHeight, 380))
             if let error { Text(error).foregroundStyle(MoMoPalette.failure) }
-        }.padding(14).frame(width: 460).fixedSize(horizontal: false, vertical: true)
+        }.padding(14).frame(width: 500).fixedSize(horizontal: false, vertical: true)
         .background(colors.desk)
         .confirmationDialog("忘记这条记忆？", isPresented: $confirming, titleVisibility: .visible) {
             Button("忘记", role: .destructive) {

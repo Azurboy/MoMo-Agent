@@ -208,6 +208,17 @@ extension RecordingStore {
         return end
     }
 
+    public func nextAudioBatchDelay(now: Date = Date()) throws -> TimeInterval? {
+        let admitted = try database.rows("SELECT position FROM control_positions WHERE kind='audio_batch'", read: {
+            sqlite3_column_int64($0, 0)
+        }).first ?? 0
+        guard let first = try pendingChunkBatch(after: admitted, limit: 1).first else { return nil }
+        let manifest = first.chunk.envelope.manifest
+        let duration = Double(manifest.frames.count) / manifest.timebaseHz
+        let deadline = manifest.sealedAt.addingTimeInterval(max(0, 300 - duration))
+        return max(1, deadline.timeIntervalSince(now))
+    }
+
     public func pendingFileReplays(limit: Int = 16) throws -> [UUID] {
         guard (1...ReconciliationLimits.maximumItems).contains(limit) else { throw RecordingReconciliationError.invalidCursor }
         return try database.rows("SELECT chunk_id FROM reconciliation_file_actions WHERE action='retry' ORDER BY rowid LIMIT ?", [.integer(Int64(limit))]) {

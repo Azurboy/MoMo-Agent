@@ -141,6 +141,7 @@ final class WatchRuntime {
     @ObservationIgnored private var interruptedEpochsRecovered = false
     @ObservationIgnored private var flushAudioBatch = false
     @ObservationIgnored private var waitingForAudioBatch = false
+    @ObservationIgnored private var audioBatchRetryDelay: TimeInterval?
     @ObservationIgnored private var invalidAudioBlockSources: Set<UUID> = []
     @ObservationIgnored private let localSyncClient = LocalSyncClient()
     @ObservationIgnored private var localBulkSyncTask: Task<Void, Never>?
@@ -360,16 +361,27 @@ final class WatchRuntime {
             if statusDirty || pendingLocalSyncWork || (pendingChunkCount > 0 && !waitingForAudioBatch) || transport.hasRetryableControls { onBackgroundRetryNeeded() }
             return
         }
-        guard captureReady, statusDirty || pendingLocalSyncWork || (pendingChunkCount > 0 && !waitingForAudioBatch) || transport.hasRetryableControls, pendingReceiver == nil else {
+        let hasActiveWork = statusDirty || pendingLocalSyncWork || (pendingChunkCount > 0 && !waitingForAudioBatch) || transport.hasRetryableControls
+        guard captureReady, hasActiveWork || (pendingChunkCount > 0 && waitingForAudioBatch), pendingReceiver == nil else {
             resetAutomaticRecovery()
             return
         }
-        onBackgroundRetryNeeded()
+        if hasActiveWork {
+            onBackgroundRetryNeeded()
+        }
         guard recoveryTask == nil else { return }
         let id = UUID()
-        var delay = recoveryBackoff.nextDelay()
-        if let hint = transport.nextRetryDelay(), hint > 0 {
-            delay = min(delay, max(1, hint.rounded(.up)))
+        var delay: Double
+        if !hasActiveWork, let batchDelay = audioBatchRetryDelay, batchDelay > 0 {
+            delay = max(1, batchDelay.rounded(.up))
+        } else {
+            delay = Double(recoveryBackoff.nextDelay())
+            if let hint = transport.nextRetryDelay(), hint > 0 {
+                delay = min(delay, max(1, hint.rounded(.up)))
+            }
+            if waitingForAudioBatch, let batchDelay = audioBatchRetryDelay, batchDelay > 0 {
+                delay = min(delay, max(1, batchDelay.rounded(.up)))
+            }
         }
         recoveryTaskID = id
         recoveryTask = Task { @MainActor [weak self, recoverySleep] in
@@ -1529,11 +1541,11 @@ final class WatchRuntime {
                     }
                     try await submitControlBatch(maximumCount: connectivityGrant ? 4 : LinkControlBudget.maximumCount)
                     guard grantID == startingGrant else { return }
-                    try await submitFileBatch(maximumScanned: connectivityGrant ? 256 : 512)
                     if !connectivityGrant {
                         startLocalBulkSyncIfPossible()
                         try await submitAudioBlockCopy()
                     }
+                    try await submitFileBatch(maximumScanned: connectivityGrant ? 256 : 512)
                 }
                 if pendingChunkCount == 0, !pendingLocalSyncWork, !transport.hasRetryableControls, !transport.hasRetryableFiles {
                     transportSyncFailure = nil
@@ -1571,9 +1583,13 @@ final class WatchRuntime {
         var channelDeferred = false
         let startingRound = try await store.reconciliationRoundIsComplete()
         let nowUptime = ProcessInfo.processInfo.systemUptime
-        let roundInterval: TimeInterval = transport.isReachable ? 30 : 900
-        if startingRound, pendingChunkCount > 0, nowUptime - lastReconciliationRoundAt >= roundInterval {
+        let roundInterval: TimeInterval = transport.isReachable ? 30 : 120
+        if pendingChunkCount > 0, nowUptime - lastReconciliationRoundAt >= roundInterval {
             reconciliationRequested = true
+            replayReconciliationRequest = true
+            if !startingRound {
+                lastReconciliationRoundAt = nowUptime
+            }
         }
         let admittedThrough = try await admitAudioBatch()
         if let request = try await store.nextReconciliationRequest(
@@ -1660,14 +1676,19 @@ final class WatchRuntime {
     }
 
     private func admitAudioBatch() async throws -> Int64 {
+        let hasLocalSyncEndpoint: Bool = {
+            guard case .phone(let payload) = phoneStatus?.payload else { return false }
+            return payload.localSync != nil
+        }()
         let interactiveFlush = !connectivityGrant
-            && (transport.isReachable || presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
+            && (transport.isReachable || presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime) || hasLocalSyncEndpoint)
         let flush = flushAudioBatch || interactiveFlush
         flushAudioBatch = false
         do {
             let end = try await store.audioTransferBatchEnd(force: flush)
             let ready = try await store.pendingChunkBatch(after: 0, through: end, limit: 1)
             waitingForAudioBatch = pendingChunkCount > 0 && ready.isEmpty
+            audioBatchRetryDelay = waitingForAudioBatch ? try await store.nextAudioBatchDelay() : nil
             return end
         }
         catch { flushAudioBatch = flushAudioBatch || flush; throw error }
@@ -1724,13 +1745,12 @@ final class WatchRuntime {
     }
 
     private func submitAudioBlockCopy() async throws {
-        guard transport.canTransferAudioBlocks,
+        guard localSyncInFlightChunkIDs.isEmpty,
+              transport.canTransferAudioBlocks,
               let receiver = try await store.boundReceiver(),
               let status = phoneStatus, status.sourceDeviceID == receiver.deviceID,
               case .phone(let payload) = status.payload, payload.libraryInstanceID == receiver.libraryInstanceID,
               payload.audioBlockVersion == AudioBlock.version else { return }
-        let outstandingEnvelopes = try transport.outstandingFileEnvelopes()
-        let outstandingIDs = Set(outstandingEnvelopes.map(\.manifest.chunkID))
         var orderedCandidates: [(id: UUID, sequence: Int64?)] = []
         var seen = Set<UUID>()
         func appendCandidate(_ id: UUID, sequence: Int64? = nil) {
@@ -1746,58 +1766,26 @@ final class WatchRuntime {
         }
         if orderedCandidates.count < LinkSubmissionState.maximumOutstandingFiles {
             let admittedThrough = try await admitAudioBatch()
-            var unsubmitted: [(id: UUID, sequence: Int64)] = []
-            var awaitingReceipt: [(id: UUID, sequence: Int64)] = []
-            var cursor = audioBlockCursor
-            var wrapped = cursor == 0
+            var cursor: Int64 = 0
             var pages = 0
             let pageSize = 32
-            while pages < 8, unsubmitted.count < LinkSubmissionState.maximumOutstandingFiles {
+            while pages < 8, orderedCandidates.count < LinkSubmissionState.maximumOutstandingFiles {
                 pages += 1
                 let batch = try await store.pendingChunkPage(
                     after: cursor,
                     through: admittedThrough,
                     limit: pageSize)
-                if batch.isEmpty {
-                    if !wrapped {
-                        cursor = 0
-                        wrapped = true
-                        continue
-                    }
-                    break
-                }
+                if batch.isEmpty { break }
                 for entry in batch {
                     cursor = entry.sequence
                     let id = entry.chunk.envelope.manifest.chunkID
-                    guard !outstandingIDs.contains(id),
-                          !localSyncInFlightChunkIDs.contains(id),
+                    guard !localSyncInFlightChunkIDs.contains(id),
                           !invalidAudioBlockSources.contains(id) else { continue }
-                    if !transport.hasSubmittedFileTransfer(chunkID: id) {
-                        unsubmitted.append((id, entry.sequence))
-                        if unsubmitted.count >= LinkSubmissionState.maximumOutstandingFiles { break }
-                    } else if awaitingReceipt.count < LinkSubmissionState.maximumOutstandingFiles {
-                        awaitingReceipt.append((id, entry.sequence))
-                    }
+                    appendCandidate(id, sequence: entry.sequence)
+                    if orderedCandidates.count >= LinkSubmissionState.maximumOutstandingFiles { break }
                 }
-                if batch.count < pageSize {
-                    if !wrapped, unsubmitted.isEmpty {
-                        cursor = 0
-                        wrapped = true
-                        continue
-                    }
-                    break
-                }
+                if batch.count < pageSize { break }
             }
-            for item in unsubmitted { appendCandidate(item.id, sequence: item.sequence) }
-            if orderedCandidates.count < LinkSubmissionState.maximumOutstandingFiles {
-                for item in awaitingReceipt { appendCandidate(item.id, sequence: item.sequence) }
-            }
-            if unsubmitted.isEmpty, awaitingReceipt.isEmpty {
-                audioBlockCursor = cursor
-            }
-        }
-        for envelope in outstandingEnvelopes {
-            appendCandidate(envelope.manifest.chunkID)
         }
         for candidate in orderedCandidates {
             guard let chunk = try await store.chunk(id: candidate.id), chunk.state == .ready else { continue }
@@ -1855,7 +1843,15 @@ final class WatchRuntime {
             expectedReceiverDeviceID: expectedDeviceID,
             expectedLibraryInstanceID: expectedLibraryID
         ) else {
-            localSyncRetryAt = ProcessInfo.processInfo.systemUptime + 20
+            localSyncRetryAt = ProcessInfo.processInfo.systemUptime + 12
+            if pendingChunkCount > 0 {
+                if transport.isReachable {
+                    transport.requestPeerStatus()
+                }
+                reconciliationRequested = true
+                replayReconciliationRequest = true
+                await reconcile()
+            }
             return
         }
         logger.notice("Local bulk sync connected via \(route.transport.rawValue, privacy: .public)")
@@ -1919,7 +1915,7 @@ final class WatchRuntime {
         let client = localSyncClient
         let uploadResults = await withTaskGroup(of: (UUID, Result<Receipt, any Error>).self) { group in
             var iterator = validEntries.makeIterator()
-            let maxConcurrency = 4
+            let maxConcurrency = 1
             for _ in 0..<min(maxConcurrency, validEntries.count) {
                 if let next = iterator.next() {
                     let id = next.chunk.envelope.manifest.chunkID

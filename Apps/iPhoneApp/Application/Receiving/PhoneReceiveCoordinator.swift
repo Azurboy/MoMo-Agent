@@ -36,7 +36,11 @@ final class PhoneReceiveCoordinator {
     private var lastChangedNotificationUptime: Double = -.infinity
     private var coalescedChangedTask: Task<Void, Never>?
     private var pendingCoalescedChanged = false
+    private var backgroundSyncRelease: (@Sendable () -> Void)?
+    private var backgroundSyncHoldTask: Task<Void, Never>?
+    private var backgroundSyncHoldID: UUID?
     private let logger = Logger(subsystem: "com.momoagent.ios", category: "WatchStatus")
+    var beginBackgroundSyncGrant: (() -> (@Sendable () -> Void)?)?
     var onChanged: @MainActor () async -> Void = {}
     var onAudioReceived: @MainActor (UUID) -> Void = { _ in }
     var onStatusChanged: @MainActor () async -> Void = {}
@@ -56,17 +60,46 @@ final class PhoneReceiveCoordinator {
     deinit {
         recoveryTask?.cancel()
         coalescedChangedTask?.cancel()
+        backgroundSyncHoldTask?.cancel()
+        backgroundSyncRelease?()
     }
 
     func attach(_ transport: WatchConnectivityTransport) { self.transport = transport }
     func attachLocalSync(_ server: LocalSyncServer?) { self.localSyncServer = server }
 
+    func holdBackgroundSyncWindow(seconds: TimeInterval = 15) {
+        if backgroundSyncRelease == nil {
+            backgroundSyncRelease = beginBackgroundSyncGrant?()
+        }
+        guard backgroundSyncRelease != nil else { return }
+        backgroundSyncHoldTask?.cancel()
+        let id = UUID()
+        backgroundSyncHoldID = id
+        let waitNanoseconds = UInt64(max(1.0, seconds) * 1_000_000_000)
+        backgroundSyncHoldTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: waitNanoseconds)
+            guard !Task.isCancelled, let self, self.backgroundSyncHoldID == id else { return }
+            self.releaseBackgroundSyncWindow()
+        }
+    }
+
+    func releaseBackgroundSyncWindow() {
+        backgroundSyncHoldTask?.cancel()
+        backgroundSyncHoldTask = nil
+        backgroundSyncHoldID = nil
+        let release = backgroundSyncRelease
+        backgroundSyncRelease = nil
+        release?()
+    }
+
     func noteDirectChunkCommitted(chunkID: UUID) {
+        holdBackgroundSyncWindow(seconds: 15)
         onAudioReceived(chunkID)
         scheduleCoalescedChanged(minimumInterval: 2.0)
     }
 
     func noteReceiptsAppliedFromLocalSync(_ items: [ReceiptApplied]) async {
+        holdBackgroundSyncWindow(seconds: 5)
         for item in items {
             try? confirmControlDelivery(.receipt(item.receipt))
         }
@@ -110,6 +143,7 @@ final class PhoneReceiveCoordinator {
     /// Answers interactive Watch control requests over `replyHandler` even while a staged companion update reports `companionNotInstalled`.
     func inlineControlReply(for message: ControlMessage) async -> ControlMessage? {
         guard case .reconcileRequest(let request) = message else { return nil }
+        holdBackgroundSyncWindow(seconds: 15)
         if let transport { peerState = transport.peerState }
         do {
             let response = try await archive.receiveReconcileRequest(request)
@@ -140,9 +174,13 @@ final class PhoneReceiveCoordinator {
         if let transport { peerState = transport.peerState }
         switch event {
         case .audioBlockCommitted(let chunkID):
+            holdBackgroundSyncWindow(seconds: 15)
             onAudioReceived(chunkID)
             scheduleCoalescedChanged(minimumInterval: 1.5)
+        case .filePreserved, .controlPreserved:
+            holdBackgroundSyncWindow(seconds: 15)
         case .statusRefreshRequested:
+            holdBackgroundSyncWindow(seconds: 15)
             await publishStatus(refreshObservation: true)
             return
         case .selectedWatchChanged(let context):
@@ -155,7 +193,15 @@ final class PhoneReceiveCoordinator {
                 && context.sequence > pendingWatchStatusSequence
             if mayPresent { pendingWatchStatusSequence = context.sequence }
             await receiveStatus(snapshot, origin: origin, context: context)
-            if selectedWatchWatermark?.sourceDeviceID != previousSource {
+            let watchHasPendingChunks: Bool = {
+                guard origin != .restoredApplicationContext,
+                      case .watch(let report) = snapshot.payload else { return false }
+                return report.pendingChunkCount > 0
+            }()
+            if watchHasPendingChunks {
+                holdBackgroundSyncWindow(seconds: 15)
+            }
+            if selectedWatchWatermark?.sourceDeviceID != previousSource || (watchHasPendingChunks && beginBackgroundSyncGrant != nil) {
                 await publishStatus(refreshObservation: true)
                 await reconcile()
             }

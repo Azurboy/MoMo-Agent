@@ -303,6 +303,7 @@ private struct FileQueueDiagnostic: Encodable {
             sendImmediately = lastPublishedWatchStatus?.activity != report.activity
                 || lastPublishedWatchStatus?.sessionID != report.sessionID
                 || lastPublishedWatchStatus?.epochID != report.epochID
+                || report.pendingChunkCount > (lastPublishedWatchStatus?.pendingChunkCount ?? 0)
             lastPublishedWatchStatus = report
         } else {
             lastPublishedPhoneStatusMetadata = metadata

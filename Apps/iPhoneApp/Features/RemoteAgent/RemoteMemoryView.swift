@@ -7,6 +7,7 @@ struct RemoteMemoryView: View {
     @State private var forgetting: ContextMemory?
     @State private var selectedCategory: DreamMemoryCategory? = nil
     @State private var selectedMemoryID: String? = nil
+    @State private var readerBackStack: [(category: DreamMemoryCategory, memoryID: String?)] = []
     @State private var expandedFolderIDs: Set<String>? = nil
     @State private var collapsedParentIDs: Set<String> = []
     @Environment(\.colorScheme) private var scheme
@@ -105,6 +106,27 @@ struct RemoteMemoryView: View {
                 }
             } else if activeCategory.isNotebookReaderCategory, let memory = activeReaderMemory {
                 VStack(alignment: .leading, spacing: 8) {
+                    if let prev = readerBackStack.last {
+                        Button {
+                            _ = readerBackStack.popLast()
+                            selectedCategory = prev.category
+                            selectedMemoryID = prev.memoryID
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                Text(prev.category == .all ? "返回目录" : "返回上一页")
+                                    .font(.system(size: 11.5, weight: .medium))
+                            }
+                            .foregroundStyle(colors.ink)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(colors.paper, in: Capsule())
+                            .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 14)
+                    }
                     if currentReaderItems.count > 1 {
                         MemoryBinderPageSwitcher(
                             items: currentReaderItems,
@@ -150,6 +172,7 @@ struct RemoteMemoryView: View {
                 }
                 .environment(\.openURL, OpenURLAction { url in
                     if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
+                        readerBackStack.append((category: activeCategory, memoryID: memory.id))
                         selectedCategory = DreamMemoryCategory.category(for: next)
                         selectedMemoryID = next.id
                         return .handled
@@ -345,6 +368,7 @@ struct RemoteMemoryView: View {
         guard cats.count > 1, let idx = cats.firstIndex(of: activeCategory) else { return }
         let nextIdx = (idx + delta + cats.count) % cats.count
         withAnimation(.easeInOut(duration: 0.2)) {
+            readerBackStack.removeAll()
             selectedCategory = cats[nextIdx]
             selectedMemoryID = nil
         }
@@ -356,6 +380,7 @@ struct RemoteMemoryView: View {
                 ForEach(visibleCategories) { category in
                     let isSelected = activeCategory == category
                     Button {
+                        readerBackStack.removeAll()
                         selectedCategory = category
                         selectedMemoryID = nil
                     } label: {
@@ -403,11 +428,16 @@ private struct MemoryPreviewRow: View {
 private struct RemoteMemoryDetail: View {
     let sync: PhoneContextSync
     @State var memoryID: String
+    @State private var navigationStack: [String] = []
     @State private var confirmingForget = false
     @State private var forgetInFlight = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     private var memory: ContextMemory? { sync.memories.first { $0.id == memoryID && $0.status != "forgotten" } }
+    private var previousMemory: ContextMemory? {
+        guard let prevID = navigationStack.last else { return nil }
+        return sync.memories.first { $0.id == prevID && $0.status != "forgotten" }
+    }
     private var siblingMemories: [ContextMemory] {
         guard let memory else { return [] }
         let active = sync.memories.filter { $0.status != "forgotten" }
@@ -430,21 +460,50 @@ private struct RemoteMemoryDetail: View {
         let colors = MemoryNotebookPalette(scheme: scheme)
         VStack(alignment: .leading, spacing: 8) {
             if let memory {
+                if let prev = previousMemory {
+                    Button {
+                        _ = navigationStack.popLast()
+                        memoryID = prev.id
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text("返回「\(MemoryCardDigest.cached(for: prev).title)」")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(colors.ink)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(colors.paper, in: Capsule())
+                        .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                }
+
                 if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) && siblingMemories.count > 1 {
                     MemoryBinderPageSwitcher(
                         items: siblingMemories,
                         selectedID: memory.id,
-                        onSelect: { memoryID = $0.id }
+                        onSelect: {
+                            navigationStack.removeAll()
+                            memoryID = $0.id
+                        }
                     )
                     .padding(.horizontal, 14)
-                    .padding(.top, 8)
+                    .padding(.top, previousMemory == nil ? 8 : 0)
                 }
 
                 if siblingMemories.count > 1 {
                     TabView(
                         selection: Binding(
                             get: { memory.id },
-                            set: { newID in memoryID = newID }
+                            set: { newID in
+                                navigationStack.removeAll()
+                                memoryID = newID
+                            }
                         )
                     ) {
                         ForEach(siblingMemories) { item in
@@ -477,7 +536,8 @@ private struct RemoteMemoryDetail: View {
             }
         }
         .environment(\.openURL, OpenURLAction { url in
-            if let next = DreamMemoryLinkResolver.resolve(url: url, in: sync.memories) {
+            if let next = DreamMemoryLinkResolver.resolve(url: url, in: sync.memories), next.id != memoryID {
+                navigationStack.append(memoryID)
                 memoryID = next.id
                 return .handled
             }
