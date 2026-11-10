@@ -1194,8 +1194,12 @@ struct DreamDotMatrixArtwork: View {
     var body: some View {
         Canvas { context, size in
             let color = kind.dotColor(isDark: isDark)
-            let w = size.width
-            let h = size.height
+            // Draw in one square coordinate space; the container only changes its uniform scale.
+            let side = min(size.width, size.height)
+            let w = 100.0
+            let h = 100.0
+            context.translateBy(x: (size.width - side) / 2, y: (size.height - side) / 2)
+            context.scaleBy(x: side / w, y: side / h)
             let cx = w * 0.5
             let cy = h * 0.5
 
@@ -1504,156 +1508,91 @@ struct DreamHomeCardsSection: View {
 
     var body: some View {
         if !visibleCards.isEmpty {
-            VStack(alignment: .leading, spacing: compact ? 8 : 12) {
-                HStack(spacing: 8) {
-                    Button(action: onOpenBriefing) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(MoMoPalette.ink)
-                            Text(document.headline)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(MoMoPalette.ink)
-                            Text("·")
-                                .foregroundStyle(MoMoPalette.muted)
-                            Text(document.overview)
-                                .font(.system(size: 12))
-                                .foregroundStyle(MoMoPalette.muted)
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(MoMoPalette.muted)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("assistant.dreamBriefingBanner")
-
-                    Button {
-                        for card in visibleCards {
-                            dismissedIDs.insert(card.id)
-                        }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(MoMoPalette.muted)
-                            .frame(width: 30, height: 30)
-                            .background(MoMoPalette.paper, in: Circle())
-                            .overlay {
-                                Circle().strokeBorder(MoMoPalette.line, lineWidth: 0.5)
-                            }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("收起晨间卡片")
-                }
-
-                if visibleCards.count == 1, let single = visibleCards.first {
-                    singleCardView(single)
-                } else if visibleCards.count >= 2 {
-                    HStack(spacing: 12) {
-                        ForEach(visibleCards.prefix(2)) { card in
-                            dualCardView(card)
-                        }
-                    }
+            LazyVGrid(columns: [GridItem(visibleCards.count == 1 ? .flexible() : .adaptive(minimum: 300), spacing: 10)], spacing: 8) {
+                ForEach(visibleCards.prefix(2)) { card in
+                    cardView(card)
                 }
             }
             .padding(.horizontal, 16)
         }
     }
 
-    private func dualCardView(_ card: DreamBriefingCard) -> some View {
-        Button {
-            dismissedIDs.insert(card.id)
-            onSelectCard(card)
-        } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                DreamDotMatrixArtwork(kind: card.motif, isDark: isDark)
-                    .frame(height: compact ? 64 : 86)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.horizontal, 8)
-                Spacer(minLength: compact ? 6 : 8)
-                Text(card.title)
-                    .font(.system(size: compact ? 14 : 15, weight: .semibold))
-                    .foregroundStyle(card.motif.titleColor(isDark: isDark))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .padding(.horizontal, 14)
-                Spacer(minLength: compact ? 6 : 8)
-                HStack(spacing: 6) {
-                    Text(card.subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(card.motif.subtitleColor(isDark: isDark))
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(card.motif.subtitleColor(isDark: isDark))
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, compact ? 12 : 14)
-            }
-            .frame(maxWidth: .infinity, minHeight: compact ? 156 : 192, maxHeight: compact ? 168 : 204, alignment: .topLeading)
-            .background(card.motif.surfaceColor(isDark: isDark), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("assistant.suggestion.\(card.id)")
-        .contextMenu {
-            Button("查看晨间简报", systemImage: "doc.richtext", action: onOpenBriefing)
-            Button("打开记忆笔记本", systemImage: "book.pages", action: onOpenNotebook)
-            Button("暂时收起", systemImage: "eye.slash") {
+    private func cardView(_ card: DreamBriefingCard) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Button {
                 dismissedIDs.insert(card.id)
+                onSelectCard(card)
+            } label: {
+                HStack(spacing: 10) {
+                    DreamDotMatrixArtwork(kind: card.motif, isDark: isDark)
+                        .frame(width: compact ? 56 : 64, height: compact ? 56 : 64)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(card.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(MoMoPalette.ink)
+                            .lineLimit(2)
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text(card.subtitle)
+                                .font(.system(size: 12))
+                                .lineLimit(2)
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 9, weight: .medium))
+                                .accessibilityHidden(true)
+                        }
+                        .foregroundStyle(MoMoPalette.muted)
+                    }
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.leading, 8)
+                .padding(.vertical, compact ? 8 : 10)
+                .frame(maxHeight: .infinity)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(DreamCardButtonStyle())
+            .accessibilityIdentifier("assistant.suggestion.\(card.id)")
+            .accessibilityLabel(card.title)
+            .accessibilityHint(card.subtitle)
+            .contextMenu {
+                Button("查看晨间简报", systemImage: "doc.richtext", action: onOpenBriefing)
+                Button("打开记忆笔记本", systemImage: "book.pages", action: onOpenNotebook)
+                Button("暂时收起", systemImage: "eye.slash") {
+                    dismissedIDs.insert(card.id)
+                }
+            }
+
+            Button {
+                dismissedIDs.insert(card.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(MoMoPalette.muted)
+                    #if os(macOS)
+                    .frame(width: 28, height: 28)
+                    #else
+                    .frame(width: 44, height: 44)
+                    #endif
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("收起\(card.title)")
+            .accessibilityIdentifier("assistant.dismissSuggestion.\(card.id)")
+            .help("收起这张卡片")
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(MoMoPalette.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                .allowsHitTesting(false)
         }
     }
+}
 
-    private func singleCardView(_ card: DreamBriefingCard) -> some View {
-        Button {
-            dismissedIDs.insert(card.id)
-            onSelectCard(card)
-        } label: {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(card.title)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(card.motif.titleColor(isDark: isDark))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    HStack(spacing: 6) {
-                        Text(card.subtitle)
-                            .font(.system(size: 12))
-                            .foregroundStyle(card.motif.subtitleColor(isDark: isDark))
-                            .lineLimit(2)
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(card.motif.subtitleColor(isDark: isDark))
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                DreamDotMatrixArtwork(kind: card.motif, isDark: isDark)
-                    .frame(width: 118, height: 84)
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, minHeight: 124, maxHeight: 152)
-            .background(card.motif.surfaceColor(isDark: isDark), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("assistant.suggestion.\(card.id)")
-        .contextMenu {
-            Button("查看晨间简报", systemImage: "doc.richtext", action: onOpenBriefing)
-            Button("打开记忆笔记本", systemImage: "book.pages", action: onOpenNotebook)
-            Button("暂时收起", systemImage: "eye.slash") {
-                dismissedIDs.insert(card.id)
-            }
-        }
+private struct DreamCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(MoMoPalette.ink.opacity(configuration.isPressed ? 0.05 : 0),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
