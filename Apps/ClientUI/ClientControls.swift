@@ -452,6 +452,7 @@ struct MemoryNotebookPalette {
     func tab(_ kind: String) -> Color {
         switch kind {
         case "briefing": dark ? Self.rgb(0x665333) : Self.rgb(0xEBD9AF)
+        case "project": dark ? Self.rgb(0x5E4934) : Self.rgb(0xEED6B8)
         case "journal": dark ? Self.rgb(0x405446) : Self.rgb(0xD6E0CA)
         case "person": dark ? Self.rgb(0x674941) : Self.rgb(0xEACDC0)
         case "topic": dark ? Self.rgb(0x42545F) : Self.rgb(0xCFDEE4)
@@ -579,7 +580,7 @@ struct MemoryCardDigest: Equatable, Sendable {
 
     init(memory: ContextMemory) {
         self.badge = DreamMemoryCategory.badge(for: memory)
-        self.isNotebookMarkdown = ["briefing", "journal", "person", "topic"].contains(memory.kind)
+        self.isNotebookMarkdown = ["briefing", "project", "journal", "person", "topic"].contains(memory.kind)
         if memory.status == "stale" {
             self.statusBadge = "原文已改变"
         } else if memory.basis == "inferred" {
@@ -740,6 +741,7 @@ struct MemoryCardDigest: Equatable, Sendable {
     private static func badgeTitleFallback(for kind: String) -> String {
         switch kind {
         case "briefing": return "晨间简报"
+        case "project": return "在研项目活页"
         case "journal": return "每日生活日志"
         case "person": return "人物脉络笔记"
         case "topic": return "主题活页笔记"
@@ -804,6 +806,20 @@ struct MemoryCardDigest: Equatable, Sendable {
             with: "`⏱ $1`",
             options: .regularExpression
         )
+        // Turn inline backtick notebook references like `topics/diary-study.md` into clickable momoagent://memory/... links
+        if let regex = try? NSRegularExpression(pattern: #"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#) {
+            let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed()
+            for match in matches {
+                guard let fullRange = Range(match.range, in: s),
+                      let pathRange = Range(match.range(at: 1), in: s) else { continue }
+                let relPath = String(s[pathRange])
+                let encoded = relPath
+                    .split(separator: "/")
+                    .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                    .joined(separator: "/")
+                s.replaceSubrange(fullRange, with: "[📔 \(relPath)](momoagent://memory/\(encoded))")
+            }
+        }
         // Strip raw 36-char UUIDs if any leaked into prose
         s = s.replacingOccurrences(
             of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
@@ -903,6 +919,7 @@ struct ClientMemoryContent: View {
         if memory.status == "stale" { return "原文已改变，暂不作为当前记忆" }
         switch memory.kind {
         case "briefing": return "Dream · 晨间简报"
+        case "project": return "Dream · 在研项目活页"
         case "journal": return "Dream · 每日生活日志"
         case "person": return "Dream · 人物脉络活页"
         case "topic": return "Dream · 主题与项目活页"
@@ -990,6 +1007,7 @@ struct DreamMemorySection: Identifiable {
 enum DreamMemoryCategory: String, CaseIterable, Identifiable {
     case all
     case briefing
+    case project
     case journal
     case person
     case topic
@@ -1001,6 +1019,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "全部"
         case .briefing: return "晨间简报"
+        case .project: return "在研项目"
         case .journal: return "每日日志"
         case .person: return "人物"
         case .topic: return "主题"
@@ -1012,6 +1031,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "square.grid.2x2"
         case .briefing: return "sun.max"
+        case .project: return "folder.badge.gearshape"
         case .journal: return "calendar"
         case .person: return "person.2"
         case .topic: return "folder"
@@ -1023,6 +1043,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         switch self {
         case .all: return true
         case .briefing: return memory.kind == "briefing"
+        case .project: return memory.kind == "project"
         case .journal: return memory.kind == "journal"
         case .person: return memory.kind == "person"
         case .topic: return memory.kind == "topic"
@@ -1033,6 +1054,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
     static func badge(for memory: ContextMemory) -> (title: String, symbol: String) {
         switch memory.kind {
         case "briefing": return ("晨间简报", "sun.max.fill")
+        case "project": return ("项目活页", "folder.fill.badge.gearshape")
         case "journal": return ("生活日志", "calendar")
         case "person": return ("人物活页", "person.fill")
         case "topic": return ("主题活页", "doc.text.fill")
@@ -1045,11 +1067,12 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         let rank: Int
         switch memory.kind {
         case "briefing": rank = 0
-        case "journal": rank = 1
-        case "topic": rank = 2
-        case "person": rank = 3
-        case "user": rank = 4
-        default: rank = 5
+        case "project": rank = 1
+        case "journal": rank = 2
+        case "topic": rank = 3
+        case "person": rank = 4
+        case "user": rank = 5
+        default: rank = 6
         }
         let digest = MemoryCardDigest(memory: memory)
         let dateKey = Self.normalizedSortDate(digest.dateBadge)
@@ -1076,8 +1099,8 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
             let ordered = sortMemories(filtered)
             return [DreamMemorySection(id: category.rawValue, title: category.title, subtitle: nil, items: ordered)]
         }
-        let notebooks = sortMemories(filtered.filter { ["briefing", "journal", "topic", "person"].contains($0.kind) })
-        let coreItems = sortMemories(filtered.filter { !["briefing", "journal", "topic", "person"].contains($0.kind) })
+        let notebooks = sortMemories(filtered.filter { ["briefing", "project", "journal", "topic", "person"].contains($0.kind) })
+        let coreItems = sortMemories(filtered.filter { !["briefing", "project", "journal", "topic", "person"].contains($0.kind) })
         if notebooks.isEmpty {
             return [DreamMemorySection(id: "core", title: "核心记忆与偏好", subtitle: nil, items: coreItems)]
         }
@@ -1327,6 +1350,34 @@ struct DreamBriefingCard: Identifiable, Equatable, Sendable {
     let subtitle: String
     let prompt: String
     let motif: DreamDotMatrixKind
+
+    func persistenceKeys(headline: String) -> [String] {
+        [id, "\(headline)|\(id)", "\(headline)|\(title)"]
+    }
+
+    func isDismissed(in dismissedIDs: Set<String>, headline: String) -> Bool {
+        persistenceKeys(headline: headline).contains(where: { dismissedIDs.contains($0) })
+    }
+}
+
+enum DreamDismissedCardsStore {
+    private static let key = "momo.dream.dismissedCardKeys.v1"
+
+    static func load() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    static func markDismissed(_ card: DreamBriefingCard, headline: String, into binding: inout Set<String>) {
+        let keys = card.persistenceKeys(headline: headline)
+        for k in keys {
+            binding.insert(k)
+        }
+        var stored = load()
+        for k in keys {
+            stored.insert(k)
+        }
+        UserDefaults.standard.set(Array(stored).sorted(), forKey: key)
+    }
 }
 
 struct DreamBriefingDocument: Equatable, Sendable {
@@ -1385,9 +1436,9 @@ struct DreamBriefingDocument: Equatable, Sendable {
                 if heading.hasPrefix("卡片：") || heading.hasPrefix("卡片:") || heading.hasPrefix("建议：") || heading.hasPrefix("建议:") {
                     let cardTitle = heading.replacingOccurrences(of: #"^(卡片|建议)[：:]\s*"#, with: "", options: .regularExpression)
                     mode = .card(title: cardTitle, motif: nil, context: nil, body: [])
-                } else if heading.contains("今日脉络") || heading.contains("概览") {
+                } else if heading.contains("今日焦点") || heading.contains("今日脉络") || heading.contains("概览") {
                     mode = .overview
-                } else if heading.contains("预热") || heading.contains("未闭环") || heading.contains("重点") {
+                } else if heading.contains("今日必办") || heading.contains("今日行动") || heading.contains("预热") || heading.contains("未闭环") || heading.contains("重点") {
                     mode = .preheat
                 } else {
                     mode = .other
@@ -1452,8 +1503,8 @@ struct DreamBriefingDocument: Equatable, Sendable {
         if let briefing = active.first(where: { $0.kind == "briefing" }) {
             return parse(markdown: briefing.text)
         }
-        // Fallback: if BRIEFING.md hasn't been written yet, synthesize up to 2 cards from recent journal/topic/person notes
-        let notebookItems = active.filter { ["journal", "topic", "person"].contains($0.kind) }
+        // Fallback: if BRIEFING.md hasn't been written yet, synthesize up to 2 cards from recent project/journal/topic/person notes
+        let notebookItems = active.filter { ["project", "journal", "topic", "person"].contains($0.kind) }
         guard !notebookItems.isEmpty else { return nil }
         var synthesized: [DreamBriefingCard] = []
         for (idx, item) in notebookItems.prefix(2).enumerated() {
@@ -1463,6 +1514,9 @@ struct DreamBriefingDocument: Equatable, Sendable {
             let subtitle: String
             let motif: DreamDotMatrixKind
             switch item.kind {
+            case "project":
+                subtitle = "推进在研项目活页"
+                motif = .fragmentLink
             case "journal":
                 subtitle = "回顾近期每日日志"
                 motif = .lifeFlow
@@ -1503,7 +1557,7 @@ struct DreamHomeCardsSection: View {
 
     private var isDark: Bool { colorScheme == .dark }
     private var visibleCards: [DreamBriefingCard] {
-        document.cards.filter { !dismissedIDs.contains($0.id) }
+        document.cards.filter { !$0.isDismissed(in: dismissedIDs, headline: document.headline) }
     }
 
     var body: some View {
@@ -1520,7 +1574,7 @@ struct DreamHomeCardsSection: View {
     private func cardView(_ card: DreamBriefingCard) -> some View {
         HStack(alignment: .top, spacing: 0) {
             Button {
-                dismissedIDs.insert(card.id)
+                DreamDismissedCardsStore.markDismissed(card, headline: document.headline, into: &dismissedIDs)
                 onSelectCard(card)
             } label: {
                 HStack(spacing: 10) {
@@ -1557,12 +1611,12 @@ struct DreamHomeCardsSection: View {
                 Button("查看晨间简报", systemImage: "doc.richtext", action: onOpenBriefing)
                 Button("打开记忆笔记本", systemImage: "book.pages", action: onOpenNotebook)
                 Button("暂时收起", systemImage: "eye.slash") {
-                    dismissedIDs.insert(card.id)
+                    DreamDismissedCardsStore.markDismissed(card, headline: document.headline, into: &dismissedIDs)
                 }
             }
 
             Button {
-                dismissedIDs.insert(card.id)
+                DreamDismissedCardsStore.markDismissed(card, headline: document.headline, into: &dismissedIDs)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .medium))
@@ -1594,5 +1648,130 @@ private struct DreamCardButtonStyle: ButtonStyle {
         configuration.label
             .background(MoMoPalette.ink.opacity(configuration.isPressed ? 0.05 : 0),
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+enum DreamMemoryLinkResolver {
+    static func isMemoryURL(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "momoagent" && url.host?.lowercased() == "memory"
+    }
+
+    static func relativePath(from url: URL) -> String? {
+        guard isMemoryURL(url) else { return nil }
+        let raw = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let decoded = raw.removingPercentEncoding ?? raw
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    static func resolve(url: URL, in memories: [ContextMemory]) -> ContextMemory? {
+        guard let rel = relativePath(from: url) else { return nil }
+        let active = memories.filter { $0.status != "forgotten" }
+        let lowerRel = rel.lowercased()
+
+        // 1. Exact path match
+        if let exact = active.first(where: { $0.path?.lowercased() == lowerRel }) {
+            return exact
+        }
+        if lowerRel == "briefing.md", let b = active.first(where: { $0.kind == "briefing" }) {
+            return b
+        }
+        if lowerRel == "user.md", let u = active.first(where: { $0.kind == "user" }) {
+            return u
+        }
+        if lowerRel == "memory.md", let m = active.first(where: { $0.kind == "memory" }) {
+            return m
+        }
+
+        // 2. Match by category folder + stem or Chinese keywords
+        let parts = rel.split(separator: "/")
+        let folder = parts.count >= 2 ? String(parts[0]).lowercased() : ""
+        let filename = String(parts.last ?? Substring(rel))
+        let stem = filename.replacingOccurrences(of: #"\.md$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        let targetKind: String? = switch folder {
+        case "projects", "project": "project"
+        case "topics", "topic": "topic"
+        case "people", "person": "person"
+        case "journal", "journals": "journal"
+        default: nil
+        }
+
+        let candidates = targetKind != nil ? active.filter { $0.kind == targetKind } : active
+        if let pathSuffixMatch = candidates.first(where: { ($0.path ?? "").lowercased().hasSuffix(filename.lowercased()) }) {
+            return pathSuffixMatch
+        }
+        if let textMatch = candidates.first(where: { $0.text.localizedCaseInsensitiveContains(stem) }) {
+            return textMatch
+        }
+        let stemTokens = stem.split(separator: "-").map(String.init).filter { $0.count >= 2 }
+        let aliasMap: [String: [String]] = [
+            "diary-study": ["日记法"],
+            "ceo-communication": ["CEO", "沟通"],
+            "industry-interviewer": ["行业主持人"],
+            "overview": ["在研项目总览", "项目总览"],
+            "ai-user-research": ["AI 访谈", "用研", "日记法"],
+            "momo-agent": ["MoMo", "智能体"],
+        ]
+        if let aliases = aliasMap[stem.lowercased()] {
+            if let aliasMatch = candidates.first(where: { item in aliases.contains(where: { item.text.localizedCaseInsensitiveContains($0) }) }) {
+                return aliasMatch
+            }
+        }
+        if !stemTokens.isEmpty,
+           let tokenMatch = candidates.first(where: { item in stemTokens.contains(where: { item.text.localizedCaseInsensitiveContains($0) }) }) {
+            return tokenMatch
+        }
+        return candidates.count == 1 ? candidates.first : nil
+    }
+}
+
+struct MemoryNotePreviewSheet: View {
+    @State var memory: ContextMemory
+    let allMemories: [ContextMemory]
+    var onOpenFullNotebook: (() -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        let digest = MemoryCardDigest(memory: memory)
+        NavigationStack {
+            ScrollView {
+                ClientMemoryContent(memory: memory)
+                    .memoryNotebookPage()
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .padding(20)
+                    .frame(maxWidth: .infinity)
+            }
+            .background(colors.desk)
+            .navigationTitle(digest.title)
+            #if !os(macOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                if let onOpenFullNotebook {
+                    ToolbarItem(placement: .automatic) {
+                        Button {
+                            dismiss()
+                            onOpenFullNotebook()
+                        } label: {
+                            Label("全部手账", systemImage: "book.pages")
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .environment(\.openURL, OpenURLAction { url in
+            if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
+                memory = next
+                return .handled
+            }
+            return .systemAction
+        })
+        #if os(macOS)
+        .frame(minWidth: 580, minHeight: 520)
+        #endif
     }
 }

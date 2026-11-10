@@ -192,6 +192,8 @@ li::marker { color: var(--muted); }
 blockquote { border-inline-start: 3px solid var(--line); padding-inline-start: 16px; margin: 16px 0; color: var(--muted); }
 a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 a.recording-source { display:inline-block; font-size:.875em; font-weight:500; padding:3px 2px; margin:-3px 0; }
+a.memory-note-link { display:inline-flex; align-items:center; gap:3px; font-size:.85em; font-weight:500; padding:1px 7px; margin:0 1px; border-radius:6px; background:var(--paper); border:.5px solid var(--line); text-decoration:none; cursor:pointer; }
+a.memory-note-link:hover { border-color:var(--muted); }
 hr { border: 0; border-top: 1px solid var(--line); margin: 24px 0; }
 code { font: 400 var(--chat-code-size)/1.45 ui-monospace, 'SFMono-Regular', Menlo, monospace; letter-spacing: 0; white-space: break-spaces; }
 p code, li code { background: var(--surface); padding: 2px 4px; border-radius: 4px; }

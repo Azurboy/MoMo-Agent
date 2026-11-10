@@ -282,5 +282,41 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
         XCTAssertEqual(sections.map { $0.id }, ["notebook", "core"])
         XCTAssertEqual(sections[0].items.map { $0.id }, ["hermes-journal-1"])
         XCTAssertEqual(sections[1].items.map { $0.id }, ["hermes-memory-legacy"])
+
+        let projectPayload: [String: Any] = [
+            "id": "hermes-project-overview",
+            "text": "# 在研项目总览\n\n- 详见 `topics/diary-study.md`",
+            "kind": "project",
+            "basis": "dream",
+            "status": "current",
+            "revision": 1,
+            "path": "projects/overview.md",
+            "evidence": []
+        ]
+        let projectMemory = try JSONDecoder().decode(
+            ContextMemory.self,
+            from: JSONSerialization.data(withJSONObject: projectPayload)
+        )
+        let projectDigest = MemoryCardDigest(memory: projectMemory)
+        XCTAssertEqual(projectDigest.badge.title, "项目活页")
+        XCTAssertTrue(projectDigest.cleanedNotebookMarkdown.contains("momoagent://memory/topics/diary-study.md"))
+
+        let resolved = DreamMemoryLinkResolver.resolve(
+            url: try XCTUnwrap(URL(string: "momoagent://memory/projects/overview.md")),
+            in: [legacyCore, journal, projectMemory]
+        )
+        XCTAssertEqual(resolved?.id, "hermes-project-overview")
+
+        let card = DreamBriefingCard(
+            id: "dream-card-test-1",
+            title: "收口用研项目待决项",
+            subtitle: "项目一",
+            prompt: "请帮我核对",
+            motif: .memoryLoop
+        )
+        var dismissed: Set<String> = []
+        DreamDismissedCardsStore.markDismissed(card, headline: "晨间简报 · 2026-11-10", into: &dismissed)
+        XCTAssertTrue(card.isDismissed(in: dismissed, headline: "晨间简报 · 2026-11-10"))
+        XCTAssertTrue(card.isDismissed(in: DreamDismissedCardsStore.load(), headline: "晨间简报 · 2026-11-10"))
     }
 }

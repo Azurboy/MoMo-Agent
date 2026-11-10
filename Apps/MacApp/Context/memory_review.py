@@ -2,6 +2,7 @@
 from contextlib import closing, suppress
 import json
 from pathlib import Path
+import re as _re
 import sqlite3
 import time
 import uuid
@@ -234,7 +235,7 @@ def chat_batch(store, data):
 def signature(store, home):
     mem_dir = Path(home) / "memories"
     files = [mem_dir / name for name in ("MEMORY.md", "USER.md", "BRIEFING.md")]
-    for sub in ("journal", "people", "topics"):
+    for sub in ("journal", "people", "projects", "topics"):
         subdir = mem_dir / sub
         if subdir.is_dir():
             files.extend(sorted(subdir.glob("*.md")))
@@ -303,32 +304,38 @@ DREAM_INSTRUCTION = """执行闲时深度 Dream（四阶段认知循环，产出
 2. 【阶段二：全天时空拼图与计划对账（`notebook(category='journal')`）】
    - 调用 `phone_context` 读取到访地点（`visits`）、日程（`calendar`）、待办（`reminders`）与作息（`health`），结合当天录音与聊天（`session_search`），将碎片对话按逻辑日整合写入 `notebook(action='write', category='journal', slug='YYYY-MM-DD', ...)`。
    - 包含：`# YYYY-MM-DD · <当日主线标题>`、`## 时空与事件脉络`（带 `[HH:MM 原音](momoagent://source/...)` 锚点）、`## 思考火花与决策演变`、`## 承诺与待办对账`（对照日历/提醒事项与口头实际进展）。
-3. 【阶段三：跨日 REM 关联与主题活页（`notebook(category='topic')`）】
-   - 用 `search_recordings` 与 `notebook(action='list'/'read')` 跨天回看近期反复出现的痛点、项目或构想，在 `notebook(action='write', category='topic', slug='<主题名>', ...)` 中维护 `## 当前共识与进展`、`## 决策演进脉络（注绝对日期）` 与 `## 待解问题`。
-4. 【阶段四：预测性预计算、晨间卡片与核心索引（`notebook(category='briefing')` + `memory`）】
-   - 结合未闭环线索与今日/明日日程，用 `notebook(action='write', category='briefing', ...)` 更新纯 Markdown 晨间简报 `BRIEFING.md`，格式如下：
+3. 【阶段三：在研项目盘点、防串项隔离与主题活页（`notebook(category='project')` + `notebook(category='topic')`）】
+   - **严禁串项目（Project Isolation）**：用户的录音与聊天通常并行涉及多个互不隶属的项目或工作流。在归档前必须先根据业务域、核心术语、参与人判断每段讨论归属哪个独立项目，**绝不能把 A 项目的排期、规则、人物或客户混写到 B 项目中**；若同一段录音先后聊到两个项目，必须拆分为各自项目的独立记录。
+   - 用 `notebook(action='write', category='project', slug='overview', title='在研项目总览', ...)` 清晰维护当前正在推进的几个独立项目清单（一眼看清当前共有几个在研项目、各自定位与阶段），并为每个独立在研项目维护专属活页 `notebook(action='write', category='project', slug='<项目短名>', ...)`（包含 `## 项目边界与目标`、`## 当前进展与已定结论`、`## 核心相关人`、`## 待决卡点与下一步`）。跨项目的通用方法或专题思考则维护在 `notebook(category='topic')` 中。
+4. 【阶段四：私人管家级极简晨间简报与卡片（`notebook(category='briefing')` + `memory`）】
+   - **私人管家铁律（严禁流水账、极简精准、从过去到现在推导今日行动）**：
+     - 简报**绝不是**对昨天或今天聊天的流水账复述，也**绝不许**写“你已请求整理、助手报告完成、未见正文”之类的元叙事废话。
+     - 你必须像一位真正懂全局上下文的私人管家：贯通**从过去（多日前的立项、铺垫、讨论演进）到现在**的脉络，替用户理清每条在研主线目前走到了哪一步、卡在哪一个节点，直接告诉用户**今天到底该干什么（拍板什么、找谁对齐什么、交付什么）**。
+     - **字数硬约束**：除底部的 `## 卡片：` 区域外，简报正文（`## 今日焦点` + `## 今日必办`）总字数**严格控制在 160 字以内**，刀刀见血、一眼扫完：
      ```markdown
      # 晨间简报 · YYYY-MM-DD
 
-     ## 今日脉络
-     <2-3句温暖、踏实、有据的昨日收尾与今日重点串联>
+     ## 今日焦点
+     <仅 1 句话（≤45字）：站在多日演进脉络上点明今天最关键的收口杠杆，附 `projects/overview.md`>
 
-     ## 重点预热与未闭环线索
-     - <基于历史讨论与日程提前备好的背景要点，附原音或笔记引用>
+     ## 今日必办
+     - **<动词+今日必办动作1>**：<一句话点明从过去演进至今的卡点与今日收口目标> · `projects/<slug>.md` `topics/<slug>.md`
+     - **<动词+今日必办动作2>**：<一句话点明从过去演进至今的卡点与今日收口目标> · `projects/<slug>.md` `people/<slug>.md`
+     - **<动词+今日必办动作3（可选，最多3条）>**：<一句话点明卡点与今日动作> · `projects/<slug>.md`
 
-     ## 卡片：<简短行动标题，不超过14字>
+     ## 卡片：<简短行动标题，不超过10字>
      - 纹样：记忆回环 | 声音片段 | 关系交汇 | 生活流向 | 慢下来 | 片段关联
-     - 语境：<12字以内的来源背景，如“承接昨日工作室接口讨论”>
+     - 语境：<10字以内，标明所属项目>
 
-     <点击卡片后直接发给 MoMo 的具体请求正文，自带关键上下文与背景，最多生成 1-2 张真正高价值的卡片>
+     <点击卡片后直接发给 MoMo 的具体执行请求正文，最多生成 2 张卡片>
      ```
-   - 最后用 `memory` 工具精炼更新 `USER.md` 与 `MEMORY.md`（保持紧凑并索引关键 `people/` 与 `topics/` 笔记）。若所有来源与笔记均已最新且无需任何调整，可返回 `no_change`。"""
+   - 最后用 `memory` 工具精炼更新 `USER.md` 与 `MEMORY.md`。若所有来源与笔记均已最新且无需任何调整，可返回 `no_change`。"""
 
 
 def prompt(job):
     kind = job["kind"]
     instruction = (
-        "整理这批真实聊天。用户本人明确表达可作为个人偏好或目标依据；不要把助手建议当成用户已经接受。按 offset 识别长消息片段，remaining 为真表示尚未读完。若涉及核心项目或人物脉络，也可同步更新 `notebook` 中的 Markdown 笔记。"
+        "整理这批真实聊天。用户本人明确表达可作为个人偏好或目标依据；不要把助手建议当成用户已经接受。按 offset 识别长消息片段，remaining 为真表示尚未读完。若涉及核心项目或人物脉络，请先区分所属项目边界（严禁串项目），同步更新 `notebook(category='project'|'topic'|'person')` 中的 Markdown 笔记。"
         if kind == "chat"
         else DREAM_INSTRUCTION
     )
@@ -338,9 +345,21 @@ def prompt(job):
 def format_briefing_chat_message(markdown: str) -> str:
     """Format BRIEFING.md into a clean, warm assistant message for the chat timeline."""
     import re
+    from urllib.parse import quote
     lines = (markdown or "").strip().splitlines()
     out_lines: list[str] = []
     in_card = False
+
+    def _linkify_notebook_refs(line: str) -> str:
+        def _repl(match: re.Match) -> str:
+            rel = match.group(1).strip()
+            encoded = "/".join(quote(part, safe="") for part in rel.split("/"))
+            return f"[📔 {rel}](momoagent://memory/{encoded})"
+        return re.sub(
+            r"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`",
+            _repl,
+            line,
+        )
 
     for raw_line in lines:
         stripped = raw_line.strip()
@@ -353,6 +372,7 @@ def format_briefing_chat_message(markdown: str) -> str:
         if in_card:
             continue
         cleaned = re.sub(r"\[([^\]]+)\]\(momoagent://source/[^)]+\)", r"[\1]", raw_line)
+        cleaned = _linkify_notebook_refs(cleaned)
         out_lines.append(cleaned)
 
     body = "\n".join(out_lines).strip()
@@ -384,6 +404,9 @@ def deliver_briefing_to_conversation(
 
     source_key = "dream-briefing:" + digest(raw_markdown)
     content = format_briefing_chat_message(raw_markdown)
+    first_line = content.splitlines()[0].strip() if content else ""
+    date_match = _re.search(r"\b(\d{4}-\d{2}-\d{2})\b", first_line)
+    same_day_pattern = f"# %{date_match.group(1)}%" if date_match else (first_line + "\n%" if first_line.startswith("# ") else "")
     now = time.time()
 
     if conversation_store is not None:
@@ -392,6 +415,22 @@ def deliver_briefing_to_conversation(
         ).fetchone()
         if existing:
             return {"status": "already_delivered", "message_id": existing["id"], "source_key": source_key}
+        if same_day_pattern:
+            same_day = conversation_store.db.execute(
+                "SELECT id FROM messages WHERE role='assistant' AND source_key LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (same_day_pattern,),
+            ).fetchone()
+            if same_day:
+                msg_id = same_day["id"]
+                with conversation_store.db:
+                    conversation_store.db.execute(
+                        "UPDATE messages SET content=?, source_key=? WHERE id=?",
+                        (content, source_key, msg_id),
+                    )
+                if callable(publish_live_state):
+                    with suppress(Exception):
+                        publish_live_state()
+                return {"status": "updated_in_place", "message_id": msg_id, "source_key": source_key, "content": content}
         msg_id = conversation_store.append_assistant(source_key, content, now)
         if push_service is not None:
             msg_row = conversation_store.db.execute("SELECT * FROM messages WHERE id=?", (msg_id,)).fetchone()
@@ -424,6 +463,18 @@ def deliver_briefing_to_conversation(
                 existing = db.execute("SELECT id FROM messages WHERE source_key=?", (source_key,)).fetchone()
                 if existing:
                     return {"status": "already_delivered", "message_id": existing["id"], "source_key": source_key}
+                if same_day_pattern:
+                    same_day = db.execute(
+                        "SELECT id FROM messages WHERE role='assistant' AND source_key LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY created_at DESC LIMIT 1",
+                        (same_day_pattern,),
+                    ).fetchone()
+                    if same_day:
+                        with db:
+                            db.execute(
+                                "UPDATE messages SET content=?, source_key=? WHERE id=?",
+                                (content, source_key, same_day["id"]),
+                            )
+                        return {"status": "updated_in_place", "message_id": same_day["id"], "source_key": source_key, "content": content}
                 with db:
                     db.execute(
                         "INSERT INTO messages(id,role,content,created_at,run_id,source_key,attachments_json) VALUES(?,?,?,?,?,?,?)",
@@ -441,6 +492,18 @@ def deliver_briefing_to_conversation(
                 existing = db.execute("SELECT seq FROM messages WHERE operation_id=?", (source_key,)).fetchone()
                 if existing:
                     return {"status": "already_delivered", "message_id": str(existing["seq"]), "source_key": source_key}
+                if same_day_pattern:
+                    same_day = db.execute(
+                        "SELECT seq FROM messages WHERE role='assistant' AND operation_id LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY seq DESC LIMIT 1",
+                        (same_day_pattern,),
+                    ).fetchone()
+                    if same_day:
+                        with db:
+                            db.execute(
+                                "UPDATE messages SET content=?, operation_id=? WHERE seq=?",
+                                (content, source_key, same_day["seq"]),
+                            )
+                        return {"status": "updated_in_place", "message_id": str(same_day["seq"]), "source_key": source_key, "content": content}
                 with db:
                     db.execute(
                         "INSERT INTO messages(role,content,created_at,operation_id) VALUES(?,?,?,?)",

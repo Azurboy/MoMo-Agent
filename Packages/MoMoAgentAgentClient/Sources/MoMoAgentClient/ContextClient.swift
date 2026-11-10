@@ -97,6 +97,7 @@ public struct ContextMemory: Codable, Sendable, Identifiable {
     public let status: String
     public let revision: Int64
     public let evidence: [Evidence]
+    public var path: String? = nil
 }
 public struct MemoryPage: Codable, Sendable {
     public let revision: Int64

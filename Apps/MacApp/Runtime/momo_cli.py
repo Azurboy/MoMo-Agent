@@ -543,7 +543,7 @@ def main() -> int:
 
     nb = sub.add_parser("notebook", help="List, read, write, or remove pure Markdown (.md) living memory notes")
     nb.add_argument("action", choices=("list", "read", "write", "remove"))
-    nb.add_argument("--category", choices=("briefing", "journal", "person", "topic"), default=None)
+    nb.add_argument("--category", choices=("briefing", "project", "journal", "person", "topic"), default=None)
     nb.add_argument("--slug", default=None)
     nb.add_argument("--title", default=None)
     nb.add_argument("--content", default=None)

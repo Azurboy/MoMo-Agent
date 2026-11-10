@@ -31,6 +31,7 @@ PATCH_DROP_HINT = (
 
 NOTEBOOK_KINDS = {
     "briefing": ("BRIEFING.md", None),
+    "project": (None, "projects"),
     "journal": (None, "journal"),
     "person": (None, "people"),
     "topic": (None, "topics"),
@@ -651,6 +652,7 @@ class MoMoMemory:
                     "status": "current",
                     "revision": int(digest[:15], 16),
                     "evidence": [],
+                    "path": str(path.relative_to(helper.memories_dir)),
                 })
         return sorted(items, key=lambda item: item["id"])
 
@@ -671,7 +673,7 @@ class MoMoMemory:
 
     def forget(self, identity: str):
         if not isinstance(identity, str) or not re.fullmatch(
-            r"(?:hermes|momo)-(memory|user|briefing|journal|person|topic)-[0-9a-f]{64}", identity
+            r"(?:hermes|momo)-(memory|user|briefing|project|journal|person|topic)-[0-9a-f]{64}", identity
         ):
             raise Conflict("This is an old memory view; refresh memory before editing")
         norm_id = "hermes-" + identity.split("-", 1)[1]
@@ -704,8 +706,10 @@ class MoMoMemory:
             cat = "topic"
         elif cat == "journals":
             cat = "journal"
+        elif cat == "projects":
+            cat = "project"
         if cat not in NOTEBOOK_KINDS:
-            raise ValueError(f"Unsupported notebook category '{category}'; choose from briefing, journal, person, topic")
+            raise ValueError(f"Unsupported notebook category '{category}'; choose from briefing, project, journal, person, topic")
         fixed_file, folder = NOTEBOOK_KINDS[cat]
         if fixed_file:
             return "BRIEFING", self.memories_dir / fixed_file
@@ -716,7 +720,7 @@ class MoMoMemory:
         filter_cat = None
         if category:
             c = str(category).strip().lower()
-            filter_cat = {"people": "person", "topics": "topic", "journals": "journal"}.get(c, c)
+            filter_cat = {"people": "person", "topics": "topic", "journals": "journal", "projects": "project"}.get(c, c)
         entries = []
         for kind, slug, path in self._notebook_files():
             if filter_cat and kind != filter_cat:

@@ -8,6 +8,7 @@ struct DesktopRoot: View {
     @Bindable var model: DesktopModel
     @State private var sidebarVisible = true
     @State private var recordingCitation: RecordingCitation?
+    @State private var previewingMemoryNote: ContextMemory?
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
 
     var body: some View {
@@ -20,6 +21,7 @@ struct DesktopRoot: View {
                         .background(MoMoPalette.failureBackground).accessibilityIdentifier("desktop.failure")
                 }
                 if model.selection == "sources" { DesktopSources(model: model).padding(.top, 36) }
+                else if model.selection == "memory" { DesktopMemory(model: model).padding(.top, 36) }
                 else { DesktopChat(model: model).padding(.top, 28) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -33,12 +35,34 @@ struct DesktopRoot: View {
         .ignoresSafeArea(.container)
         .environment(\.openURL, OpenURLAction { url in
             guard url.scheme?.lowercased() == "momoagent" else { return .systemAction }
+            if DreamMemoryLinkResolver.isMemoryURL(url) {
+                if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+                    previewingMemoryNote = matched
+                } else {
+                    Task {
+                        await model.loadContext()
+                        if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+                            previewingMemoryNote = matched
+                        } else {
+                            model.selection = "memory"
+                        }
+                    }
+                }
+                return .handled
+            }
             if let citation = RecordingCitation(url: url) { recordingCitation = citation }
             else { model.failure = String(localized: "这条录音来源不可用。") }
             return .handled
         })
         .sheet(item: $recordingCitation) { citation in
             DesktopRecordingCitation(model: model, citation: citation)
+        }
+        .sheet(item: $previewingMemoryNote) { note in
+            MemoryNotePreviewSheet(
+                memory: note,
+                allMemories: model.memories,
+                onOpenFullNotebook: { model.selection = "memory" }
+            )
         }
     }
 
@@ -49,6 +73,7 @@ struct DesktopRoot: View {
                 .padding(.horizontal, 24).padding(.top, 16).padding(.bottom, 20)
             VStack(spacing: 4) {
                 destination("首页", icon: "house", selection: "chat")
+                destination("记忆", icon: "book.pages", selection: "memory")
                 destination("转录", icon: "waveform", selection: "sources")
             }.padding(.horizontal, 12)
             Spacer(minLength: 24)
@@ -234,7 +259,7 @@ struct DesktopChat: View {
     @State private var composeRevision = 0
     @State private var previewAttachment: AgentAttachment?
     @State private var showingActiveTasks = false
-    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var dismissedBriefingCardIDs: Set<String> = DreamDismissedCardsStore.load()
     @State private var showingBriefingDetail = false
     @Environment(\.accessibilityReduceMotion) private var reduced
 
@@ -265,7 +290,7 @@ struct DesktopChat: View {
                         .padding(.top, -headerOverlap)
                 }
                 if draftEmpty, !store.hasActiveTask, let doc = briefingDocument,
-                   !doc.cards.filter({ !dismissedBriefingCardIDs.contains($0.id) }).isEmpty {
+                   !doc.cards.filter({ !$0.isDismissed(in: dismissedBriefingCardIDs, headline: doc.headline) }).isEmpty {
                     DreamHomeCardsSection(
                         document: doc,
                         dismissedIDs: $dismissedBriefingCardIDs,
@@ -328,7 +353,8 @@ struct DesktopChat: View {
                         }
                         Divider()
                         ScrollView {
-                            MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "desktop.dreamBriefingMarkdown")
+                            MarkdownReadingView(markdown: MemoryCardDigest.cleanNotebookMarkdownForDetail(doc.rawMarkdown), accessibilityID: "desktop.dreamBriefingMarkdown", handwriting: true)
+                                .memoryNotebookPage()
                         }
                     }
                     .padding(24)

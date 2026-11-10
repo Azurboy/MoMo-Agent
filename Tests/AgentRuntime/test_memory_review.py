@@ -271,12 +271,21 @@ class MemoryReviewTests(unittest.TestCase):
         _, _, execute_tool=gateway._build_memory_review_session(session)
         execute_tool('notebook',{
             'action':'write',
+            'category':'project',
+            'slug':'overview',
+            'title':'在研项目总览',
+            'content':'# 在研项目总览\n\n- 项目一：用研平台',
+        })
+        self.assertTrue((self.data/'hermes/memories/projects/overview.md').is_file())
+        execute_tool('notebook',{
+            'action':'write',
             'category':'briefing',
-            'content':'# 晨间简报 · 2026-11-10\n\n## 今日脉络\n重点推进 Dream 稳定运行。\n\n## 卡片：理清日记法边界\n- 纹样：片段关联\n- 语境：承接昨日讨论\n\n请帮我梳理日记法边界。',
+            'content':'# 晨间简报 · 2026-11-10\n\n## 今日脉络\n重点推进 Dream 稳定运行，总览见 `projects/overview.md`。\n\n## 卡片：理清日记法边界\n- 纹样：片段关联\n- 语境：承接昨日讨论\n\n请帮我梳理日记法边界。',
         })
         msgs=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
         self.assertEqual(1,len(msgs))
         self.assertIn('晨间简报 · 2026-11-10',msgs[0]['content'])
+        self.assertIn('[📔 projects/overview.md](momoagent://memory/projects/overview.md)',msgs[0]['content'])
         self.assertNotIn('我已在消息窗口下方为你备好',msgs[0]['content'])
         self.assertNotIn('- 纹样：',msgs[0]['content'])
         self.assertTrue(msgs[0]['operation_id'].startswith('dream-briefing:'))
@@ -284,6 +293,15 @@ class MemoryReviewTests(unittest.TestCase):
         again=review.deliver_briefing_to_conversation(self.data)
         self.assertEqual('already_delivered',again['status'])
         self.assertEqual(1,len(self.chat.execute('SELECT seq FROM messages WHERE role="assistant"').fetchall()))
+        # Same-day update modifies the existing briefing bubble in-place instead of spamming duplicates
+        execute_tool('notebook',{
+            'action':'write',
+            'category':'briefing',
+            'content':'# 今日简报 · 2026-11-10\n\n## 今日脉络\n已按项目分流，见 `projects/overview.md` 与 `topics/diary-study.md`。',
+        })
+        msgs_after=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
+        self.assertEqual(1,len(msgs_after))
+        self.assertIn('[📔 topics/diary-study.md](momoagent://memory/topics/diary-study.md)',msgs_after[0]['content'])
 
         synthesized=gateway._finalize_memory_review_output(session,'')
         verified=review.outcome(self.data/'hermes',session,synthesized)

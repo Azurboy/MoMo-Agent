@@ -104,7 +104,7 @@ struct RemoteMemoryView: View {
             if let doc = briefingDocument {
                 NavigationStack {
                     ScrollView {
-                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "remote.briefingSheetMarkdown", handwriting: true)
+                        MarkdownReadingView(markdown: MemoryCardDigest.cleanNotebookMarkdownForDetail(doc.rawMarkdown), accessibilityID: "remote.briefingSheetMarkdown", handwriting: true)
                             .memoryNotebookPage()
                             .padding(20)
                     }
@@ -206,7 +206,7 @@ private struct MemoryPreviewRow: View {
 
 private struct RemoteMemoryDetail: View {
     let sync: PhoneContextSync
-    let memoryID: String
+    @State var memoryID: String
     @State private var confirmingForget = false
     @State private var forgetInFlight = false
     @Environment(\.dismiss) private var dismiss
@@ -224,6 +224,13 @@ private struct RemoteMemoryDetail: View {
                 }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            if let next = DreamMemoryLinkResolver.resolve(url: url, in: sync.memories) {
+                memoryID = next.id
+                return .handled
+            }
+            return .systemAction
+        })
         .background(MemoryNotebookPalette(scheme: scheme).desk.ignoresSafeArea())
         .navigationTitle("记忆详情").navigationBarTitleDisplayMode(.inline)
         .toolbar {

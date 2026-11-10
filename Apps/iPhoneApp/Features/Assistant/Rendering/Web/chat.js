@@ -80,7 +80,7 @@
       USE_PROFILES:{ html:true, mathMl:true },
       FORBID_TAGS:['img','iframe','form','input','object','embed','video','audio','style'],
       FORBID_ATTR:['id','name'],
-      ALLOWED_URI_REGEXP:/^(?:https?:\/\/|momoagent:\/\/source\/)/i
+      ALLOWED_URI_REGEXP:/^(?:https?:\/\/|momoagent:\/\/(?:source|memory)\/)/i
     });
     template.content.querySelectorAll('table').forEach(table => {
       const wrapper = element('div','table-scroll'); wrapper.tabIndex = 0;
@@ -97,6 +97,16 @@
       header.append(element('span','',language));
       pre.replaceWith(wrapper); wrapper.append(header,pre);
     });
+    template.content.querySelectorAll('code').forEach(code => {
+      if (code.closest('pre,a')) return;
+      const raw = (code.textContent || '').trim();
+      if (/^(?:(?:projects|topics|people|journal)\/[^\s/]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)$/i.test(raw)) {
+        const link = element('a','memory-note-link',`📔 ${raw}`);
+        link.href = 'momoagent://memory/' + raw.split('/').map(encodeURIComponent).join('/');
+        link.rel = 'noopener noreferrer';
+        code.replaceWith(link);
+      }
+    });
     template.content.querySelectorAll('a').forEach(link => {
       link.rel = 'noopener noreferrer';
       const href = link.getAttribute('href') || '';
@@ -104,6 +114,8 @@
         link.classList.add('recording-source');
         // Autolinks and model-authored links whose label is the raw URL are also compact.
         if (link.textContent.trim() === href) link.textContent = t("查看录音");
+      } else if (/^momoagent:\/\/memory\//i.test(href)) {
+        link.classList.add('memory-note-link');
       }
     });
     return template.content;

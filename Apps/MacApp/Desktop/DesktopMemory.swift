@@ -135,7 +135,7 @@ struct DesktopMemory: View {
 
 private struct DesktopMemoryDetail: View {
     let model: DesktopModel
-    let memory: ContextMemory
+    @State var memory: ContextMemory
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @State private var confirming = false
@@ -144,10 +144,17 @@ private struct DesktopMemoryDetail: View {
     @State private var source: ContextSource?
     @State private var contentHeight: CGFloat = 120
     var body: some View {
+        let base = content.environment(\.openURL, OpenURLAction { url in
+            if let next = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+                memory = next
+                return .handled
+            }
+            return .systemAction
+        })
         if #available(macOS 15, *) {
-            content.presentationSizing(.fitted)
+            base.presentationSizing(.fitted)
         } else {
-            content
+            base
         }
     }
 

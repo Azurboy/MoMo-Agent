@@ -178,8 +178,9 @@ private struct RemoteConversationView: View {
     @State private var sendFailure: String?
     @State private var viewport = CGRect.zero
     @State private var previewAttachment: AgentAttachment?
-    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var dismissedBriefingCardIDs: Set<String> = DreamDismissedCardsStore.load()
     @State private var showingBriefingDetail = false
+    @State private var previewingMemoryNote: ContextMemory?
 
     private var briefingDocument: DreamBriefingDocument? {
         guard let sync = agent.context else { return nil }
@@ -201,7 +202,7 @@ private struct RemoteConversationView: View {
                 .phoneScrollHeader { identityHeader(isEmpty: false) }
             }
             if draftEmpty, !store.hasActiveTask, let doc = briefingDocument,
-               !doc.cards.filter({ !dismissedBriefingCardIDs.contains($0.id) }).isEmpty {
+               !doc.cards.filter({ !$0.isDismissed(in: dismissedBriefingCardIDs, headline: doc.headline) }).isEmpty {
                 DreamHomeCardsSection(
                     document: doc,
                     dismissedIDs: $dismissedBriefingCardIDs,
@@ -236,11 +237,21 @@ private struct RemoteConversationView: View {
         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: isEmpty)
         .scrollDismissesKeyboard(.interactively)
         .sheet(item: $previewAttachment) { ClientAttachmentPreview(attachment: $0) }
+        .sheet(item: $previewingMemoryNote) { note in
+            MemoryNotePreviewSheet(
+                memory: note,
+                allMemories: agent.context?.memories ?? [],
+                onOpenFullNotebook: openNotebook
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
         .sheet(isPresented: $showingBriefingDetail) {
             if let doc = briefingDocument {
                 NavigationStack {
                     ScrollView {
-                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "assistant.dreamBriefingMarkdown")
+                        MarkdownReadingView(markdown: MemoryCardDigest.cleanNotebookMarkdownForDetail(doc.rawMarkdown), accessibilityID: "assistant.dreamBriefingMarkdown", handwriting: true)
+                            .memoryNotebookPage()
                             .padding(20)
                     }
                     .phonePageSurface()
@@ -256,6 +267,23 @@ private struct RemoteConversationView: View {
                 .presentationDragIndicator(.visible)
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            guard DreamMemoryLinkResolver.isMemoryURL(url) else { return .systemAction }
+            let memories = agent.context?.memories ?? []
+            if let matched = DreamMemoryLinkResolver.resolve(url: url, in: memories) {
+                previewingMemoryNote = matched
+            } else {
+                Task {
+                    await agent.context?.refresh()
+                    if let matched = DreamMemoryLinkResolver.resolve(url: url, in: agent.context?.memories ?? []) {
+                        previewingMemoryNote = matched
+                    } else {
+                        openNotebook()
+                    }
+                }
+            }
+            return .handled
+        })
         .safeAreaInset(edge: .bottom) {
             ClientComposer(text: Binding(get: { store.draft }, set: store.setDraft),
                            store: store,

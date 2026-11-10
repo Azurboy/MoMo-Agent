@@ -1650,6 +1650,7 @@ class SuperAgentGateway:
                 "description": (
                     "Read, write, list, or remove pure Markdown (.md) living notebook pages under memories/: "
                     "category='briefing' (BRIEFING.md with morning overview and 1-2 actionable cards), "
+                    "category='project' (projects/<slug>.md for distinct active projects/workstreams & projects/overview.md), "
                     "category='journal' (journal/YYYY-MM-DD.md or YYYY-Www.md), "
                     "category='person' (people/<name>.md), or category='topic' (topics/<slug>.md). "
                     "Content must be pure Markdown, never JSON."
@@ -1664,7 +1665,7 @@ class SuperAgentGateway:
                         },
                         "category": {
                             "type": "string",
-                            "enum": ["briefing", "journal", "person", "topic"],
+                            "enum": ["briefing", "project", "journal", "person", "topic"],
                             "description": "Notebook section (required for read/write/remove; optional filter for list).",
                         },
                         "slug": {

@@ -516,7 +516,7 @@ final class ChatWebCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDe
                 // Source/version authorization is still performed by RecordingSourceLinks.
                 switch url.scheme?.lowercased() {
                 case "https", "http": if url.host != nil { open(url) }
-                case "momoagent": if url.host == "source" { open(url) }
+                case "momoagent": if url.host == "source" || url.host == "memory" { open(url) }
                 default: break
                 }
             }
