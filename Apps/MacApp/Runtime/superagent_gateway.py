@@ -982,9 +982,21 @@ class SuperAgentGateway:
 
     # ── Proactive Context Watcher ───────────────────────────────────────────────
 
+    def _deliver_briefing_message_if_needed(self) -> str | None:
+        import memory_review
+
+        res = memory_review.deliver_briefing_to_conversation(
+            self.data,
+            conversation_store=getattr(self, "store", None),
+            push_service=getattr(self, "push", None),
+            publish_live_state=getattr(self, "publish_live_state", None),
+        )
+        return res.get("message_id") if isinstance(res, dict) else None
+
     async def _watch_context_loop(self) -> None:
         while not self._stopping:
             with suppress(Exception):
+                self._deliver_briefing_message_if_needed()
                 created = self.ingest_context_sources(settle_seconds=self.TRANSCRIPT_SETTLE_SECONDS)
                 if created:
                     self._trigger_wakeup.set()
@@ -1820,6 +1832,8 @@ class SuperAgentGateway:
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
                         memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        if res.get("success") and str(res.get("category") or category or "").lower() == "briefing":
+                            self._deliver_briefing_message_if_needed()
                         return result_json
                     elif action == "remove":
                         res = momo_mem.remove_notebook(str(category or ""), slug)

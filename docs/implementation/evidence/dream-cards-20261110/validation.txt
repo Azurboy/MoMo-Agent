@@ -1,0 +1,37 @@
+Xcode 27.0 (27A266a), Swift 6.4, default text size
+
+MoMoAgentMac / Debug / macOS arm64
+** BUILD SUCCEEDED **
+
+MoMoAgent / Debug / iPhone 18 Pro Simulator / iOS 27.0 / arm64
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testBeijingCardsLeaveEveryPinExposed]' passed (0.018 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testCalloutsRemainSeparatedForCoincidentAndOffscreenPins]' passed (0.003 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testCalloutsStayFixedThroughoutZoomAndUpdateOnceCameraSettles]' passed (0.017 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testConsecutiveMomentsAtSamePlaceGroupIntoMultiImageStop]' passed (0.002 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testDreamBriefingMarkdownParserExtractsMorningCardsAndMotifs]' passed (0.017 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testDreamCardsSnapshotReview]' passed (0.766 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testFirstProjectionCanSeedDuringMotionAndFitAllCommitsItsVisibilityMode]' passed (0.001 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testMemoryCardDigestAndSectionGroupingExtractsCleanHierarchy]' passed (0.009 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testRouteUsesOnlyTransitWindowAndDeduplicatesDailySnapshots]' passed (0.010 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testSinglePageLayoutFitsManyStopsWithoutPagination]' passed (0.001 seconds).
+Test Case '-[MoMoAgentIntegrationTests.LifeIllustrationJourneyLayoutTests testWorldRouteCurveRemainsLockedUnderMapPanAndZoomTransforms]' passed (0.015 seconds).
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.859 (1.115) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.859 (1.120) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.859 (1.125) seconds
+** TEST SUCCEEDED **
+
+The snapshot probe was temporary and removed after export; the 10 existing LifeIllustrationJourneyLayoutTests remain unchanged.
+Six motifs compared between centered 64x64 and 360x64 containers at 2x: maximum channel difference 1/255, maximum mean channel difference 0.000138/255 (antialias rounding).
+Rendered dream-760-light.png: 760 × 104 pt
+Rendered dream-760-dark.png: 760 × 104 pt
+Rendered dream-390-light.png: 390 × 184 pt
+Rendered dream-390-dark.png: 390 × 184 pt
+Rendered dream-320-light.png: 320 × 184 pt
+Rendered dream-320-dark.png: 320 × 184 pt
+Rendered dream-single-760.png: 760 × 104 pt
+Rendered dream-single-390.png: 390 × 104 pt
+Rendered dream-long-760.png: 760 × 117 pt
+Rendered dream-long-390.png: 390 × 197 pt
+Rendered motifs-square-and-wide.png: 464 × 456 pt
+
+Static SwiftUI audit: high=0. Existing explicit font sizes and fixed decorative/touch dimensions were reviewed.

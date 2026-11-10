@@ -234,12 +234,20 @@ struct DesktopChat: View {
     @State private var composeRevision = 0
     @State private var previewAttachment: AgentAttachment?
     @State private var showingActiveTasks = false
+    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var showingBriefingDetail = false
     @Environment(\.accessibilityReduceMotion) private var reduced
+
+    private var briefingDocument: DreamBriefingDocument? {
+        DreamBriefingDocument.resolve(from: model.memories)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let store = model.taskStore {
                 let snapshot = ChatRenderSnapshot(store: store, readingPosition: model.readingPosition)
                 let isEmpty = store.isEmpty || snapshot.messages.isEmpty
+                let draftEmpty = store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 VStack(spacing: isEmpty ? 18 : 6) {
                     PersonalAgentSlot(size: isEmpty ? 144 : 56, active: store.hasActiveTask, expression: store.hasActiveTask ? .thinking : .present)
                     PhoneBrandWordmark(.momo, size: isEmpty ? 22 : 12)
@@ -255,6 +263,29 @@ struct DesktopChat: View {
                         onRetryMessage: { id in Task { await store.checkAgain(id: id) } })
                         .frame(maxWidth: 780)
                         .padding(.top, -headerOverlap)
+                }
+                if draftEmpty, !store.hasActiveTask, let doc = briefingDocument,
+                   !doc.cards.filter({ !dismissedBriefingCardIDs.contains($0.id) }).isEmpty {
+                    DreamHomeCardsSection(
+                        document: doc,
+                        dismissedIDs: $dismissedBriefingCardIDs,
+                        compact: !isEmpty,
+                        onSelectCard: { card in
+                            store.setDraft(card.prompt)
+                            do {
+                                try store.enqueue()
+                                composeRevision += 1
+                                Task { await store.refresh(userInitiated: true) }
+                            } catch {
+                                model.failure = error.localizedDescription
+                            }
+                        },
+                        onOpenBriefing: { showingBriefingDetail = true },
+                        onOpenNotebook: { model.selection = "memory" }
+                    )
+                    .frame(maxWidth: 760)
+                    .padding(.top, isEmpty ? 0 : 8)
+                    .padding(.bottom, 6)
                 }
                 RemoteTaskControlsView(store: store, returnDesktop: {
                     do { try model.desktopHost?.returnControl() }
@@ -284,7 +315,27 @@ struct DesktopChat: View {
                     .padding(.top, 14)
                     .padding(.trailing, 18)
             }
+            .task { if model.memories.isEmpty { await model.loadContext() } }
             .sheet(item: $previewAttachment) { ClientAttachmentPreview(attachment: $0) }
+            .sheet(isPresented: $showingBriefingDetail) {
+                if let doc = briefingDocument {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Text(doc.headline).phoneText(.heading)
+                            Spacer()
+                            Button("完成") { showingBriefingDetail = false }
+                                .buttonStyle(.plain)
+                        }
+                        Divider()
+                        ScrollView {
+                            MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "desktop.dreamBriefingMarkdown")
+                        }
+                    }
+                    .padding(24)
+                    .frame(minWidth: 520, minHeight: 420)
+                    .background(MoMoPalette.paper)
+                }
+            }
             .animation(reduced ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: model.taskStore?.tasks.isEmpty)
     }
 
