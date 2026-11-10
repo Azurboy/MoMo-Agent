@@ -340,7 +340,6 @@ def format_briefing_chat_message(markdown: str) -> str:
     import re
     lines = (markdown or "").strip().splitlines()
     out_lines: list[str] = []
-    card_titles: list[str] = []
     in_card = False
 
     for raw_line in lines:
@@ -349,9 +348,6 @@ def format_briefing_chat_message(markdown: str) -> str:
             heading = re.sub(r"^#{2,3}\s*", "", stripped)
             if re.match(r"^(卡片|建议)[：:]\s*", heading):
                 in_card = True
-                title = re.sub(r"^(卡片|建议)[：:]\s*", "", heading).strip()
-                if title:
-                    card_titles.append(title)
                 continue
             in_card = False
         if in_card:
@@ -362,9 +358,6 @@ def format_briefing_chat_message(markdown: str) -> str:
     body = "\n".join(out_lines).strip()
     if not body:
         body = (markdown or "").strip()
-    if card_titles:
-        quoted = "、".join(f"「{t}」" for t in card_titles[:2])
-        body += f"\n\n> ✨ 我已在消息窗口下方为你备好 {quoted} 晨间卡片，点击即可直接继续推进。"
     return body
 
 

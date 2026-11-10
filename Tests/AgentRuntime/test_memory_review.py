@@ -277,7 +277,7 @@ class MemoryReviewTests(unittest.TestCase):
         msgs=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
         self.assertEqual(1,len(msgs))
         self.assertIn('晨间简报 · 2026-11-10',msgs[0]['content'])
-        self.assertIn('「理清日记法边界」',msgs[0]['content'])
+        self.assertNotIn('我已在消息窗口下方为你备好',msgs[0]['content'])
         self.assertNotIn('- 纹样：',msgs[0]['content'])
         self.assertTrue(msgs[0]['operation_id'].startswith('dream-briefing:'))
         # Idempotent when BRIEFING.md has not changed
