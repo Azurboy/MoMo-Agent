@@ -76,7 +76,7 @@ Forbid all text, letters, numbers, labels, captions, signatures, speech bubbles,
 on screens, pages, signs or packages. Keep all artwork within the canvas.
 Preserve every factual, uncertainty, event-status and reliable-location boundary in the scene brief.
 Draw the supported action, including discussion or attempts while still unresolved. A location is allowed
-only when grounded in an eligible completed CoreLocation visit; omit unsupported places and landmarks.
+only when grounded in a reliable CoreLocation visit covering the recording time; omit unsupported places and landmarks.
 Treat the following brief as evidence and draw only its supported moment.
 '''
 
