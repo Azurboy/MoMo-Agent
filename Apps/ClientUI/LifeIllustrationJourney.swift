@@ -151,8 +151,6 @@ struct JourneyMapCommand: Equatable {
 struct JourneyProjection: Equatable {
     var pins: [String: CGPoint] = [:]
     var callouts = JourneyCalloutProjection()
-    var routes: [String: [CGPoint]] = [:]
-    var fitted: Set<String> = []
     var mapLoaded = false
     var mapFailed = false
     var cameraCustomized = false
@@ -446,4 +444,116 @@ func journeyCardConnector(pin: CGPoint, frame: CGRect, right: Bool) -> (path: Pa
         p.addCurve(to: anchor, control1: control1, control2: control2)
     }
     return (path, anchor)
+}
+
+/// Computes world-space (`MKMapPoint`) trajectory vertices once per route update so panning and
+/// zooming translate/scale the exact same Earth-anchored curve 1:1 with MapKit's vector tiles.
+func journeyWorldCurvePoints(
+    _ coordinates: [CLLocationCoordinate2D],
+    isRoadFitted: Bool,
+    seed: Int = 0
+) -> [MKMapPoint] {
+    var deduped: [MKMapPoint] = []
+    deduped.reserveCapacity(coordinates.count)
+    for coordinate in coordinates where CLLocationCoordinate2DIsValid(coordinate) {
+        let point = MKMapPoint(coordinate)
+        if let last = deduped.last, hypot(point.x - last.x, point.y - last.y) < 2.0 { continue }
+        deduped.append(point)
+    }
+    guard deduped.count >= 2 else { return deduped }
+
+    if isRoadFitted {
+        // Real MKDirections street polylines already trace roads; apply one light corner-smoothing pass
+        // without injecting synthetic lateral waves that would drift off streets when zooming.
+        guard deduped.count >= 3 else { return deduped }
+        var smoothed: [MKMapPoint] = [deduped[0]]
+        smoothed.reserveCapacity(deduped.count * 2)
+        for index in 0..<(deduped.count - 1) {
+            let a = deduped[index], b = deduped[index + 1]
+            if index > 0 {
+                smoothed.append(MKMapPoint(x: a.x * 0.85 + b.x * 0.15, y: a.y * 0.85 + b.y * 0.15))
+            }
+            if index + 1 < deduped.count - 1 {
+                smoothed.append(MKMapPoint(x: a.x * 0.15 + b.x * 0.85, y: a.y * 0.15 + b.y * 0.85))
+            }
+        }
+        smoothed.append(deduped[deduped.count - 1])
+        return smoothed
+    }
+
+    var waved: [MKMapPoint] = [deduped[0]]
+    for index in 1..<deduped.count {
+        let start = deduped[index - 1], end = deduped[index]
+        let dx = end.x - start.x, dy = end.y - start.y
+        let dist = hypot(dx, dy)
+        if dist > 120 {
+            let nx = -dy / dist, ny = dx / dist
+            let sign: Double = (seed + index).isMultiple(of: 2) ? 1 : -1
+            let amp = dist * 0.085 * sign
+            waved.append(MKMapPoint(x: start.x + dx * 0.34 + nx * amp, y: start.y + dy * 0.34 + ny * amp))
+            waved.append(MKMapPoint(x: start.x + dx * 0.68 - nx * amp * 0.55, y: start.y + dy * 0.68 - ny * amp * 0.55))
+        }
+        waved.append(end)
+    }
+
+    var control = waved
+    for _ in 0..<(waved.count <= 8 ? 2 : 1) {
+        guard control.count >= 3 else { break }
+        var next = [control[0]]
+        for index in 0..<(control.count - 1) {
+            let a = control[index], b = control[index + 1]
+            if index > 0 {
+                next.append(MKMapPoint(x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25))
+            }
+            if index + 1 < control.count - 1 {
+                next.append(MKMapPoint(x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75))
+            }
+        }
+        next.append(control[control.count - 1])
+        control = next
+    }
+
+    // Sample Catmull-Rom cubic segments into dense world-space vertices for crisp MKOverlayRenderer strokes.
+    var dense: [MKMapPoint] = [control[0]]
+    let tension = 0.21
+    let subdivisions = 8
+    for index in 1..<control.count {
+        let before = control[max(0, index - 2)]
+        let start = control[index - 1]
+        let end = control[index]
+        let after = control[min(control.count - 1, index + 1)]
+        let c1 = MKMapPoint(x: start.x + (end.x - before.x) * tension, y: start.y + (end.y - before.y) * tension)
+        let c2 = MKMapPoint(x: end.x - (after.x - start.x) * tension, y: end.y - (after.y - start.y) * tension)
+        for step in 1...subdivisions {
+            let t = Double(step) / Double(subdivisions)
+            let u = 1.0 - t
+            let x = u * u * u * start.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x
+            let y = u * u * u * start.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y
+            dense.append(MKMapPoint(x: x, y: y))
+        }
+    }
+    return dense
+}
+
+func journeyWorldRouteSample(_ points: [MKMapPoint], fraction: Double) -> (point: MKMapPoint, angle: Double)? {
+    guard points.count >= 2 else { return nil }
+    var lengths: [Double] = [0]
+    lengths.reserveCapacity(points.count)
+    var total = 0.0
+    for index in 1..<points.count {
+        total += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y)
+        lengths.append(total)
+    }
+    guard total > 1 else { return nil }
+    let target = min(max(0.05, fraction), 0.95) * total
+    for index in 1..<points.count where lengths[index] >= target {
+        let segStart = lengths[index - 1]
+        let segLen = max(0.001, lengths[index] - segStart)
+        let t = (target - segStart) / segLen
+        let a = points[index - 1], b = points[index]
+        let point = MKMapPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+        return (point, atan2(b.y - a.y, b.x - a.x))
+    }
+    let a = points[points.count - 2], b = points[points.count - 1]
+    return (b, atan2(b.y - a.y, b.x - a.x))
 }
