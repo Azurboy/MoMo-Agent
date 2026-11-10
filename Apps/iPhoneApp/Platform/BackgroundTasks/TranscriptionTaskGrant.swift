@@ -137,6 +137,7 @@ final class ReceivedAudioTranscription {
     private let start: TranscriptionTaskGrant.Start
     private let followUp: TranscriptionTaskGrant.FollowUpStart?
     private let stop: TranscriptionTaskGrant.Stop
+    private let canStartNewGrant: @MainActor () -> Bool
     var onActivityChanged: (@MainActor () -> Void)?
     private var grant: TranscriptionTaskGrant? {
         didSet {
@@ -150,14 +151,20 @@ final class ReceivedAudioTranscription {
     private var generation: UInt64 = 0
     private var receivedWhileRunning = false
     private var receivedAfterExpiration = false
+    private var receivedDuringSystemTask = false
     private var expirationReason: TranscriptionBatchEndReason?
     private var systemTaskActive = false
     private var handoffWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(begin: @escaping Begin, start: @escaping TranscriptionTaskGrant.Start,
          followUp: TranscriptionTaskGrant.FollowUpStart? = nil,
-         stop: @escaping TranscriptionTaskGrant.Stop) {
-        self.begin = begin; self.start = start; self.followUp = followUp; self.stop = stop
+         stop: @escaping TranscriptionTaskGrant.Stop,
+         canStartNewGrant: @escaping @MainActor () -> Bool = { true }) {
+        self.begin = begin
+        self.start = start
+        self.followUp = followUp
+        self.stop = stop
+        self.canStartNewGrant = canStartNewGrant
     }
 
     deinit {
@@ -169,12 +176,16 @@ final class ReceivedAudioTranscription {
     }
 
     func request() {
-        guard !systemTaskActive else { return }
+        guard !systemTaskActive else {
+            receivedDuringSystemTask = true
+            return
+        }
         guard grant == nil else {
             if expirationReason == .backgroundExpired { receivedAfterExpiration = true }
             else { receivedWhileRunning = true }
             return
         }
+        guard canStartNewGrant() else { return }
         generation &+= 1
         let revision = generation
         let grant = makeGrant(revision: revision)
@@ -195,6 +206,7 @@ final class ReceivedAudioTranscription {
         expirationReason = nil
         return TranscriptionTaskGrant(start: start, followUp: followUp, stop: stop) { [weak self] success, failure in
             guard let self, self.generation == revision else { return }
+            let grantEndReason = self.grant?.endReason
             self.grant = nil
             // An arrival can race the worker's final empty-queue check. Recheck within the same OS grant.
             if success, self.receivedWhileRunning, self.release != nil, !self.systemTaskActive {
@@ -203,8 +215,13 @@ final class ReceivedAudioTranscription {
                 Task { await next.run() }
                 return
             }
-            // Only a new delivery after expiration may request new OS time, after the old stop succeeds.
-            let resumeDelivery = self.receivedAfterExpiration && self.expirationReason == .backgroundExpired
+            // A new delivery during a proactive finite-budget stop or after UIKit expiration may request
+            // fresh OS time once the old grant has released its background task, if budget is available.
+            let resumeAfterExpiration = self.receivedAfterExpiration && self.expirationReason == .backgroundExpired
+            let resumeAfterProactiveStop = self.receivedWhileRunning
+                && grantEndReason == .backgroundExpired
+                && self.expirationReason == nil
+            let resumeDelivery = (resumeAfterExpiration || resumeAfterProactiveStop)
                 && failure == nil && !self.systemTaskActive
             self.receivedWhileRunning = false
             self.receivedAfterExpiration = false
@@ -213,7 +230,7 @@ final class ReceivedAudioTranscription {
             let waiters = self.handoffWaiters
             self.handoffWaiters.removeAll()
             for waiter in waiters { waiter.resume() }
-            if resumeDelivery { self.request() }
+            if resumeDelivery, self.canStartNewGrant() { self.request() }
         }
     }
 
@@ -224,9 +241,16 @@ final class ReceivedAudioTranscription {
         await withCheckedContinuation { handoffWaiters.append($0) }
     }
 
-    func systemTaskFinished() { systemTaskActive = false }
+    func systemTaskFinished() {
+        systemTaskActive = false
+        if receivedDuringSystemTask {
+            receivedDuringSystemTask = false
+            if canStartNewGrant() { request() }
+        }
+    }
 
     func expire(reason: TranscriptionBatchEndReason = .backgroundExpired) {
+        if reason != .backgroundExpired { receivedDuringSystemTask = false }
         if expirationReason == nil || reason != .backgroundExpired { expirationReason = reason }
         if reason != .backgroundExpired { receivedAfterExpiration = false }
         // UIKit expiration must release OS time synchronously, before the durable stop awaits.

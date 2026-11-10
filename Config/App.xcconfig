@@ -3,7 +3,7 @@
 
 // Shared by iPhone and Watch. Update both values before delivering a new app.
 MARKETING_VERSION = 0.4.11
-CURRENT_PROJECT_VERSION = 71
+CURRENT_PROJECT_VERSION = 72
 
 MOMO_PHONE_BUNDLE_ID = com.momoagent.ios
 MOMO_MAC_BUNDLE_ID = com.momoagent.mac.dev
