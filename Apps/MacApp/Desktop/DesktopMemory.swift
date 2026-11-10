@@ -193,43 +193,50 @@ private struct DesktopMemoryDetail: View {
     }
 
     private var content: some View {
-        let digest = MemoryCardDigest.cached(for: memory)
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Text(digest.title)
-                    .momoHandwriting(size: 19, weight: .semibold, relativeTo: .title3)
-                    .foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
-                    .lineLimit(1)
-                Spacer()
-                Button("完成") { dismiss() }.buttonStyle(.plain).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
-            }
-            if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
-                MemoryBinderPageSwitcher(
-                    items: siblingMemories,
-                    selectedID: memory.id,
-                    onSelect: { memory = $0 }
-                )
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
+                    MemoryBinderPageSwitcher(
+                        items: siblingMemories,
+                        selectedID: memory.id,
+                        onSelect: { memory = $0 }
+                    )
+                }
+                Spacer(minLength: 4)
+                Button("忘记", role: .destructive) { confirming = true }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(MoMoPalette.failure)
+                    .disabled(forgetting)
+                Button {
+                    dismiss()
+                } label: {
+                    Text("完成")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(colors.paper)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(colors.ink, in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     ClientMemoryContent(memory: memory).textSelection(.enabled)
                     ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
                         if let recording = model.sources.first(where: { $0.id == evidence.sourceId && $0.revision == evidence.sourceRevision }) {
                             Button("查看录音原文", systemImage: "text.alignleft") { source = recording }
                         } else {
-                            Text("来源已变更或不可用，原引用保留。").phoneText(.caption).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
+                            Text("来源已变更或不可用，原引用保留。").phoneText(.caption).foregroundStyle(colors.secondaryInk)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
-            }.frame(height: min(contentHeight, 440))
+            }.frame(height: min(contentHeight, 340))
             if let error { Text(error).foregroundStyle(MoMoPalette.failure) }
-            HStack {
-                Spacer()
-                Button("忘记", role: .destructive) { confirming = true }.buttonStyle(.plain).foregroundStyle(MoMoPalette.failure).disabled(forgetting)
-            }
-        }.padding(20).frame(width: 540).fixedSize(horizontal: false, vertical: true)
-        .background(MemoryNotebookPalette(scheme: scheme).desk)
+        }.padding(14).frame(width: 460).fixedSize(horizontal: false, vertical: true)
+        .background(colors.desk)
         .confirmationDialog("忘记这条记忆？", isPresented: $confirming, titleVisibility: .visible) {
             Button("忘记", role: .destructive) {
                 forgetting = true

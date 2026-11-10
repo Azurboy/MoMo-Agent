@@ -433,7 +433,7 @@ extension View {
     }
 
     func memoryNotebookPage() -> some View {
-        self.padding(.leading, 32).padding(.trailing, 18).padding(.vertical, 16)
+        self.padding(.leading, 44).padding(.trailing, 20).padding(.top, 14).padding(.bottom, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(MemoryNotebookPaper())
     }
@@ -442,11 +442,12 @@ extension View {
 struct MemoryNotebookPalette {
     let scheme: ColorScheme
     private var dark: Bool { scheme == .dark }
-    var paper: Color { dark ? Self.rgb(0x1E1C19) : Self.rgb(0xFBF7EE) }
-    var desk: Color { dark ? Self.rgb(0x141310) : Self.rgb(0xEEE8DD) }
-    var ink: Color { dark ? Self.rgb(0xF3EBDD) : Self.rgb(0x302B25) }
+    var paper: Color { dark ? Self.rgb(0x1E1C19) : Self.rgb(0xFAF5EA) }
+    var desk: Color { dark ? Self.rgb(0x141310) : Self.rgb(0xE8DFD1) }
+    var cover: Color { dark ? Self.rgb(0x28231D) : Self.rgb(0xD8C8B0) }
+    var ink: Color { dark ? Self.rgb(0xF3EBDD) : Self.rgb(0x2E2822) }
     var secondaryInk: Color { dark ? Self.rgb(0xC9BDAA) : Self.rgb(0x695C4B) }
-    var margin: Color { dark ? Self.rgb(0xD29C85) : Self.rgb(0x9E5040) }
+    var margin: Color { dark ? Self.rgb(0xD29C85) : Self.rgb(0xA64B3B) }
 
     func tab(_ kind: String) -> Color {
         switch kind {
@@ -471,29 +472,76 @@ private struct MemoryNotebookPaper: View {
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(colors.paper)
-            .overlay {
-                Canvas { context, size in
-                    var rules = Path()
-                    for y in stride(from: 32.0, through: size.height - 8, by: 24.0) {
-                        rules.move(to: CGPoint(x: 16, y: y))
-                        rules.addLine(to: CGPoint(x: size.width - 14, y: y))
-                    }
-                    context.stroke(rules, with: .color(colors.secondaryInk.opacity(contrast == .increased ? 0.14 : 0.08)), lineWidth: 0.5)
-                    var margin = Path()
-                    margin.move(to: CGPoint(x: 20, y: 0))
-                    margin.addLine(to: CGPoint(x: 20, y: size.height))
-                    context.stroke(margin, with: .color(colors.margin.opacity(0.28)), lineWidth: 0.7)
+        let borderOpacity = contrast == .increased ? 0.50 : 0.22
+        ZStack {
+            // Stacked lower pages for physical book thickness
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colors.paper.opacity(0.82))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(colors.secondaryInk.opacity(borderOpacity), lineWidth: 0.6)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(colors.secondaryInk.opacity(contrast == .increased ? 0.45 : 0.14), lineWidth: 0.5)
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+                .offset(x: 3.5, y: 3.5)
+
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colors.paper.opacity(0.92))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(colors.secondaryInk.opacity(borderOpacity), lineWidth: 0.6)
+                }
+                .offset(x: 1.8, y: 1.8)
+
+            // Active top fountain-pen ruled sheet with 6-ring binder holes & metallic rings
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colors.paper)
+                .overlay {
+                    Canvas { context, size in
+                        // Double top header rule
+                        var headerRule = Path()
+                        headerRule.move(to: CGPoint(x: 34, y: 40))
+                        headerRule.addLine(to: CGPoint(x: size.width - 14, y: 40))
+                        headerRule.move(to: CGPoint(x: 34, y: 42.2))
+                        headerRule.addLine(to: CGPoint(x: size.width - 14, y: 42.2))
+                        context.stroke(headerRule, with: .color(colors.margin.opacity(0.32)), lineWidth: 0.65)
+
+                        // Horizontal ruled lines (22pt pitch matching compact handwriting)
+                        var rules = Path()
+                        for y in stride(from: 64.0, through: size.height - 12, by: 22.0) {
+                            rules.move(to: CGPoint(x: 34, y: y))
+                            rules.addLine(to: CGPoint(x: size.width - 14, y: y))
+                        }
+                        context.stroke(rules, with: .color(colors.secondaryInk.opacity(contrast == .increased ? 0.16 : 0.09)), lineWidth: 0.5)
+
+                        // Double vertical red/terracotta margin lines
+                        var margin = Path()
+                        margin.move(to: CGPoint(x: 33, y: 0))
+                        margin.addLine(to: CGPoint(x: 33, y: size.height))
+                        margin.move(to: CGPoint(x: 35.2, y: 0))
+                        margin.addLine(to: CGPoint(x: 35.2, y: size.height))
+                        context.stroke(margin, with: .color(colors.margin.opacity(0.34)), lineWidth: 0.65)
+
+                        // Punched binder holes + metallic binder rings on left spine
+                        for y in stride(from: 30.0, through: size.height - 22, by: 46.0) {
+                            let hole = CGRect(x: 13.5, y: y - 4.5, width: 9, height: 9)
+                            context.fill(Path(ellipseIn: hole), with: .color(colors.desk))
+                            context.stroke(Path(ellipseIn: hole), with: .color(colors.secondaryInk.opacity(0.35)), lineWidth: 0.7)
+
+                            let ring = CGRect(x: 1.5, y: y - 1.8, width: 17, height: 3.6)
+                            let ringPath = Path(roundedRect: ring, cornerRadius: 1.8)
+                            context.fill(ringPath, with: .color(colors.secondaryInk.opacity(0.50)))
+                            context.stroke(ringPath, with: .color(colors.ink.opacity(0.28)), lineWidth: 0.45)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(colors.secondaryInk.opacity(borderOpacity), lineWidth: 0.7)
+                }
+        }
+        .shadow(color: .black.opacity(scheme == .dark ? 0.26 : 0.06), radius: 5, x: 0, y: 2)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -502,25 +550,50 @@ struct MemoryBinderTab: View {
     let isSelected: Bool
     @Environment(\.colorScheme) private var scheme
 
+    private var kindKey: String {
+        switch category {
+        case .project: "project"
+        case .briefing: "briefing"
+        case .journal: "journal"
+        case .person: "person"
+        case .topic: "topic"
+        default: "memory"
+        }
+    }
+
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        Text(category.title)
-            .font(.subheadline.weight(isSelected ? .semibold : .regular))
-            .foregroundStyle(isSelected ? colors.ink : colors.secondaryInk)
-            .padding(.horizontal, 12)
-            .frame(minHeight: 34)
-            .background(
-                isSelected ? colors.paper : colors.paper.opacity(0.45),
-                in: Capsule()
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: 9,
+            bottomLeadingRadius: 3,
+            bottomTrailingRadius: 3,
+            topTrailingRadius: 9,
+            style: .continuous
+        )
+        HStack(spacing: 5) {
+            Circle()
+                .fill(colors.desk)
+                .frame(width: 5, height: 5)
+                .overlay { Circle().strokeBorder(colors.secondaryInk.opacity(0.45), lineWidth: 0.5) }
+                .accessibilityHidden(true)
+            Text(category.title)
+                .momoHandwriting(size: 13.5, weight: isSelected ? .semibold : .regular)
+                .foregroundStyle(colors.ink)
+        }
+        .padding(.horizontal, 11)
+        .padding(.top, isSelected ? 7 : 5)
+        .padding(.bottom, isSelected ? 7 : 5)
+        .frame(minHeight: 34)
+        .background(colors.tab(kindKey).opacity(isSelected ? 1.0 : 0.62), in: shape)
+        .overlay {
+            shape.strokeBorder(
+                colors.secondaryInk.opacity(isSelected ? 0.42 : 0.20),
+                lineWidth: isSelected ? 0.9 : 0.5
             )
-            .overlay {
-                Capsule().strokeBorder(
-                    isSelected ? colors.margin.opacity(0.55) : colors.secondaryInk.opacity(0.14),
-                    lineWidth: isSelected ? 1 : 0.5
-                )
-            }
-            .contentShape(Capsule())
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        }
+        .offset(y: isSelected ? 0 : 2)
+        .contentShape(Rectangle())
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -803,7 +876,15 @@ struct MemoryCardDigest: Equatable, Sendable {
     }
 
     static func cleanNotebookMarkdownForDetail(_ markdown: String) -> String {
-        var s = markdown
+        var s = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip leading # H1 line when body content follows (header margin renders digest.title)
+        let lines = s.components(separatedBy: .newlines)
+        if lines.count > 1, let first = lines.first?.trimmingCharacters(in: .whitespaces), first.hasPrefix("# ") {
+            let remainder = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remainder.isEmpty {
+                s = remainder
+            }
+        }
         if s.contains("momoagent://source/") {
             s = replace(sourceLinkRegex, in: s, with: "`⏱ $1`")
         }
@@ -841,10 +922,10 @@ struct MemoryCardView: View {
                 .padding(.vertical, 2)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(digest.title)
-                        .momoHandwriting(size: 16, weight: .semibold, relativeTo: .headline)
+                        .momoHandwriting(size: 14.5, weight: .semibold, relativeTo: .headline)
                         .foregroundStyle(colors.ink)
                         .lineLimit(1)
                     Spacer(minLength: 4)
@@ -856,7 +937,7 @@ struct MemoryCardView: View {
                 }
                 if let firstHighlight = digest.highlights.first {
                     Text(firstHighlight)
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundStyle(colors.secondaryInk)
                         .lineLimit(1)
                 }
@@ -867,8 +948,8 @@ struct MemoryCardView: View {
                 .foregroundStyle(colors.secondaryInk.opacity(0.6))
                 .accessibilityHidden(true)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(colors.paper, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
@@ -889,36 +970,40 @@ struct ClientMemoryContent: View {
     var body: some View {
         let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 14) {
-            if let date = digest.dateBadge {
-                HStack {
-                    Spacer()
+        VStack(alignment: .leading, spacing: 10) {
+            // Skeuomorphic top margin header sitting right above the double red rule (y=40)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(digest.title)
+                    .momoHandwriting(size: 15, weight: .semibold, relativeTo: .headline)
+                    .foregroundStyle(colors.ink)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 6)
+                if let date = digest.dateBadge {
                     Text(date)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(colors.secondaryInk)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(colors.margin)
                 }
             }
+            .padding(.bottom, 4)
 
             if digest.isNotebookMarkdown {
                 MarkdownReadingView(markdown: digest.cleanedNotebookMarkdown,
                                     accessibilityID: "remote.memoryText", handwriting: true)
             } else {
                 if !digest.highlights.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(digest.title)
-                            .momoHandwriting(size: 18, weight: .semibold, relativeTo: .headline)
-                            .accessibilityAddTraits(.isHeader)
+                    VStack(alignment: .leading, spacing: 5) {
                         ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text("·").accessibilityHidden(true)
                                 Text(point).fixedSize(horizontal: false, vertical: true)
-                            }.momoHandwriting(size: 15)
+                            }.momoHandwriting(size: 13.5)
                         }
-                    }.lineSpacing(4)
+                    }.lineSpacing(2)
                 }
                 Text(memory.text)
-                    .momoHandwriting(size: 15)
-                    .lineSpacing(4)
+                    .momoHandwriting(size: 13.5)
+                    .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
@@ -926,14 +1011,14 @@ struct ClientMemoryContent: View {
             }
 
             ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(evidence.quote).momoHandwriting(size: 14).lineSpacing(4).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(evidence.quote).momoHandwriting(size: 12.5).lineSpacing(2).textSelection(.enabled)
                     if let time = evidence.recordedAt {
                         Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
                             .font(.caption2)
                     }
                 }
-                .padding(.leading, 10)
+                .padding(.leading, 8)
                 .overlay(alignment: .leading) { Rectangle().fill(colors.margin.opacity(0.45)).frame(width: 2).accessibilityHidden(true) }
                 .foregroundStyle(colors.secondaryInk)
             }
@@ -1783,47 +1868,86 @@ struct MemoryNotePreviewSheet: View {
 
     private var siblingMemories: [ContextMemory] {
         let active = allMemories.filter { $0.status != "forgotten" && $0.kind == memory.kind }
-        return DreamMemoryCategory.sortMemories(active)
+        let sorted = DreamMemoryCategory.sortMemories(active)
+        return sorted.isEmpty ? [memory] : sorted
     }
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        let digest = MemoryCardDigest.cached(for: memory)
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    MemoryBinderPageSwitcher(
-                        items: siblingMemories,
-                        selectedID: memory.id,
-                        onSelect: { memory = $0 }
-                    )
-                    ClientMemoryContent(memory: memory)
-                }
-                .frame(maxWidth: 640, alignment: .leading)
-                .padding(16)
-                .frame(maxWidth: .infinity)
-            }
-            .background(colors.desk)
-            .navigationTitle(digest.title)
-            #if !os(macOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
                 if let onOpenFullNotebook {
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            dismiss()
-                            onOpenFullNotebook()
-                        } label: {
-                            Label("全部手账", systemImage: "book.pages")
+                    Button {
+                        dismiss()
+                        onOpenFullNotebook()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "book.pages")
+                            Text("手账")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(colors.ink)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(colors.paper, in: Capsule())
+                        .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.22), lineWidth: 0.5) }
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                MemoryBinderPageSwitcher(
+                    items: siblingMemories,
+                    selectedID: memory.id,
+                    onSelect: { memory = $0 }
+                )
+
+                Spacer(minLength: 4)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("完成")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(colors.paper)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(colors.ink, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+
+            #if os(macOS)
+            ScrollView {
+                ClientMemoryContent(memory: memory)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+            }
+            #else
+            TabView(
+                selection: Binding(
+                    get: { memory.id },
+                    set: { newID in
+                        if let next = siblingMemories.first(where: { $0.id == newID }) {
+                            memory = next
                         }
                     }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                )
+            ) {
+                ForEach(siblingMemories) { item in
+                    ScrollView {
+                        ClientMemoryContent(memory: item)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 16)
+                    }
+                    .tag(item.id)
                 }
             }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            #endif
         }
+        .background(colors.desk.ignoresSafeArea())
         .environment(\.openURL, OpenURLAction { url in
             if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
                 memory = next
@@ -1832,7 +1956,7 @@ struct MemoryNotePreviewSheet: View {
             return .systemAction
         })
         #if os(macOS)
-        .frame(width: 540, height: 480)
+        .frame(width: 460, height: 370)
         #endif
     }
 }

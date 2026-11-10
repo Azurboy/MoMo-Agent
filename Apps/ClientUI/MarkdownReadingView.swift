@@ -42,13 +42,13 @@ private struct MarkdownBlockView: View {
     let accessibilityID: String
     let handwriting: Bool
     @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) private var indent = 16.0
-    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 10.0
-    @ScaledMetric(relativeTo: .body) private var listSpacing = 6.0
-    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 6.0
+    @ScaledMetric(relativeTo: .body) private var indent = 14.0
+    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 6.0
+    @ScaledMetric(relativeTo: .body) private var listSpacing = 4.0
+    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 4.0
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
             if block.listDepth > 0 {
                 Text(block.listMarker ?? "")
                     .phoneText(.body).monospacedDigit()
@@ -57,7 +57,7 @@ private struct MarkdownBlockView: View {
             }
             Text(block.text)
                 .modifier(MarkdownReadingTypography(style: textStyle, handwriting: handwriting))
-                .lineSpacing(handwriting ? 4 : (block.headingLevel == nil ? 5 : 2))
+                .lineSpacing(handwriting ? 2 : (block.headingLevel == nil ? 5 : 2))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(block.headingLevel == nil ? [] : .isHeader)
@@ -71,7 +71,7 @@ private struct MarkdownBlockView: View {
                     .accessibilityHidden(true)
             }
         }
-        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 4 : 0)
+        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 2 : 0)
         .padding(.bottom, isLast ? 0 : (block.headingLevel != nil ? headingSpacing : (block.listDepth > 0 ? listSpacing : paragraphSpacing)))
     }
 
@@ -107,17 +107,17 @@ private struct MarkdownReadingTypography: ViewModifier {
     private var size: CGFloat {
         #if os(macOS)
         switch style {
-        case .heading: 18
-        case .subheading: 15.5
-        case .section: 14.5
-        default: 14
+        case .heading: 15
+        case .subheading: 13.5
+        case .section: 13
+        default: 12.5
         }
         #else
         switch style {
-        case .heading: 19
-        case .subheading: 16.5
-        case .section: 15.5
-        default: 15
+        case .heading: 16.5
+        case .subheading: 14.5
+        case .section: 14
+        default: 13.5
         }
         #endif
     }
