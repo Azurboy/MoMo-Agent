@@ -312,11 +312,24 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
             title: "收口用研项目待决项",
             subtitle: "项目一",
             prompt: "请帮我核对",
-            motif: .memoryLoop
+            motif: .memoryLoop,
+            slotIndex: 0
         )
         var dismissed: Set<String> = []
         DreamDismissedCardsStore.markDismissed(card, headline: "晨间简报 · 2026-11-10", into: &dismissed)
         XCTAssertTrue(card.isDismissed(in: dismissed, headline: "晨间简报 · 2026-11-10"))
         XCTAssertTrue(card.isDismissed(in: DreamDismissedCardsStore.load(), headline: "晨间简报 · 2026-11-10"))
+
+        // Even if Dream re-runs later on the same day and generates a new title for slot 0, it stays dismissed:
+        let regeneratedSameDaySlot0 = DreamBriefingCard(
+            id: "dream-card-0-新生成的同日标题",
+            title: "新生成的同日标题",
+            subtitle: "项目一",
+            prompt: "新提示词",
+            motif: .memoryLoop,
+            slotIndex: 0
+        )
+        XCTAssertTrue(regeneratedSameDaySlot0.isDismissed(in: dismissed, headline: "晨间简报 · 2026-11-10"))
+        XCTAssertFalse(regeneratedSameDaySlot0.isDismissed(in: dismissed, headline: "晨间简报 · 2026-11-11"))
     }
 }

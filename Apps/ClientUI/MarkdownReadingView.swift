@@ -24,7 +24,7 @@ struct MarkdownReadingView: View, Equatable {
                     .phoneText(.metadata).foregroundStyle(.secondary)
                     .padding(.bottom, 12)
                 Text(markdown).modifier(MarkdownReadingTypography(style: .body, handwriting: handwriting))
-                    .lineSpacing(handwriting ? 8 : PhoneTextStyle.body.extraLeading)
+                    .lineSpacing(handwriting ? 4 : PhoneTextStyle.body.extraLeading)
                     .accessibilityIdentifier("\(accessibilityID).block.original")
             }
         }
@@ -42,13 +42,13 @@ private struct MarkdownBlockView: View {
     let accessibilityID: String
     let handwriting: Bool
     @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) private var indent = 20.0
-    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 16.0
-    @ScaledMetric(relativeTo: .body) private var listSpacing = 10.0
-    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 10.0
+    @ScaledMetric(relativeTo: .body) private var indent = 16.0
+    @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 10.0
+    @ScaledMetric(relativeTo: .body) private var listSpacing = 6.0
+    @ScaledMetric(relativeTo: .headline) private var headingSpacing = 6.0
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             if block.listDepth > 0 {
                 Text(block.listMarker ?? "")
                     .phoneText(.body).monospacedDigit()
@@ -57,21 +57,21 @@ private struct MarkdownBlockView: View {
             }
             Text(block.text)
                 .modifier(MarkdownReadingTypography(style: textStyle, handwriting: handwriting))
-                .lineSpacing(handwriting ? 8 : (block.headingLevel == nil ? 5 : 2))
+                .lineSpacing(handwriting ? 4 : (block.headingLevel == nil ? 5 : 2))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(block.headingLevel == nil ? [] : .isHeader)
                 .accessibilityIdentifier(accessibilityID)
         }
         .padding(.leading, Double(max(0, block.listDepth - 1)) * indent)
-        .padding(.leading, block.isQuote ? 12 : 0)
+        .padding(.leading, block.isQuote ? 10 : 0)
         .overlay(alignment: .leading) {
             if block.isQuote {
                 Rectangle().fill(handwriting ? MemoryNotebookPalette(scheme: scheme).margin.opacity(0.5) : .secondary.opacity(0.4)).frame(width: 2)
                     .accessibilityHidden(true)
             }
         }
-        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 6 : 0)
+        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 4 : 0)
         .padding(.bottom, isLast ? 0 : (block.headingLevel != nil ? headingSpacing : (block.listDepth > 0 ? listSpacing : paragraphSpacing)))
     }
 
@@ -105,11 +105,20 @@ private struct MarkdownReadingTypography: ViewModifier {
     }
 
     private var size: CGFloat {
+        #if os(macOS)
         switch style {
-        case .heading: 27
-        case .subheading: 23
-        case .section: 20
-        default: 18
+        case .heading: 18
+        case .subheading: 15.5
+        case .section: 14.5
+        default: 14
         }
+        #else
+        switch style {
+        case .heading: 19
+        case .subheading: 16.5
+        case .section: 15.5
+        default: 15
+        }
+        #endif
     }
 }

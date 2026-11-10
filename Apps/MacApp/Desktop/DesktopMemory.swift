@@ -5,19 +5,48 @@ import MoMoAgentClient
 struct DesktopMemory: View {
     @Bindable var model: DesktopModel
     @State private var listMode = true
-    @State private var selectedCategory: DreamMemoryCategory = .all
-    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var selectedCategory: DreamMemoryCategory? = nil
+    @State private var selectedMemoryID: String? = nil
     @State private var inspecting: ContextMemory?
     @State private var webFailure: String?
     @State private var dreamRequesting = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
     @Environment(\.colorScheme) private var scheme
+
     private var allMemories: [ContextMemory] { model.memories.filter { $0.status != "forgotten" } }
-    private var memories: [ContextMemory] { allMemories.filter { selectedCategory.matches($0) } }
-    private var sections: [DreamMemorySection] { DreamMemoryCategory.sections(from: allMemories, category: selectedCategory) }
-    private var briefingDocument: DreamBriefingDocument? { DreamBriefingDocument.resolve(from: allMemories) }
+
+    private var activeCategory: DreamMemoryCategory {
+        if let selectedCategory {
+            return selectedCategory
+        }
+        return DreamMemoryCategory.preferredInitialCategory(for: allMemories)
+    }
+
+    private var visibleCategories: [DreamMemoryCategory] {
+        let nonEmpty = DreamMemoryCategory.allCases.filter { cat in
+            cat == .all || allMemories.contains(where: { cat.matches($0) })
+        }
+        return nonEmpty.isEmpty ? DreamMemoryCategory.allCases : nonEmpty
+    }
+
+    private var memories: [ContextMemory] { allMemories.filter { activeCategory.matches($0) } }
+    private var sections: [DreamMemorySection] { DreamMemoryCategory.sections(from: allMemories, category: activeCategory) }
+
+    private var currentReaderItems: [ContextMemory] {
+        sections.flatMap(\.items)
+    }
+
+    private var activeReaderMemory: ContextMemory? {
+        let items = currentReaderItems
+        guard !items.isEmpty else { return nil }
+        if let selectedMemoryID, let matched = items.first(where: { $0.id == selectedMemoryID }) {
+            return matched
+        }
+        return items.first
+    }
 
     var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
         VStack(spacing: 0) {
             HStack(spacing: 16) {
                 Text("记忆").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
@@ -38,26 +67,16 @@ struct DesktopMemory: View {
                     .disabled(reducedMotion).help(reducedMotion ? "减少动态效果时使用列表" : "切换记忆视图")
                 Button("刷新", systemImage: "arrow.clockwise") { Task { await model.loadContext() } }.frame(width: 28, height: 28).help("刷新记忆").accessibilityIdentifier("settings.memory.refresh").disabled(model.contextLoading)
             }
-            .buttonStyle(.plain).labelStyle(.iconOnly).padding(20)
-            if let review = model.memoryReviewStatus {
-                HStack(spacing: 12) {
-                    Label((review.running || dreamRequesting) ? "正在整理记忆" : "自动整理已开启", systemImage: (review.running || dreamRequesting) ? "sparkles" : "checkmark.circle")
-                    Spacer(minLength: 8)
-                    if review.needsReview + model.transcriptMemoryNeedsReview > 0 {
-                        Text("部分整理未完成").foregroundStyle(MoMoPalette.failure)
-                    } else if let dream = review.dream {
-                        Text("Dream · \(Date(timeIntervalSince1970: dream.at).formatted(date: .abbreviated, time: .shortened))")
-                    } else { Text("Dream 将在空闲时整理") }
-                }.font(.system(size: 12)).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk).padding(.horizontal, 24).padding(.bottom, 12)
-                    .accessibilityElement(children: .combine).accessibilityIdentifier("settings.memory.status")
-            }
+            .buttonStyle(.plain).labelStyle(.iconOnly).padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 10)
+
             if !allMemories.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .bottom, spacing: 5) {
-                        ForEach(DreamMemoryCategory.allCases) { category in
-                            let isSelected = selectedCategory == category
+                        ForEach(visibleCategories) { category in
+                            let isSelected = activeCategory == category
                             Button {
                                 selectedCategory = category
+                                selectedMemoryID = nil
                                 if category != .all { listMode = true }
                             } label: {
                                 MemoryBinderTab(category: category, isSelected: isSelected)
@@ -76,52 +95,62 @@ struct DesktopMemory: View {
             }
             if model.contextLoading && allMemories.isEmpty { ProgressView("正在读取记忆").frame(maxWidth: .infinity, maxHeight: .infinity) }
             else if memories.isEmpty {
-                ContentUnavailableView(allMemories.isEmpty ? "还没有记忆" : "该分类下暂无笔记", systemImage: "book.closed", description: Text("MoMo 记住的内容与 Dream 整理的 Markdown 活页会出现在这里。"))
+                ContentUnavailableView(allMemories.isEmpty ? "还没有记忆" : "暂无笔记", systemImage: "book.closed", description: Text("轻触右上角即可整理或刷新。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if listMode || reducedMotion || webFailure != nil || selectedCategory != .all {
+            } else if listMode || reducedMotion || webFailure != nil || activeCategory != .all {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        LazyVStack(alignment: .leading, spacing: 20) {
-                            ForEach(sections) { section in
-                                VStack(alignment: .leading, spacing: 12) {
-                                    if sections.count > 1 || section.id == "notebook" {
-                                        VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if activeCategory.isNotebookReaderCategory, let memory = activeReaderMemory {
+                            MemoryBinderPageSwitcher(
+                                items: currentReaderItems,
+                                selectedID: memory.id,
+                                onSelect: { selectedMemoryID = $0.id }
+                            )
+                            ClientMemoryContent(memory: memory)
+                                .textSelection(.enabled)
+                                .environment(\.openURL, OpenURLAction { url in
+                                    if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
+                                        selectedCategory = DreamMemoryCategory.category(for: next)
+                                        selectedMemoryID = next.id
+                                        return .handled
+                                    }
+                                    return .systemAction
+                                })
+                        } else {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                ForEach(sections) { section in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        if sections.count > 1 {
                                             HStack(spacing: 6) {
                                                 Text(section.title)
-                                                    .momoHandwriting(size: 21, weight: .semibold, relativeTo: .headline)
-                                                    .foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
+                                                    .momoHandwriting(size: 17, weight: .semibold, relativeTo: .headline)
+                                                    .foregroundStyle(colors.ink)
                                                     .accessibilityAddTraits(.isHeader)
                                                 Text("\(section.items.count)")
                                                     .font(.system(size: 11, weight: .medium).monospacedDigit())
-                                                    .foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
-                                                    .padding(.horizontal, 6)
-                                                    .padding(.vertical, 2)
-                                                    .background(MoMoPalette.ink.opacity(0.06), in: Capsule())
+                                                    .foregroundStyle(colors.secondaryInk)
                                             }
-                                            if let subtitle = section.subtitle {
-                                                Text(subtitle)
-                                                    .font(.system(size: 12))
-                                                    .foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
-                                            }
+                                            .padding(.top, 2)
                                         }
-                                        .padding(.top, 2)
-                                    }
-                                    ForEach(section.items) { memory in
-                                        Button { inspecting = memory } label: {
-                                            MemoryCardView(memory: memory)
-                                        }.buttonStyle(.plain)
-                                            .accessibilityIdentifier("remote.memoryRow." + memory.id)
+                                        ForEach(section.items) { memory in
+                                            Button { inspecting = memory } label: {
+                                                MemoryCardView(memory: memory)
+                                            }.buttonStyle(.plain)
+                                                .accessibilityIdentifier("remote.memoryRow." + memory.id)
+                                        }
                                     }
                                 }
                             }
-                        }.padding(.horizontal, 24).padding(.bottom, 20)
+                        }
                     }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
                 }
             } else {
                 MoMoMemoryGraphView(memories: memories, inspect: { id in inspecting = memories.first { $0.id == id } }, failure: { webFailure = $0 })
             }
         }
-        .background(MemoryNotebookPalette(scheme: scheme).desk)
+        .background(colors.desk)
         .task {
             await model.loadContext()
             while !Task.isCancelled {
@@ -158,19 +187,31 @@ private struct DesktopMemoryDetail: View {
         }
     }
 
+    private var siblingMemories: [ContextMemory] {
+        let active = model.memories.filter { $0.status != "forgotten" && $0.kind == memory.kind }
+        return DreamMemoryCategory.sortMemories(active)
+    }
+
     private var content: some View {
-        let digest = MemoryCardDigest(memory: memory)
-        return VStack(alignment: .leading, spacing: 20) {
+        let digest = MemoryCardDigest.cached(for: memory)
+        return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 Text(digest.title)
-                    .momoHandwriting(size: 23, weight: .semibold, relativeTo: .title2)
+                    .momoHandwriting(size: 19, weight: .semibold, relativeTo: .title3)
                     .foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
                     .lineLimit(1)
                 Spacer()
                 Button("完成") { dismiss() }.buttonStyle(.plain).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk)
             }
+            if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
+                MemoryBinderPageSwitcher(
+                    items: siblingMemories,
+                    selectedID: memory.id,
+                    onSelect: { memory = $0 }
+                )
+            }
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
                     ClientMemoryContent(memory: memory).textSelection(.enabled)
                     ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
                         if let recording = model.sources.first(where: { $0.id == evidence.sourceId && $0.revision == evidence.sourceRevision }) {
@@ -181,13 +222,13 @@ private struct DesktopMemoryDetail: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
-            }.frame(height: min(contentHeight, 520))
+            }.frame(height: min(contentHeight, 440))
             if let error { Text(error).foregroundStyle(MoMoPalette.failure) }
             HStack {
                 Spacer()
                 Button("忘记", role: .destructive) { confirming = true }.buttonStyle(.plain).foregroundStyle(MoMoPalette.failure).disabled(forgetting)
             }
-        }.padding(24).frame(width: 640).fixedSize(horizontal: false, vertical: true)
+        }.padding(20).frame(width: 540).fixedSize(horizontal: false, vertical: true)
         .background(MemoryNotebookPalette(scheme: scheme).desk)
         .confirmationDialog("忘记这条记忆？", isPresented: $confirming, titleVisibility: .visible) {
             Button("忘记", role: .destructive) {
@@ -203,7 +244,7 @@ private struct DesktopMemoryDetail: View {
             VStack {
                 DesktopSourceReader(model: model, source: source, onDiscuss: { self.source = nil; dismiss() })
                 Button("完成") { self.source = nil }.buttonStyle(.plain).foregroundStyle(MemoryNotebookPalette(scheme: scheme).secondaryInk).padding()
-            }.frame(width: 640, height: 600)
+            }.frame(width: 600, height: 520)
         }
     }
 }
@@ -223,7 +264,7 @@ private struct MoMoMemoryGraphView: NSViewRepresentable {
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         context.coordinator.view = view
-        if let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "MemoryWeb") {
+        if let file = Bundle.main.url(forResource: "index", withExtension: "index.html".hasSuffix(".html") ? "html" : "html", subdirectory: "MemoryWeb") {
             context.coordinator.directory = file.deletingLastPathComponent()
             view.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
         } else { DispatchQueue.main.async { failure(String(localized: "记忆界面资源未找到，已切换为列表。")) } }

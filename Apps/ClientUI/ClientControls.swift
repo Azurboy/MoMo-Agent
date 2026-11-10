@@ -433,10 +433,9 @@ extension View {
     }
 
     func memoryNotebookPage() -> some View {
-        self.padding(.leading, 46).padding(.trailing, 18).padding(.vertical, 20)
+        self.padding(.leading, 32).padding(.trailing, 18).padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(MemoryNotebookPaper())
-            .padding(.bottom, 6)
     }
 }
 
@@ -472,65 +471,29 @@ private struct MemoryNotebookPaper: View {
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        ZStack {
-            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
-                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(0.24), lineWidth: 0.5) }
-                .padding(.horizontal, 7).offset(y: 6)
-            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
-                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(0.2), lineWidth: 0.5) }
-                .padding(.horizontal, 3).offset(y: 3)
-            RoundedRectangle(cornerRadius: 7).fill(colors.paper)
-                .overlay {
-                    Canvas { context, size in
-                        var rules = Path()
-                        for y in stride(from: 35.0, through: size.height, by: 27.0) {
-                            rules.move(to: CGPoint(x: 25, y: y))
-                            rules.addLine(to: CGPoint(x: size.width - 12, y: y))
-                        }
-                        context.stroke(rules, with: .color(colors.secondaryInk.opacity(contrast == .increased ? 0.06 : 0.13)), lineWidth: 0.5)
-                        var margin = Path()
-                        margin.move(to: CGPoint(x: 33, y: 0))
-                        margin.addLine(to: CGPoint(x: 33, y: size.height))
-                        context.stroke(margin, with: .color(colors.margin.opacity(0.5)), lineWidth: 0.8)
-                        for y in stride(from: 40.0, through: size.height - 18, by: 108.0) {
-                            let hole = Path(ellipseIn: CGRect(x: 9, y: y - 5, width: 10, height: 10))
-                            context.fill(hole, with: .color(colors.desk))
-                            context.stroke(hole, with: .color(.black.opacity(0.24)), lineWidth: 1)
-                            var innerShadow = Path()
-                            innerShadow.addArc(center: CGPoint(x: 14, y: y), radius: 4,
-                                               startAngle: .degrees(180), endAngle: .degrees(360), clockwise: false)
-                            context.stroke(innerShadow, with: .color(.black.opacity(0.22)), lineWidth: 1.5)
-                            let ring = Path(roundedRect: CGRect(x: -3, y: y - 2.5, width: 18, height: 5), cornerRadius: 2.5)
-                            context.fill(ring, with: .linearGradient(
-                                Gradient(colors: [Color(white: 0.42), Color(white: 0.94), Color(white: 0.56)]),
-                                startPoint: CGPoint(x: 0, y: y - 2.5), endPoint: CGPoint(x: 0, y: y + 2.5)))
-                        }
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(colors.paper)
+            .overlay {
+                Canvas { context, size in
+                    var rules = Path()
+                    for y in stride(from: 32.0, through: size.height - 8, by: 24.0) {
+                        rules.move(to: CGPoint(x: 16, y: y))
+                        rules.addLine(to: CGPoint(x: size.width - 14, y: y))
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    context.stroke(rules, with: .color(colors.secondaryInk.opacity(contrast == .increased ? 0.14 : 0.08)), lineWidth: 0.5)
+                    var margin = Path()
+                    margin.move(to: CGPoint(x: 20, y: 0))
+                    margin.addLine(to: CGPoint(x: 20, y: size.height))
+                    context.stroke(margin, with: .color(colors.margin.opacity(0.28)), lineWidth: 0.7)
                 }
-                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(colors.secondaryInk.opacity(contrast == .increased ? 0.6 : 0.18), lineWidth: 0.5) }
-        }
-        .shadow(color: .black.opacity(scheme == .dark ? 0.2 : 0.07), radius: 3, x: 0, y: 3)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct MemoryWashiLabel: View {
-    let title: String
-    let symbol: String
-    let kind: String
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        let colors = MemoryNotebookPalette(scheme: scheme)
-        Label(title, systemImage: symbol)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(colors.ink)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(colors.tab(kind).opacity(reduceTransparency ? 1 : 0.78), in: RoundedRectangle(cornerRadius: 2))
-            .overlay(alignment: .top) { Rectangle().fill(colors.paper.opacity(0.5)).frame(height: 1).accessibilityHidden(true) }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(colors.secondaryInk.opacity(contrast == .increased ? 0.45 : 0.14), lineWidth: 0.5)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -541,22 +504,29 @@ struct MemoryBinderTab: View {
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        HStack(spacing: 6) {
-            Image(systemName: isSelected ? "checkmark" : category.symbol)
-                .font(.caption.weight(.semibold)).accessibilityHidden(true)
-            Text(category.title).font(.subheadline.weight(isSelected ? .semibold : .regular))
-        }
-        .foregroundStyle(colors.ink)
-        .padding(.horizontal, 13).frame(minHeight: 44)
-        .background(isSelected ? colors.paper : colors.tab(category.rawValue),
-                    in: UnevenRoundedRectangle(topLeadingRadius: 9, topTrailingRadius: 9))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(isSelected ? colors.margin : colors.secondaryInk.opacity(0.25))
-                .frame(height: isSelected ? 2 : 0.5).accessibilityHidden(true)
-        }
-        .contentShape(Rectangle())
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        Text(category.title)
+            .font(.subheadline.weight(isSelected ? .semibold : .regular))
+            .foregroundStyle(isSelected ? colors.ink : colors.secondaryInk)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 34)
+            .background(
+                isSelected ? colors.paper : colors.paper.opacity(0.45),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule().strokeBorder(
+                    isSelected ? colors.margin.opacity(0.55) : colors.secondaryInk.opacity(0.14),
+                    lineWidth: isSelected ? 1 : 0.5
+                )
+            }
+            .contentShape(Capsule())
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
+}
+
+private final class CachedMemoryCardDigestBox: NSObject {
+    let digest: MemoryCardDigest
+    init(_ digest: MemoryCardDigest) { self.digest = digest }
 }
 
 struct MemoryCardDigest: Equatable, Sendable {
@@ -569,6 +539,54 @@ struct MemoryCardDigest: Equatable, Sendable {
     let sectionPills: [String]
     let cleanedNotebookMarkdown: String
     let isNotebookMarkdown: Bool
+
+    private nonisolated(unsafe) static let cache: NSCache<NSString, CachedMemoryCardDigestBox> = {
+        let c = NSCache<NSString, CachedMemoryCardDigestBox>()
+        c.countLimit = 256
+        return c
+    }()
+
+    private static let stampRegex = try? NSRegularExpression(
+        pattern: #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s*(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?\s*(?:[（(]([^）)]*)[）)])?\s*[：:]?\s*"#
+    )
+    private static let dateInHeadingRegex = try? NSRegularExpression(pattern: #"\b(20\d{2}-\d{2}-\d{2})\b"#)
+    private static let boldHeaderRegex = try? NSRegularExpression(
+        pattern: #"^\*\*【?([^】*]+)】?\*\*\s*(?:[（(](\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)[）)])?\s*[：:]\s*"#
+    )
+    private static let leadDateRegex = try? NSRegularExpression(
+        pattern: #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s+"#
+    )
+    private static let sourceLinkRegex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#)
+    private static let timeLabelRegex = try? NSRegularExpression(pattern: #"\[(\d{1,2}:\d{2})\s*原音\]"#)
+    private static let uuidWithTagRegex = try? NSRegularExpression(
+        pattern: #"(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?"#
+    )
+    private static let hexEpochRegex = try? NSRegularExpression(
+        pattern: #"(?<![0-9a-fA-F])[0-9a-fA-F]{8}\s+17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#
+    )
+    private static let epochRegex = try? NSRegularExpression(
+        pattern: #"(?<![0-9a-fA-F])17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#
+    )
+    private static let disclaimerRegex = try? NSRegularExpression(
+        pattern: #"[（(]\s*(?:归属\s*/\s*执行未核|归属未核|执行未核)\s*[）)]\s*[：:]?"#
+    )
+    private static let multiSpaceRegex = try? NSRegularExpression(pattern: #"\s{2,}"#)
+    private static let notebookRefRegex = try? NSRegularExpression(
+        pattern: #"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#
+    )
+    private static let bareUUIDRegex = try? NSRegularExpression(
+        pattern: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+    )
+
+    static func cached(for memory: ContextMemory) -> MemoryCardDigest {
+        let key = "\(memory.id)|\(memory.revision)|\(memory.status)|\(memory.text.count)" as NSString
+        if let hit = cache.object(forKey: key) {
+            return hit.digest
+        }
+        let built = MemoryCardDigest(memory: memory)
+        cache.setObject(CachedMemoryCardDigestBox(built), forKey: key)
+        return built
+    }
 
     static func == (lhs: MemoryCardDigest, rhs: MemoryCardDigest) -> Bool {
         lhs.badge.title == rhs.badge.title
@@ -594,9 +612,7 @@ struct MemoryCardDigest: Equatable, Sendable {
         var extractedNote: String? = nil
         var bodyText = trimmed
 
-        // Strip leading machine source stamp (e.g. "10/29–30 录音 0fcdf941-... v78 (归属/执行未核)：")
-        let stampPattern = #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s*(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?\s*(?:[（(]([^）)]*)[）)])?\s*[：:]?\s*"#
-        if let regex = try? NSRegularExpression(pattern: stampPattern),
+        if let regex = Self.stampRegex,
            let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
            let stampRange = Range(match.range, in: trimmed),
            let dateRange = Range(match.range(at: 1), in: trimmed) {
@@ -628,12 +644,16 @@ struct MemoryCardDigest: Equatable, Sendable {
                     continue
                 }
                 if line.hasPrefix("## ") || line.hasPrefix("### ") {
-                    var sec = line.replacingOccurrences(of: #"^#{2,3}\s*"#, with: "", options: .regularExpression)
-                    sec = sec.replacingOccurrences(of: #"^(卡片|建议)[：:]\s*"#, with: "", options: .regularExpression)
-                    sec = sec.replacingOccurrences(of: #"（注绝对日期）"#, with: "")
-                    let cleanSec = Self.cleanInlineNoise(sec)
-                    if !cleanSec.isEmpty && !sections.contains(cleanSec) {
-                        sections.append(cleanSec)
+                    if sections.count < 4 {
+                        var sec = String(line.drop(while: { $0 == "#" || $0 == " " }))
+                        if sec.hasPrefix("卡片：") || sec.hasPrefix("卡片:") || sec.hasPrefix("建议：") || sec.hasPrefix("建议:") {
+                            sec = String(sec.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                        }
+                        sec = sec.replacingOccurrences(of: "（注绝对日期）", with: "")
+                        let cleanSec = Self.cleanInlineNoise(sec)
+                        if !cleanSec.isEmpty && !sections.contains(cleanSec) {
+                            sections.append(cleanSec)
+                        }
                     }
                     continue
                 }
@@ -641,11 +661,13 @@ struct MemoryCardDigest: Equatable, Sendable {
                     continue
                 }
                 if line.hasPrefix("- ") || line.hasPrefix("* ") {
-                    let item = Self.cleanInlineNoise(String(line.dropFirst(2)))
-                    if !item.isEmpty {
-                        bullets.append(item)
+                    if bullets.count < 3 {
+                        let item = Self.cleanInlineNoise(String(line.dropFirst(2)))
+                        if !item.isEmpty {
+                            bullets.append(item)
+                        }
                     }
-                } else if !line.hasPrefix("#") {
+                } else if !line.hasPrefix("#") && paragraphs.count < 3 {
                     let para = Self.cleanInlineNoise(line)
                     if !para.isEmpty {
                         paragraphs.append(para)
@@ -655,31 +677,27 @@ struct MemoryCardDigest: Equatable, Sendable {
 
             var resolvedHeading = rawHeading ?? Self.badgeTitleFallback(for: memory.kind)
             if extractedDate == nil,
-               let dateRegex = try? NSRegularExpression(pattern: #"\b(20\d{2}-\d{2}-\d{2})\b"#),
+               let dateRegex = Self.dateInHeadingRegex,
                let m = dateRegex.firstMatch(in: resolvedHeading, range: NSRange(resolvedHeading.startIndex..., in: resolvedHeading)),
                let r = Range(m.range(at: 1), in: resolvedHeading) {
                 extractedDate = String(resolvedHeading[r])
                 let stripped = resolvedHeading
-                    .replacingOccurrences(of: #"^20\d{2}-\d{2}-\d{2}\s*[·•\-—–:：]\s*"#, with: "", options: .regularExpression)
-                    .replacingOccurrences(of: #"\s*[·•\-—–:：]\s*20\d{2}-\d{2}-\d{2}$"#, with: "", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: extractedDate!, with: "")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ·•-—–:："))
                 if !stripped.isEmpty {
                     resolvedHeading = stripped
                 }
             }
             self.title = Self.cleanInlineNoise(resolvedHeading)
             let candidateHighlights = bullets.isEmpty ? paragraphs : bullets
-            self.highlights = Array(candidateHighlights.prefix(3))
+            self.highlights = Array(candidateHighlights.prefix(2))
             self.sectionPills = Array(sections.prefix(4))
             self.cleanedNotebookMarkdown = Self.cleanNotebookMarkdownForDetail(bodyText)
         } else {
-            // Core memory (`MEMORY.md`) or User profile (`USER.md`)
             var working = bodyText
             var explicitTitle: String? = nil
 
-            // Pattern 1: **【标题】**（2026-11-10）：内容 or **标题**（2026-11-10）：内容
-            let boldHeaderPattern = #"^\*\*【?([^】*]+)】?\*\*\s*(?:[（(](\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)[）)])?\s*[：:]\s*"#
-            if let regex = try? NSRegularExpression(pattern: boldHeaderPattern),
+            if let regex = Self.boldHeaderRegex,
                let m = regex.firstMatch(in: working, range: NSRange(working.startIndex..., in: working)),
                let fullRange = Range(m.range, in: working),
                let titleRange = Range(m.range(at: 1), in: working) {
@@ -688,18 +706,15 @@ struct MemoryCardDigest: Equatable, Sendable {
                     extractedDate = String(working[dRange])
                 }
                 working = String(working[fullRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            } else if extractedDate == nil {
-                // Pattern 2: Leading date like "2026-11-10 " or "11/2 "
-                let leadDatePattern = #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s+"#
-                if let regex = try? NSRegularExpression(pattern: leadDatePattern),
-                   let m = regex.firstMatch(in: working, range: NSRange(working.startIndex..., in: working)),
-                   let fullRange = Range(m.range, in: working),
-                   let dRange = Range(m.range(at: 1), in: working) {
-                    let rem = String(working[fullRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !rem.isEmpty {
-                        extractedDate = String(working[dRange])
-                        working = rem
-                    }
+            } else if extractedDate == nil,
+                      let regex = Self.leadDateRegex,
+                      let m = regex.firstMatch(in: working, range: NSRange(working.startIndex..., in: working)),
+                      let fullRange = Range(m.range, in: working),
+                      let dRange = Range(m.range(at: 1), in: working) {
+                let rem = String(working[fullRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rem.isEmpty {
+                    extractedDate = String(working[dRange])
+                    working = rem
                 }
             }
 
@@ -712,19 +727,19 @@ struct MemoryCardDigest: Equatable, Sendable {
             if let explicitTitle, !explicitTitle.isEmpty {
                 self.title = explicitTitle
                 if clauses.count > 1 {
-                    self.highlights = Array(clauses.prefix(3))
+                    self.highlights = Array(clauses.prefix(2))
                 } else {
                     let sentences = Self.splitSentences(cleanedBody)
-                    self.highlights = Array(sentences.prefix(3))
+                    self.highlights = Array(sentences.prefix(2))
                 }
             } else if clauses.count >= 2 {
                 self.title = clauses[0]
-                self.highlights = Array(clauses.dropFirst().prefix(3))
+                self.highlights = Array(clauses.dropFirst().prefix(2))
             } else {
                 let sentences = Self.splitSentences(cleanedBody)
                 if sentences.count >= 2 {
                     self.title = sentences[0]
-                    self.highlights = Array(sentences.dropFirst().prefix(3))
+                    self.highlights = Array(sentences.dropFirst().prefix(2))
                 } else {
                     self.title = cleanedBody.isEmpty ? trimmed : cleanedBody
                     self.highlights = []
@@ -757,57 +772,42 @@ struct MemoryCardDigest: Equatable, Sendable {
             .map { $0.hasSuffix("。") ? $0 : $0 + "。" }
     }
 
+    private static func replace(_ regex: NSRegularExpression?, in string: String, with template: String) -> String {
+        guard let regex else { return string }
+        return regex.stringByReplacingMatches(in: string, range: NSRange(string.startIndex..., in: string), withTemplate: template)
+    }
+
     static func cleanInlineNoise(_ raw: String) -> String {
         var s = raw
-        // Replace [12:06 原音](momoagent://source/...) with [12:06] or label
-        s = s.replacingOccurrences(
-            of: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#,
-            with: "[$1]",
-            options: .regularExpression
-        )
-        s = s.replacingOccurrences(of: #"\[(\d{1,2}:\d{2})\s*原音\]"#, with: "[$1]", options: .regularExpression)
-        // Strip raw UUIDs and optional preceding "录音" or trailing version tags
-        s = s.replacingOccurrences(
-            of: #"(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?"#,
-            with: "",
-            options: .regularExpression
-        )
-        // Strip 8-hex session prefix + 10-digit Unix epoch timestamps
-        s = s.replacingOccurrences(
-            of: #"(?<![0-9a-fA-F])[0-9a-fA-F]{8}\s+17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#,
-            with: "",
-            options: .regularExpression
-        )
-        // Strip standalone 10-digit Unix epoch timestamps (1780000000 - 1799999999)
-        s = s.replacingOccurrences(
-            of: #"(?<![0-9a-fA-F])17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#,
-            with: "",
-            options: .regularExpression
-        )
-        // Strip pedantic audit disclaimers
-        s = s.replacingOccurrences(
-            of: #"[（(]\s*(?:归属\s*/\s*执行未核|归属未核|执行未核)\s*[）)]\s*[：:]?"#,
-            with: "",
-            options: .regularExpression
-        )
-        // Strip Markdown emphasis markers for plain-text card preview
+        if s.contains("momoagent://source/") {
+            s = replace(sourceLinkRegex, in: s, with: "[$1]")
+        }
+        if s.contains("原音]") {
+            s = replace(timeLabelRegex, in: s, with: "[$1]")
+        }
+        if s.contains("-") {
+            s = replace(uuidWithTagRegex, in: s, with: "")
+        }
+        if s.contains("178") || s.contains("179") {
+            s = replace(hexEpochRegex, in: s, with: "")
+            s = replace(epochRegex, in: s, with: "")
+        }
+        if s.contains("未核") {
+            s = replace(disclaimerRegex, in: s, with: "")
+        }
         s = s.replacingOccurrences(of: "**", with: "")
         s = s.replacingOccurrences(of: "__", with: "")
         s = s.replacingOccurrences(of: "`", with: "")
-        s = s.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        s = replace(multiSpaceRegex, in: s, with: " ")
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func cleanNotebookMarkdownForDetail(_ markdown: String) -> String {
         var s = markdown
-        // Replace custom momoagent://source/... links with readable inline code time badges
-        s = s.replacingOccurrences(
-            of: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#,
-            with: "`⏱ $1`",
-            options: .regularExpression
-        )
-        // Turn inline backtick notebook references like `topics/diary-study.md` into clickable momoagent://memory/... links
-        if let regex = try? NSRegularExpression(pattern: #"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#) {
+        if s.contains("momoagent://source/") {
+            s = replace(sourceLinkRegex, in: s, with: "`⏱ $1`")
+        }
+        if s.contains("`"), let regex = notebookRefRegex {
             let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed()
             for match in matches {
                 guard let fullRange = Range(match.range, in: s),
@@ -820,12 +820,9 @@ struct MemoryCardDigest: Equatable, Sendable {
                 s.replaceSubrange(fullRange, with: "[📔 \(relPath)](momoagent://memory/\(encoded))")
             }
         }
-        // Strip raw 36-char UUIDs if any leaked into prose
-        s = s.replacingOccurrences(
-            of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
-            with: "",
-            options: .regularExpression
-        )
+        if s.contains("-") {
+            s = replace(bareUUIDRegex, in: s, with: "")
+        }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
@@ -835,79 +832,53 @@ struct MemoryCardView: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let digest = MemoryCardDigest(memory: memory)
+        let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                MemoryWashiLabel(title: digest.badge.title, symbol: digest.badge.symbol, kind: memory.kind)
-                Spacer(minLength: 0)
-                if let date = digest.dateBadge {
-                    Text(date).font(.caption.monospacedDigit()).foregroundStyle(colors.secondaryInk)
-                }
-            }
+        HStack(alignment: .center, spacing: 12) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(colors.tab(memory.kind))
+                .frame(width: 4)
+                .padding(.vertical, 2)
+                .accessibilityHidden(true)
 
-            Text(digest.title)
-                .momoHandwriting(size: 21, weight: .semibold, relativeTo: .headline)
-                .foregroundStyle(colors.ink)
-                .lineSpacing(5)
-                .lineLimit(digest.highlights.isEmpty ? 3 : 2)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            if !digest.highlights.isEmpty {
-                VStack(alignment: .leading, spacing: 9) {
-                    ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
-                        HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Text("·").foregroundStyle(colors.secondaryInk).accessibilityHidden(true)
-                            Text(point)
-                                .lineSpacing(6).lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .momoHandwriting(size: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(digest.title)
+                        .momoHandwriting(size: 16, weight: .semibold, relativeTo: .headline)
                         .foregroundStyle(colors.ink)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let date = digest.dateBadge {
+                        Text(date)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(colors.secondaryInk)
                     }
                 }
+                if let firstHighlight = digest.highlights.first {
+                    Text(firstHighlight)
+                        .font(.subheadline)
+                        .foregroundStyle(colors.secondaryInk)
+                        .lineLimit(1)
+                }
             }
 
-            if !digest.sectionPills.isEmpty {
-                Text(digest.sectionPills.joined(separator: " · "))
-                    .font(.caption).foregroundStyle(colors.secondaryInk)
-                    .lineLimit(2)
-            }
-            if let status = digest.statusBadge {
-                Label(status, systemImage: memory.status == "stale" ? "clock.badge.exclamationmark" : "sparkles")
-                    .font(.caption).foregroundStyle(colors.secondaryInk)
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline) {
-                    signature
-                    Spacer(minLength: 12)
-                    readMore
-                }
-                VStack(alignment: .leading, spacing: 8) { signature; readMore }
-            }
-            .foregroundStyle(colors.secondaryInk)
-            .padding(.top, 4)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(colors.secondaryInk.opacity(0.6))
+                .accessibilityHidden(true)
         }
-        .memoryNotebookPage()
-        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(colors.paper, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(colors.secondaryInk.opacity(0.12), lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(([digest.badge.title, digest.dateBadge, digest.statusBadge, digest.title]
             .compactMap { $0 } + digest.highlights + ["查看全文"]).joined(separator: "，"))
-    }
-
-    private var signature: some View {
-        Text("✍️ MoMo 手写手账")
-            .momoHandwriting(size: 13, weight: .medium, relativeTo: .caption)
-            .accessibilityHidden(true)
-    }
-
-    private var readMore: some View {
-        HStack(spacing: 4) {
-            Text("查看全文")
-            Image(systemName: "chevron.right").accessibilityHidden(true)
-        }.font(.caption.weight(.medium))
     }
 }
 
@@ -915,31 +886,16 @@ struct ClientMemoryContent: View {
     let memory: ContextMemory
     @Environment(\.colorScheme) private var scheme
 
-    private var headerTitle: String {
-        if memory.status == "stale" { return "原文已改变，暂不作为当前记忆" }
-        switch memory.kind {
-        case "briefing": return "Dream · 晨间简报"
-        case "project": return "Dream · 在研项目活页"
-        case "journal": return "Dream · 每日生活日志"
-        case "person": return "Dream · 人物脉络活页"
-        case "topic": return "Dream · 主题与项目活页"
-        case "user": return "关于你（USER.md）"
-        default:
-            if memory.basis == "hermes" { return "核心记忆（MEMORY.md）" }
-            if memory.basis == "inferred" { return "模型推断" }
-            return "根据录音中的陈述"
-        }
-    }
-
     var body: some View {
-        let digest = MemoryCardDigest(memory: memory)
+        let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 8) {
-                MemoryWashiLabel(title: digest.badge.title, symbol: digest.badge.symbol, kind: memory.kind)
-                Text(headerTitle).font(.caption).foregroundStyle(colors.secondaryInk)
-                if let date = digest.dateBadge {
-                    Text(date).font(.caption.monospacedDigit()).foregroundStyle(colors.secondaryInk)
+        VStack(alignment: .leading, spacing: 14) {
+            if let date = digest.dateBadge {
+                HStack {
+                    Spacer()
+                    Text(date)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(colors.secondaryInk)
                 }
             }
 
@@ -948,49 +904,39 @@ struct ClientMemoryContent: View {
                                     accessibilityID: "remote.memoryText", handwriting: true)
             } else {
                 if !digest.highlights.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Text(digest.title)
-                            .momoHandwriting(size: 22, weight: .semibold, relativeTo: .headline)
+                            .momoHandwriting(size: 18, weight: .semibold, relativeTo: .headline)
                             .accessibilityAddTraits(.isHeader)
                         ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text("·").accessibilityHidden(true)
                                 Text(point).fixedSize(horizontal: false, vertical: true)
-                            }.momoHandwriting(size: 18)
+                            }.momoHandwriting(size: 15)
                         }
-                    }.lineSpacing(7)
+                    }.lineSpacing(4)
                 }
-                VStack(alignment: .leading, spacing: 10) {
-                    if !digest.highlights.isEmpty {
-                        Text("原文记录").font(.caption).foregroundStyle(colors.secondaryInk)
-                    }
-                    Text(memory.text)
-                        .momoHandwriting(size: 18)
-                        .lineSpacing(8)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("remote.memoryText")
-                }
+                Text(memory.text)
+                    .momoHandwriting(size: 15)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("remote.memoryText")
             }
 
             ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(evidence.quote).momoHandwriting(size: 16).lineSpacing(6).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(evidence.quote).momoHandwriting(size: 14).lineSpacing(4).textSelection(.enabled)
                     if let time = evidence.recordedAt {
                         Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
-                            .font(.caption)
+                            .font(.caption2)
                     }
                 }
-                .padding(.leading, 12)
-                .overlay(alignment: .leading) { Rectangle().fill(colors.margin.opacity(0.5)).frame(width: 2).accessibilityHidden(true) }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) { Rectangle().fill(colors.margin.opacity(0.45)).frame(width: 2).accessibilityHidden(true) }
                 .foregroundStyle(colors.secondaryInk)
             }
-            Text("✍️ MoMo 手写手账")
-                .momoHandwriting(size: 14, weight: .medium, relativeTo: .caption)
-                .foregroundStyle(colors.secondaryInk)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .accessibilityHidden(true)
         }
         .foregroundStyle(colors.ink)
         .memoryNotebookPage()
@@ -1005,37 +951,66 @@ struct DreamMemorySection: Identifiable {
 }
 
 enum DreamMemoryCategory: String, CaseIterable, Identifiable {
-    case all
-    case briefing
     case project
-    case journal
-    case person
+    case briefing
     case topic
+    case person
+    case journal
     case core
+    case all
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .all: return "全部"
-        case .briefing: return "晨间简报"
         case .project: return "在研项目"
-        case .journal: return "每日日志"
-        case .person: return "人物"
+        case .briefing: return "晨间简报"
         case .topic: return "主题"
+        case .person: return "人物"
+        case .journal: return "每日日志"
         case .core: return "核心记忆"
+        case .all: return "目录"
         }
     }
 
     var symbol: String {
         switch self {
-        case .all: return "square.grid.2x2"
-        case .briefing: return "sun.max"
         case .project: return "folder.badge.gearshape"
-        case .journal: return "calendar"
-        case .person: return "person.2"
+        case .briefing: return "sun.max"
         case .topic: return "folder"
+        case .person: return "person.2"
+        case .journal: return "calendar"
         case .core: return "sparkles"
+        case .all: return "list.bullet"
+        }
+    }
+
+    var isNotebookReaderCategory: Bool {
+        switch self {
+        case .project, .briefing, .topic, .person, .journal:
+            return true
+        case .core, .all:
+            return false
+        }
+    }
+
+    static func preferredInitialCategory(for memories: [ContextMemory]) -> DreamMemoryCategory {
+        for candidate: DreamMemoryCategory in [.project, .briefing, .topic, .person, .journal] {
+            if memories.contains(where: { candidate.matches($0) }) {
+                return candidate
+            }
+        }
+        return .all
+    }
+
+    static func category(for memory: ContextMemory) -> DreamMemoryCategory {
+        switch memory.kind {
+        case "project": return .project
+        case "briefing": return .briefing
+        case "topic": return .topic
+        case "person": return .person
+        case "journal": return .journal
+        default: return .core
         }
     }
 
@@ -1074,7 +1049,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         case "user": rank = 5
         default: rank = 6
         }
-        let digest = MemoryCardDigest(memory: memory)
+        let digest = MemoryCardDigest.cached(for: memory)
         let dateKey = Self.normalizedSortDate(digest.dateBadge)
         return (rank, dateKey)
     }
@@ -1102,13 +1077,13 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         let notebooks = sortMemories(filtered.filter { ["briefing", "project", "journal", "topic", "person"].contains($0.kind) })
         let coreItems = sortMemories(filtered.filter { !["briefing", "project", "journal", "topic", "person"].contains($0.kind) })
         if notebooks.isEmpty {
-            return [DreamMemorySection(id: "core", title: "核心记忆与偏好", subtitle: nil, items: coreItems)]
+            return [DreamMemorySection(id: "core", title: "核心记忆", subtitle: nil, items: coreItems)]
         }
         var result: [DreamMemorySection] = [
             DreamMemorySection(
                 id: "notebook",
-                title: "Dream 活页笔记本",
-                subtitle: "闲时自动整理的晨间简报、每日日志、人物脉络与专项主题",
+                title: "手账活页",
+                subtitle: nil,
                 items: notebooks
             )
         ]
@@ -1116,8 +1091,8 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
             result.append(
                 DreamMemorySection(
                     id: "core",
-                    title: "核心记忆与偏好",
-                    subtitle: "长期保留的个人偏好与关键事实索引",
+                    title: "核心记忆",
+                    subtitle: nil,
                     items: coreItems
                 )
             )
@@ -1350,9 +1325,28 @@ struct DreamBriefingCard: Identifiable, Equatable, Sendable {
     let subtitle: String
     let prompt: String
     let motif: DreamDotMatrixKind
+    var slotIndex: Int = 0
+
+    private static let dateRegex = try? NSRegularExpression(pattern: #"(\d{4}-\d{2}-\d{2})"#)
+
+    static func dayToken(from headline: String) -> String {
+        if let regex = dateRegex,
+           let match = regex.firstMatch(in: headline, range: NSRange(headline.startIndex..., in: headline)),
+           let r = Range(match.range(at: 1), in: headline) {
+            return String(headline[r])
+        }
+        return headline
+    }
 
     func persistenceKeys(headline: String) -> [String] {
-        [id, "\(headline)|\(id)", "\(headline)|\(title)"]
+        let day = Self.dayToken(from: headline)
+        return [
+            id,
+            "\(headline)|\(id)",
+            "\(headline)|\(title)",
+            "\(headline)|slot-\(slotIndex)",
+            "day|\(day)|slot-\(slotIndex)",
+        ]
     }
 
     func isDismissed(in dismissedIDs: Set<String>, headline: String) -> Bool {
@@ -1418,7 +1412,8 @@ struct DreamBriefingDocument: Equatable, Sendable {
                         title: title,
                         subtitle: subtitle,
                         prompt: prompt,
-                        motif: motif
+                        motif: motif,
+                        slotIndex: idx
                     )
                 )
             }
@@ -1481,7 +1476,8 @@ struct DreamBriefingDocument: Equatable, Sendable {
                         title: shortTitle,
                         subtitle: "晨间简报待跟进线索",
                         prompt: "围绕晨间简报里的这条线索帮我继续梳理和推进：\(bullet)",
-                        motif: idx == 0 ? .memoryLoop : .voiceWave
+                        motif: idx == 0 ? .memoryLoop : .voiceWave,
+                        slotIndex: idx
                     )
                 )
             }
@@ -1500,49 +1496,10 @@ struct DreamBriefingDocument: Equatable, Sendable {
 
     static func resolve(from memories: [ContextMemory]) -> DreamBriefingDocument? {
         let active = memories.filter { $0.status != "forgotten" }
-        if let briefing = active.first(where: { $0.kind == "briefing" }) {
-            return parse(markdown: briefing.text)
+        guard let briefing = active.first(where: { $0.kind == "briefing" }) else {
+            return nil
         }
-        // Fallback: if BRIEFING.md hasn't been written yet, synthesize up to 2 cards from recent project/journal/topic/person notes
-        let notebookItems = active.filter { ["project", "journal", "topic", "person"].contains($0.kind) }
-        guard !notebookItems.isEmpty else { return nil }
-        var synthesized: [DreamBriefingCard] = []
-        for (idx, item) in notebookItems.prefix(2).enumerated() {
-            let lines = item.text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            let heading = lines.first?.replacingOccurrences(of: #"^#+\s*"#, with: "", options: .regularExpression) ?? "近期脉络整理"
-            let excerpt = lines.dropFirst().first { !$0.hasPrefix("#") } ?? heading
-            let subtitle: String
-            let motif: DreamDotMatrixKind
-            switch item.kind {
-            case "project":
-                subtitle = "推进在研项目活页"
-                motif = .fragmentLink
-            case "journal":
-                subtitle = "回顾近期每日日志"
-                motif = .lifeFlow
-            case "person":
-                subtitle = "串联人物协作上下文"
-                motif = .relationWeave
-            default:
-                subtitle = "接着推进主题活页"
-                motif = idx == 0 ? .memoryLoop : .voiceWave
-            }
-            synthesized.append(
-                DreamBriefingCard(
-                    id: "synth-\(item.id)",
-                    title: String(heading.prefix(16)),
-                    subtitle: subtitle,
-                    prompt: "请结合我的「\(heading)」笔记（\(excerpt.prefix(80))），帮我梳理下一步重点。",
-                    motif: motif
-                )
-            )
-        }
-        return DreamBriefingDocument(
-            headline: "Dream 活页脉络",
-            overview: "已根据近期对话与录音整理出 \(notebookItems.count) 篇 Markdown 活页笔记。",
-            rawMarkdown: notebookItems.map(\.text).joined(separator: "\n\n---\n\n"),
-            cards: synthesized
-        )
+        return parse(markdown: briefing.text)
     }
 }
 
@@ -1557,7 +1514,8 @@ struct DreamHomeCardsSection: View {
 
     private var isDark: Bool { colorScheme == .dark }
     private var visibleCards: [DreamBriefingCard] {
-        document.cards.filter { !$0.isDismissed(in: dismissedIDs, headline: document.headline) }
+        let allDismissed = dismissedIDs.union(DreamDismissedCardsStore.load())
+        return document.cards.filter { !$0.isDismissed(in: allDismissed, headline: document.headline) }
     }
 
     var body: some View {
@@ -1724,6 +1682,98 @@ enum DreamMemoryLinkResolver {
     }
 }
 
+struct MemoryBinderPageSwitcher: View {
+    let items: [ContextMemory]
+    let selectedID: String
+    let onSelect: (ContextMemory) -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    private var currentIndex: Int {
+        items.firstIndex(where: { $0.id == selectedID }) ?? 0
+    }
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        if items.count > 1 {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    ScrollViewReader { proxy in
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                    let isSelected = item.id == selectedID
+                                    let digest = MemoryCardDigest.cached(for: item)
+                                    let pillLabel = (item.kind == "journal" ? (digest.dateBadge ?? digest.title) : digest.title)
+                                    Button {
+                                        onSelect(item)
+                                    } label: {
+                                        Text(pillLabel)
+                                            .momoHandwriting(size: 13.5, weight: isSelected ? .semibold : .regular)
+                                            .lineLimit(1)
+                                            .foregroundStyle(isSelected ? colors.paper : colors.ink)
+                                            .padding(.horizontal, 11)
+                                            .padding(.vertical, 6)
+                                            .frame(minHeight: 34)
+                                            .background(
+                                                isSelected ? colors.ink : colors.paper,
+                                                in: Capsule()
+                                            )
+                                            .overlay {
+                                                Capsule()
+                                                    .strokeBorder(colors.secondaryInk.opacity(isSelected ? 0 : 0.18), lineWidth: 0.5)
+                                            }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .id(item.id)
+                                    .accessibilityIdentifier("remote.memoryPagePill.\(index)")
+                                }
+                            }
+                        }
+                        .onChange(of: selectedID) { _, newID in
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                proxy.scrollTo(newID, anchor: .center)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 4) {
+                        Button {
+                            let prev = (currentIndex - 1 + items.count) % items.count
+                            onSelect(items[prev])
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(colors.ink)
+                                .frame(width: 32, height: 32)
+                                .background(colors.paper, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("上一页")
+
+                        Text("\(currentIndex + 1)/\(items.count)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(colors.secondaryInk)
+                            .frame(minWidth: 28)
+
+                        Button {
+                            let next = (currentIndex + 1) % items.count
+                            onSelect(items[next])
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(colors.ink)
+                                .frame(width: 32, height: 32)
+                                .background(colors.paper, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("下一页")
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct MemoryNotePreviewSheet: View {
     @State var memory: ContextMemory
     let allMemories: [ContextMemory]
@@ -1731,16 +1781,27 @@ struct MemoryNotePreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
 
+    private var siblingMemories: [ContextMemory] {
+        let active = allMemories.filter { $0.status != "forgotten" && $0.kind == memory.kind }
+        return DreamMemoryCategory.sortMemories(active)
+    }
+
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        let digest = MemoryCardDigest(memory: memory)
+        let digest = MemoryCardDigest.cached(for: memory)
         NavigationStack {
             ScrollView {
-                ClientMemoryContent(memory: memory)
-                    .memoryNotebookPage()
-                    .frame(maxWidth: 680, alignment: .leading)
-                    .padding(20)
-                    .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 12) {
+                    MemoryBinderPageSwitcher(
+                        items: siblingMemories,
+                        selectedID: memory.id,
+                        onSelect: { memory = $0 }
+                    )
+                    ClientMemoryContent(memory: memory)
+                }
+                .frame(maxWidth: 640, alignment: .leading)
+                .padding(16)
+                .frame(maxWidth: .infinity)
             }
             .background(colors.desk)
             .navigationTitle(digest.title)
@@ -1771,7 +1832,7 @@ struct MemoryNotePreviewSheet: View {
             return .systemAction
         })
         #if os(macOS)
-        .frame(minWidth: 580, minHeight: 520)
+        .frame(width: 540, height: 480)
         #endif
     }
 }
