@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from context_store import ContextStore, Conflict
-from hermes_memory import HermesMemory
+from momo_memory import MoMoMemory
 import transcript_ingestion
 import memory_review
 import recording_summary
@@ -25,7 +25,7 @@ class ContextService:
         self.directory = self.data / "context"
         self.connection = connection
         self.key = (self.data / "api-key").read_text().strip()
-        self.memory = HermesMemory(self.data / "hermes")
+        self.memory = MoMoMemory(self.data)
         self.stopped = threading.Event()
         self.next_dispatch = time.monotonic() + transcript_ingestion.INTERVAL
         store = ContextStore(self.directory); store.close()
@@ -106,6 +106,12 @@ class ContextService:
                             result = recording_summary.enqueue(store, body)
                         elif url.path == "/v1/memories/forget":
                             result = service.memory.forget(body["id"])
+                        elif url.path == "/v1/memories/dream":
+                            job, enqueued = memory_review.enqueue_manual_dream(store, service.data)
+                            service.next_dispatch = 0
+                            result = {"job_id": job["id"], "state": job["state"], "enqueued": enqueued}
+                        elif url.path == "/v1/speakers/ack":
+                            result = store.ack_speaker_relabels(body.get("ids") or [])
                         else:
                             self.respond(404, {"error": {"code": "not_found", "message": "Unknown MoMo route"}}); return
                     elif url.path == "/v1/summaries":
@@ -134,6 +140,7 @@ class ContextService:
                                   "memory_pending": store.db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('pending','running')").fetchone()[0],
                                   "memory_needs_review": store.db.execute("SELECT COUNT(*) FROM jobs WHERE state='needs_review'").fetchone()[0]}
                         result['memory_review'] = memory_review.status(store)
+                        result['speaker_relabels'] = store.pending_speaker_relabels(limit=32)
                     else:
                         self.respond(404, {"error": {"code": "not_found", "message": "Unknown MoMo route"}}); return
                     self.respond(200, result)
@@ -210,7 +217,9 @@ class ContextService:
         while not self.stopped.wait(2):
             store = ContextStore(self.directory)
             try:
-                review = store.db.execute("SELECT * FROM memory_reviews WHERE state='running' OR (state='pending' AND first_attempt IS NOT NULL) ORDER BY rowid LIMIT 1").fetchone()
+                review = store.db.execute(
+                    "SELECT * FROM memory_reviews WHERE state='running' OR (state='pending' AND (first_attempt IS NOT NULL OR json_extract(input, '$.manual_requested_at') IS NOT NULL)) ORDER BY rowid LIMIT 1"
+                ).fetchone()
                 if review:
                     self.advance_review(store, review)
                     continue
@@ -305,9 +314,18 @@ class ContextService:
                 transcript_ingestion.finish(store, job, receipt)
             elif status == 'failed' and memory_review.retry_completed(store, 'jobs', job, 'Native review failed'):
                 return
-            elif status not in {"started", "queued", "running", "stopping"}:
+            elif status in {"started", "queued", "running", "stopping"}:
+                now_ts = time.time()
+                if (job["first_attempt"] and now_ts - float(job["first_attempt"]) > 420) or (job["replay_before"] and now_ts >= float(job["replay_before"])):
+                    if memory_review.retry_completed(store, 'jobs', job, 'Memory run timed out'):
+                        return
+                    raise Conflict("Memory execution timed out")
+            else:
                 raise Conflict("Memory execution needs review: " + status)
         except Exception as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 404 and job["run_id"]:
+                if memory_review.retry_completed(store, 'jobs', job, 'Memory run missing'):
+                    return
             review = isinstance(error, Conflict) or isinstance(error, urllib.error.HTTPError) and error.code in {400, 403, 404, 409, 410, 422}
             # Keep the same admission key after a transient failure or lost acknowledgement.
             store.db.execute("UPDATE jobs SET state=CASE WHEN ? THEN 'needs_review' ELSE state END,error=? WHERE id=? AND state IN ('pending','running')",
@@ -342,9 +360,18 @@ class ContextService:
                 memory_review.finish(store, job, receipt, self.data / 'hermes')
             elif snapshot['status'] == 'failed' and memory_review.retry_completed(store, 'memory_reviews', job, 'Native review failed'):
                 return
-            elif snapshot['status'] not in {'started','queued','running','stopping'}:
+            elif snapshot['status'] in {'started','queued','running','stopping'}:
+                now_ts = time.time()
+                if (job['first_attempt'] and now_ts - float(job['first_attempt']) > 420) or (job['replay_before'] and now_ts >= float(job['replay_before'])):
+                    if memory_review.retry_completed(store, 'memory_reviews', job, 'Memory review timed out'):
+                        return
+                    raise Conflict('Memory review timed out')
+            else:
                 raise Conflict('Memory review execution needs review: ' + snapshot['status'])
         except Exception as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 404 and job['run_id']:
+                if memory_review.retry_completed(store, 'memory_reviews', job, 'Memory review run missing'):
+                    return
             review = isinstance(error, Conflict) or isinstance(error, urllib.error.HTTPError) and error.code in {400,403,404,409,410,422}
             store.db.execute("UPDATE memory_reviews SET state=CASE WHEN ? THEN 'needs_review' ELSE state END,error=? WHERE id=? AND state IN ('pending','running')",
                              (int(review),str(error)[:500],job['id']))

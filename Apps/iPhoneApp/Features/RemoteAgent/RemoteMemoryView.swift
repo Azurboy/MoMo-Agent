@@ -3,14 +3,42 @@ import MoMoAgentClient
 
 struct RemoteMemoryView: View {
     let sync: PhoneContextSync
+    var onSelectBriefingCard: ((DreamBriefingCard) -> Void)? = nil
     @State private var forgetting: ContextMemory?
     @State private var showingSync = false
-    private var memories: [ContextMemory] { sync.memories.filter { $0.status != "forgotten" } }
+    @State private var selectedCategory: DreamMemoryCategory = .all
+    @State private var dismissedBriefingCardIDs: Set<String> = []
+    @State private var showingBriefingSheet = false
+
+    private var allMemories: [ContextMemory] { sync.memories.filter { $0.status != "forgotten" } }
+    private var memories: [ContextMemory] {
+        allMemories.filter { selectedCategory.matches($0) }
+    }
+    private var briefingDocument: DreamBriefingDocument? {
+        DreamBriefingDocument.resolve(from: allMemories)
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 20) {
                 syncStatus
+                dreamStatusRow
+                if !allMemories.isEmpty {
+                    categoryFilterStrip
+                }
+                if (selectedCategory == .all || selectedCategory == .briefing),
+                   let doc = briefingDocument, !doc.cards.isEmpty {
+                    DreamHomeCardsSection(
+                        document: doc,
+                        dismissedIDs: $dismissedBriefingCardIDs,
+                        onSelectCard: { card in
+                            onSelectBriefingCard?(card)
+                        },
+                        onOpenBriefing: { showingBriefingSheet = true },
+                        onOpenNotebook: { selectedCategory = .briefing }
+                    )
+                    .padding(.horizontal, -20)
+                }
                 if sync.hasLegacyChanges {
                     Text("旧版待同步修改已保留，请核对当前记忆后重新修改。")
                         .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
@@ -20,9 +48,9 @@ struct RemoteMemoryView: View {
                 }
                 if memories.isEmpty {
                     ContentUnavailableView {
-                        Label("还没有记忆", systemImage: "text.book.closed")
+                        Label(allMemories.isEmpty ? "还没有记忆" : "该分类下暂无笔记", systemImage: "text.book.closed")
                     } description: {
-                        Text(sync.isSyncing ? "正在读取记忆…" : "告诉 MoMo 想记住的事。")
+                        Text(sync.isSyncing ? "正在读取记忆…" : (allMemories.isEmpty ? "告诉 MoMo 想记住的事，或点击上方「立即 Dream 整理」。" : "Dream 会在闲时自动为你整理此分类的 Markdown 笔记。"))
                     }.accessibilityIdentifier("remote.memoryEmpty")
                 } else {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -47,8 +75,34 @@ struct RemoteMemoryView: View {
         .navigationTitle("记忆").navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("同步录音与记忆", systemImage: "arrow.clockwise") { Task { await sync.refresh() } }
-                    .disabled(sync.isSyncing).accessibilityIdentifier("remote.syncMemory")
+                HStack(spacing: 12) {
+                    Button("立即 Dream 整理", systemImage: "sparkles") {
+                        Task { await sync.triggerDream() }
+                    }
+                    .disabled(sync.isSyncing || sync.isDreamRequesting || sync.memoryReview?.running == true)
+                    .accessibilityIdentifier("remote.triggerDream")
+                    Button("同步录音与记忆", systemImage: "arrow.clockwise") { Task { await sync.refresh() } }
+                        .disabled(sync.isSyncing).accessibilityIdentifier("remote.syncMemory")
+                }
+            }
+        }
+        .sheet(isPresented: $showingBriefingSheet) {
+            if let doc = briefingDocument {
+                NavigationStack {
+                    ScrollView {
+                        MarkdownReadingView(markdown: doc.rawMarkdown, accessibilityID: "remote.briefingSheetMarkdown")
+                            .padding(20)
+                    }
+                    .phonePageSurface()
+                    .navigationTitle(doc.headline)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") { showingBriefingSheet = false }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
             }
         }
         .alert("忘记这条记忆？", isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } })) {
@@ -58,6 +112,65 @@ struct RemoteMemoryView: View {
             Button("取消", role: .cancel) {}
         } message: { Text("连接 Mac 后删除这条记忆。原始录音与聊天记录仍保留。") }
         .task { await sync.refresh() }
+    }
+
+    private var dreamStatusRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: (sync.memoryReview?.running == true || sync.isDreamRequesting) ? "sparkles" : "moon.stars")
+                .accessibilityHidden(true)
+            if sync.memoryReview?.running == true || sync.isDreamRequesting {
+                Text("正在执行 Dream 闲时深度整理…")
+            } else if let dream = sync.memoryReview?.dream {
+                Text("上次 Dream · \(Date(timeIntervalSince1970: dream.at).formatted(date: .abbreviated, time: .shortened))")
+            } else {
+                Text("Dream 将在空闲时自动整理 Markdown 笔记与人物声纹")
+            }
+            Spacer(minLength: 8)
+            Button {
+                Task { await sync.triggerDream() }
+            } label: {
+                Text("立即整理")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(MoMoPalette.ink.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(sync.isSyncing || sync.isDreamRequesting || sync.memoryReview?.running == true)
+        }
+        .phoneText(.metadata)
+        .foregroundStyle(MoMoPalette.muted)
+    }
+
+    private var categoryFilterStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(DreamMemoryCategory.allCases) { category in
+                    let isSelected = selectedCategory == category
+                    Button {
+                        selectedCategory = category
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: category.symbol)
+                                .font(.system(size: 11, weight: .medium))
+                            Text(category.title)
+                                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .foregroundStyle(isSelected ? MoMoPalette.canvas : MoMoPalette.ink)
+                        .background(isSelected ? MoMoPalette.ink : MoMoPalette.paper, in: Capsule())
+                        .overlay {
+                            if !isSelected {
+                                Capsule().strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("remote.memoryCategory.\(category.rawValue)")
+                }
+            }
+        }
     }
 
     private var syncStatus: some View {
@@ -87,9 +200,14 @@ private struct MemoryPreviewRow: View {
     let memory: ContextMemory
     var body: some View {
         let preview = MemoryPreview(text: memory.text)
+        let isNotebook = ["briefing", "journal", "person", "topic"].contains(memory.kind)
+        let badge = DreamMemoryCategory.badge(for: memory)
         VStack(alignment: .leading, spacing: 10) {
-            if preview.date != nil || preview.sourceNote != nil || memory.kind == "user" || memory.status == "stale" || memory.basis == "inferred" {
+            if isNotebook || preview.date != nil || preview.sourceNote != nil || memory.kind == "user" || memory.status == "stale" || memory.basis == "inferred" {
                 HStack(spacing: 8) {
+                    if isNotebook {
+                        Label(badge.title, systemImage: badge.symbol)
+                    }
                     if let date = preview.date { Text(date) }
                     if let note = preview.sourceNote { Text(note) }
                     if memory.kind == "user" { Text("关于你") }

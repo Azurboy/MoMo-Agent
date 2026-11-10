@@ -4,7 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -74,6 +75,43 @@ const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|
  * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
  * job wait its timeout; the router preset ends both after 5 seconds.
  */
+function momoMemoryPromptBlock(): string {
+  const dataDir = process.env.MOMO_DATA_DIR?.trim()
+  if (!dataDir) return ''
+  const memDir = existsSync(join(dataDir, 'memories')) ? join(dataDir, 'memories') : join(dataDir, 'hermes/memories')
+  if (!existsSync(memDir)) return ''
+  const readMd = (rel: string, maxChars = 3600): string => {
+    try {
+      const p = join(memDir, rel)
+      return existsSync(p) ? readFileSync(p, 'utf8').trim().slice(0, maxChars) : ''
+    } catch { return '' }
+  }
+  const sections: string[] = []
+  const userMd = readMd('USER.md', 2400)
+  if (userMd) sections.push(`### USER.md (用户画像与核心偏好)\n${userMd}`)
+  const memMd = readMd('MEMORY.md', 3600)
+  if (memMd) sections.push(`### MEMORY.md (核心背景与长线索引)\n${memMd}`)
+  const briefingMd = readMd('BRIEFING.md', 2400)
+  if (briefingMd) sections.push(`### BRIEFING.md (最新 Dream 晨间简报)\n${briefingMd}`)
+  const notesIndex: string[] = []
+  for (const [label, folder] of [['person', 'people'], ['topic', 'topics'], ['journal', 'journal']] as const) {
+    try {
+      const dir = join(memDir, folder)
+      if (!existsSync(dir)) continue
+      const files = readdirSync(dir).filter(f => f.endsWith('.md') && !f.startsWith('.')).sort().reverse().slice(0, 15)
+      for (const file of files) {
+        const raw = readMd(`${folder}/${file}`, 240)
+        const title = (raw.split('\n')[0] ?? file).replace(/^#+\s*/, '').trim()
+        notesIndex.push(`- [${label}] \`${join(memDir, folder, file)}\` — ${title}`)
+      }
+    } catch {}
+  }
+  if (notesIndex.length > 0) {
+    sections.push(`### Dream Markdown 活页笔记本索引 (可用 read 或 read_memory_notebook 工具按需精读)\n${notesIndex.join('\n')}`)
+  }
+  return sections.length > 0 ? `\n\n## MoMo 共享长期记忆与 Dream Markdown 活页笔记本\n${sections.join('\n\n')}` : ''
+}
+
 function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
   const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
   if (name === 'bash') {
@@ -245,7 +283,8 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : ''}`
+      const mandate = current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : ''
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${momoMemoryPromptBlock()}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {

@@ -184,21 +184,59 @@ def _cmd_health(data: Path, args: argparse.Namespace) -> dict:
 
 
 def _cmd_memories(data: Path, args: argparse.Namespace) -> dict:
-    from hermes_memory import HermesMemory
-    return HermesMemory(data / "hermes").list(after=args.after, limit=args.limit)
+    from momo_memory import MoMoMemory
+    return MoMoMemory(data).list(after=args.after, limit=args.limit)
 
 
 def _cmd_remember(data: Path, args: argparse.Namespace) -> dict:
-    from hermes_memory import HermesMemory
-    memory = HermesMemory(data / "hermes")
+    from momo_memory import MoMoMemory
+    memory = MoMoMemory(data)
     with memory.store() as store:
         result = store.add(args.target, args.text.strip())
     return result
 
 
 def _cmd_forget(data: Path, args: argparse.Namespace) -> dict:
-    from hermes_memory import HermesMemory
-    return HermesMemory(data / "hermes").forget(args.memory_id)
+    from momo_memory import MoMoMemory
+    return MoMoMemory(data).forget(args.memory_id)
+
+
+def _cmd_notebook(data: Path, args: argparse.Namespace) -> dict:
+    from momo_memory import MoMoMemory
+    memory = MoMoMemory(data)
+    act = args.action
+    if act == "list":
+        return {"notes": memory.list_notebook(args.category or None)}
+    if act == "read":
+        return memory.read_notebook(args.category or "briefing", args.slug or None)
+    if act == "write":
+        return memory.write_notebook(
+            args.category or "briefing",
+            args.content or "",
+            slug=args.slug or None,
+            title=args.title or None,
+            mode=args.mode or "replace",
+        )
+    if act == "remove":
+        return memory.remove_notebook(args.category or "", args.slug or None)
+    raise ValueError(f"Unknown notebook action: {act}")
+
+
+def _cmd_relabel_speakers(data: Path, args: argparse.Namespace) -> dict:
+    store = _open_context(data)
+    try:
+        span_ids = [s.strip() for s in (args.span_ids or "").split(",") if s.strip()] or None
+        return store.relabel_speakers(
+            args.source_id,
+            args.target_speaker,
+            is_owner=bool(args.is_owner),
+            from_speaker=args.from_speaker or None,
+            span_ids=span_ids,
+            scope=args.scope,
+            reason=args.reason or "",
+        )
+    finally:
+        store.close()
 
 
 def _cmd_pim(data: Path, args: argparse.Namespace) -> dict:
@@ -503,6 +541,23 @@ def main() -> int:
     mem_del = sub.add_parser("forget", help="Delete a shared memory entry by id")
     mem_del.add_argument("memory_id")
 
+    nb = sub.add_parser("notebook", help="List, read, write, or remove pure Markdown (.md) living memory notes")
+    nb.add_argument("action", choices=("list", "read", "write", "remove"))
+    nb.add_argument("--category", choices=("briefing", "journal", "person", "topic"), default=None)
+    nb.add_argument("--slug", default=None)
+    nb.add_argument("--title", default=None)
+    nb.add_argument("--content", default=None)
+    nb.add_argument("--mode", choices=("replace", "append"), default="replace")
+
+    relabel = sub.add_parser("relabel-speakers", help="Relabel speaker tags on a recording based on dialogue semantics")
+    relabel.add_argument("source_id")
+    relabel.add_argument("target_speaker")
+    relabel.add_argument("--from-speaker", default="")
+    relabel.add_argument("--span-ids", default="")
+    relabel.add_argument("--is-owner", action="store_true")
+    relabel.add_argument("--scope", choices=("cluster", "selection"), default="cluster")
+    relabel.add_argument("--reason", default="")
+
     conv = sub.add_parser("conversation", help="Read recent MoMo chat history")
     conv.add_argument("--limit", type=int, default=20)
 
@@ -531,6 +586,8 @@ def main() -> int:
         "memories": _cmd_memories,
         "remember": _cmd_remember,
         "forget": _cmd_forget,
+        "notebook": _cmd_notebook,
+        "relabel-speakers": _cmd_relabel_speakers,
         "conversation": _cmd_conversation,
         "web-search": _cmd_web_search,
         "web-extract": _cmd_web_extract,

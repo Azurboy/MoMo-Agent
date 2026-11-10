@@ -216,5 +216,50 @@ export function momoPimTools(host: ExecutorToolsHost, ticketId: string): Tool[] 
       schema: z.object({ note_id: z.string().min(1).max(500) }).strict(),
       execute: (args, signal) => call('delete_note', args, signal),
     },
+
+    // ── Dream Markdown Notebook & Semantic Speaker Relabeling ───────────────────
+    {
+      name: 'list_memory_notebooks',
+      description: 'List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, journal, person, topic).',
+      schema: z.object({
+        category: z.enum(['briefing', 'journal', 'person', 'topic']).optional(),
+      }).strict(),
+      execute: (args, signal) => call('list_memory_notebooks', args, signal),
+    },
+    {
+      name: 'read_memory_notebook',
+      description: 'Read a pure Markdown (.md) living notebook page or core memory file (briefing, journal, person, topic, user, memory).',
+      schema: z.object({
+        category: z.enum(['briefing', 'journal', 'person', 'topic', 'user', 'memory']),
+        slug: z.string().max(180).optional(),
+      }).strict(),
+      execute: (args, signal) => call('read_memory_notebook', args, signal),
+    },
+    {
+      name: 'write_memory_notebook',
+      description: 'Create or update a pure Markdown (.md) living notebook page (briefing, journal, person, topic). Content must be pure Markdown, never raw JSON.',
+      schema: z.object({
+        category: z.enum(['briefing', 'journal', 'person', 'topic']),
+        slug: z.string().max(180).optional(),
+        title: z.string().max(200).optional(),
+        content: z.string().min(1).max(32000),
+        mode: z.enum(['replace', 'append']).default('replace'),
+      }).strict(),
+      execute: (args, signal) => call('write_memory_notebook', args, signal),
+    },
+    {
+      name: 'relabel_recording_speakers',
+      description: 'Relabel anonymous ([说话人 1]) or misattributed speaker spans in a synchronized recording based on semantic dialogue context, and queue the correction back to iPhone.',
+      schema: z.object({
+        source_id: z.string().min(1).max(200),
+        target_speaker: z.string().trim().min(1).max(64),
+        is_owner: z.boolean().default(false),
+        from_speaker: z.string().max(64).optional(),
+        span_ids: z.array(z.string().min(1)).max(200).optional(),
+        scope: z.enum(['cluster', 'selection']).default('cluster'),
+        reason: z.string().max(400).default(''),
+      }).strict(),
+      execute: (args, signal) => call('relabel_recording_speakers', args, signal),
+    },
   ]
 }

@@ -5,16 +5,32 @@ import MoMoAgentClient
 struct DesktopMemory: View {
     @Bindable var model: DesktopModel
     @State private var listMode = false
+    @State private var selectedCategory: DreamMemoryCategory = .all
+    @State private var dismissedBriefingCardIDs: Set<String> = []
     @State private var inspecting: ContextMemory?
     @State private var webFailure: String?
+    @State private var dreamRequesting = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
-    private var memories: [ContextMemory] { model.memories.filter { $0.status != "forgotten" } }
+    private var allMemories: [ContextMemory] { model.memories.filter { $0.status != "forgotten" } }
+    private var memories: [ContextMemory] { allMemories.filter { selectedCategory.matches($0) } }
+    private var briefingDocument: DreamBriefingDocument? { DreamBriefingDocument.resolve(from: allMemories) }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 16) {
                 Text("记忆").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
                 Spacer()
+                Button("立即 Dream 整理", systemImage: "sparkles") {
+                    dreamRequesting = true
+                    Task {
+                        defer { dreamRequesting = false }
+                        try? await model.triggerDream()
+                    }
+                }
+                .frame(width: 28, height: 28)
+                .help("立即执行 Dream 闲时深度整理")
+                .accessibilityIdentifier("settings.memory.dream")
+                .disabled(model.contextLoading || dreamRequesting || model.memoryReviewStatus?.running == true)
                 Button(listMode ? "星图" : "列表", systemImage: listMode ? "circle.hexagongrid" : "list.bullet") { listMode.toggle() }
                     .frame(width: 28, height: 28).accessibilityIdentifier("settings.memory.view")
                     .disabled(reducedMotion).help(reducedMotion ? "减少动态效果时使用列表" : "切换记忆视图")
@@ -23,39 +39,92 @@ struct DesktopMemory: View {
             .buttonStyle(.plain).labelStyle(.iconOnly).padding(20)
             if let review = model.memoryReviewStatus {
                 HStack(spacing: 12) {
-                    Label(review.running ? "正在整理记忆" : "自动整理已开启", systemImage: review.running ? "sparkles" : "checkmark.circle")
+                    Label((review.running || dreamRequesting) ? "正在整理记忆" : "自动整理已开启", systemImage: (review.running || dreamRequesting) ? "sparkles" : "checkmark.circle")
                     Spacer(minLength: 8)
                     if review.needsReview + model.transcriptMemoryNeedsReview > 0 {
                         Text("部分整理未完成").foregroundStyle(MoMoPalette.failure)
                     } else if let dream = review.dream {
                         Text("Dream · \(Date(timeIntervalSince1970: dream.at).formatted(date: .abbreviated, time: .shortened))")
                     } else { Text("Dream 将在空闲时整理") }
-                }.font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 16)
+                }.font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 12)
                     .accessibilityElement(children: .combine).accessibilityIdentifier("settings.memory.status")
+            }
+            if !allMemories.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(DreamMemoryCategory.allCases) { category in
+                            let isSelected = selectedCategory == category
+                            Button {
+                                selectedCategory = category
+                                if category != .all { listMode = true }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: category.symbol).font(.system(size: 11, weight: .medium))
+                                    Text(category.title).font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .foregroundStyle(isSelected ? MoMoPalette.canvas : MoMoPalette.ink)
+                                .background(isSelected ? MoMoPalette.ink : MoMoPalette.paper, in: Capsule())
+                                .overlay {
+                                    if !isSelected {
+                                        Capsule().strokeBorder(MoMoPalette.line, lineWidth: 0.5)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                }
             }
             if let error = model.memoryError ?? webFailure {
                 HStack { Text(error).phoneText(.caption); Spacer(); Button("重试") { webFailure = nil; Task { await model.loadContext() } } }
                     .foregroundStyle(MoMoPalette.failure).padding(16)
             }
-            if model.contextLoading && memories.isEmpty { ProgressView("正在读取记忆").frame(maxWidth: .infinity, maxHeight: .infinity) }
+            if model.contextLoading && allMemories.isEmpty { ProgressView("正在读取记忆").frame(maxWidth: .infinity, maxHeight: .infinity) }
             else if memories.isEmpty {
-                ContentUnavailableView("还没有记忆", systemImage: "book.closed", description: Text("MoMo 记住的内容会出现在这里。"))
+                ContentUnavailableView(allMemories.isEmpty ? "还没有记忆" : "该分类下暂无笔记", systemImage: "book.closed", description: Text("MoMo 记住的内容与 Dream 整理的 Markdown 活页会出现在这里。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if listMode || reducedMotion || webFailure != nil {
+            } else if listMode || reducedMotion || webFailure != nil || selectedCategory != .all {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(memories) { memory in
-                            Button { inspecting = memory } label: {
-                                HStack(spacing: 16) {
-                                    ClientMemoryContent(memory: memory).frame(maxWidth: .infinity, alignment: .leading)
-                                    Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary).accessibilityHidden(true)
-                                }.desktopSettingsRow().contentShape(Rectangle())
-                            }.buttonStyle(.plain)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if (selectedCategory == .all || selectedCategory == .briefing),
+                           let doc = briefingDocument, !doc.cards.isEmpty {
+                            DreamHomeCardsSection(
+                                document: doc,
+                                dismissedIDs: $dismissedBriefingCardIDs,
+                                onSelectCard: { card in
+                                    guard let store = model.taskStore else { return }
+                                    store.setDraft(card.prompt)
+                                    try? store.enqueue()
+                                    Task { await store.refresh(userInitiated: true) }
+                                    model.selection = "chat"
+                                },
+                                onOpenBriefing: {
+                                    if let item = allMemories.first(where: { $0.kind == "briefing" }) ?? allMemories.first {
+                                        inspecting = item
+                                    }
+                                },
+                                onOpenNotebook: { selectedCategory = .briefing }
+                            )
+                            .padding(.horizontal, 8)
                         }
-                    }.padding(.horizontal, 24)
+                        LazyVStack(spacing: 0) {
+                            ForEach(memories) { memory in
+                                Button { inspecting = memory } label: {
+                                    HStack(spacing: 16) {
+                                        ClientMemoryContent(memory: memory).frame(maxWidth: .infinity, alignment: .leading)
+                                        Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary).accessibilityHidden(true)
+                                    }.desktopSettingsRow().contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }.padding(.horizontal, 24)
+                    }
                 }
             } else {
-                HermesMemoryView(memories: memories, inspect: { id in inspecting = memories.first { $0.id == id } }, failure: { webFailure = $0 })
+                MoMoMemoryGraphView(memories: memories, inspect: { id in inspecting = memories.first { $0.id == id } }, failure: { webFailure = $0 })
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -128,8 +197,8 @@ private struct DesktopMemoryDetail: View {
     }
 }
 
-/// A local-only build of the vendored Hermes StarMap. No server credential enters WebKit.
-private struct HermesMemoryView: NSViewRepresentable {
+/// A local-only build of the vendored StarMap memory graph. No server credential enters WebKit.
+private struct MoMoMemoryGraphView: NSViewRepresentable {
     let memories: [ContextMemory]
     let inspect: (String) -> Void
     let failure: (String) -> Void
