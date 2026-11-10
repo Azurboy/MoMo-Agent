@@ -206,12 +206,24 @@ struct LifeIllustrationJourneyMapView: View {
             .background(JourneyPalette.canvas(for: colorScheme))
         } else {
             let legs = IllustrationJourneyLeg.make(stops: stops, allItems: items)
-            let pins = projection.pins
             let visible = visibleStops(in: size, callouts: projection.callouts)
             let cards = JourneyCallout.layout(stops: visible, allStops: stops, pins: projection.callouts.pins, size: size)
-            let cardIDs = Set(cards.map(\.id))
+            let placeTitles = Dictionary(uniqueKeysWithValues: stops.compactMap { stop -> (String, String)? in
+                guard let place = displayPlace(for: stop), !place.isEmpty else { return nil }
+                return (stop.id, place)
+            })
             ZStack {
-                LifeIllustrationMapSurface(stops: stops, legs: legs, command: mapCommand) { value in
+                LifeIllustrationMapSurface(
+                    stops: stops,
+                    legs: legs,
+                    cards: cards,
+                    placeTitles: placeTitles,
+                    isDark: colorScheme == .dark,
+                    command: mapCommand,
+                    onSelectStop: { stop in
+                        detail = stop.illustrations.first { $0.id == initialID } ?? stop.primary
+                    }
+                ) { value in
                     if projection != value {
                         var transaction = Transaction()
                         transaction.disablesAnimations = true
@@ -220,23 +232,6 @@ struct LifeIllustrationJourneyMapView: View {
                 }
                 .accessibilityIdentifier("lifeIllustration.map.surface")
                 .brightness(colorScheme == .dark ? 0.03 : 0)
-                JourneyInkLayer(allStops: stops, cards: cards, pins: pins, projection: projection, legs: legs, geographic: true)
-                    .allowsHitTesting(false).accessibilityHidden(true)
-                ForEach(stops) { stop in
-                    if !cardIDs.contains(stop.id),
-                       let pin = pins[stop.id],
-                       CGRect(origin: .zero, size: size).contains(pin) {
-                        Button {
-                            detail = stop.illustrations.first { $0.id == initialID } ?? stop.primary
-                        } label: {
-                            Color.clear.frame(width: 30, height: 30).contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .position(x: pin.x, y: pin.y)
-                        .accessibilityLabel(displayPlace(for: stop) ?? stop.stayCaption)
-                        .accessibilityIdentifier("lifeIllustration.map.pin.\(stop.id)")
-                    }
-                }
                 ForEach(cards) { card in
                     storyCard(card)
                         .frame(width: card.frame.width, height: card.frame.height)
@@ -629,130 +624,5 @@ private enum JourneyPalette {
         scheme == .dark
             ? Color(red: 0.12, green: 0.11, blue: 0.10)
             : Color(red: 0.985, green: 0.978, blue: 0.960)
-    }
-}
-
-private struct JourneyInkLayer: View {
-    let allStops: [IllustrationJourneyStop]
-    let cards: [JourneyCallout]
-    let pins: [String: CGPoint]
-    let projection: JourneyProjection
-    let legs: [IllustrationJourneyLeg]
-    let geographic: Bool
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        Canvas { context, size in
-            let casing = JourneyPalette.routeCasing(for: colorScheme)
-            let ribbon = JourneyPalette.routeRibbon(for: colorScheme)
-            let stemColor = JourneyPalette.connectorStem(for: colorScheme)
-            let pinFill = JourneyPalette.pinFill(for: colorScheme)
-            let pinRim = JourneyPalette.pinRim(for: colorScheme)
-            let pinText = JourneyPalette.pinText(for: colorScheme)
-
-            // 1. Editorial fountain-pen ink route curves
-            let routeEntries: [(points: [CGPoint], seed: Int)] = geographic
-                ? legs.enumerated().compactMap { index, leg in projection.routes[leg.id].map { ($0, index) } }
-                : [(cards.map(\.pin), 0)]
-
-            for (points, seed) in routeEntries where points.count >= 2 {
-                let path = journeyCurve(points, seed: seed)
-                context.stroke(path, with: .color(casing), style: StrokeStyle(lineWidth: 8.2, lineCap: .round, lineJoin: .round))
-                context.stroke(path, with: .color(ribbon), style: StrokeStyle(lineWidth: 3.6, lineCap: .round, lineJoin: .round))
-                if let sample = journeyRouteSample(points, seed: seed, fraction: 0.52) {
-                    let mid = sample.point, angle = sample.angle
-                    var chevron = Path()
-                    chevron.move(to: CGPoint(x: mid.x - 5.0 * cos(angle - 0.62), y: mid.y - 5.0 * sin(angle - 0.62)))
-                    chevron.addLine(to: CGPoint(x: mid.x + 1.5 * cos(angle), y: mid.y + 1.5 * sin(angle)))
-                    chevron.addLine(to: CGPoint(x: mid.x - 5.0 * cos(angle + 0.62), y: mid.y - 5.0 * sin(angle + 0.62)))
-                    context.stroke(chevron, with: .color(pinRim), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                }
-            }
-
-            // 2. Compact transit time pills hugging the route
-            var badges: [CGRect] = []
-            for (legIndex, leg) in legs.enumerated() {
-                guard let caption = leg.timeCaption,
-                      let points = projection.routes[leg.id], points.count >= 2 else { continue }
-
-                var chosen: (badgeCenter: CGPoint, routeAnchor: CGPoint)?
-                outer: for fraction: CGFloat in [0.48, 0.36, 0.64, 0.25, 0.75, 0.18, 0.82] {
-                    guard let sample = journeyRouteSample(points, seed: legIndex, fraction: fraction) else { continue }
-                    let anchor = sample.point
-                    let nx = -sin(sample.angle), ny = cos(sample.angle)
-                    for offset: CGFloat in [0, 26, -26, 48, -48, 72, -72, 96, -96] {
-                        let candidate = CGPoint(
-                            x: min(size.width - 52, max(52, anchor.x + nx * offset)),
-                            y: min(size.height - 24, max(16, anchor.y + ny * offset))
-                        )
-                        let hitRect = CGRect(x: candidate.x - 48, y: candidate.y - 12, width: 96, height: 24)
-                        let clearOfCards = !cards.contains { $0.frame.insetBy(dx: -4, dy: -4).intersects(hitRect) }
-                        let clearOfBadges = !badges.contains { $0.insetBy(dx: -6, dy: -4).intersects(hitRect) }
-                        let clearOfPins = !pins.values.contains { hitRect.insetBy(dx: -12, dy: -10).contains($0) }
-                        if clearOfCards && clearOfBadges && clearOfPins {
-                            chosen = (candidate, anchor)
-                            break outer
-                        }
-                    }
-                }
-
-                if let chosen {
-                    let pill = CGRect(x: chosen.badgeCenter.x - 46, y: chosen.badgeCenter.y - 10, width: 92, height: 20)
-                    badges.append(pill)
-                    let dist = hypot(chosen.badgeCenter.x - chosen.routeAnchor.x, chosen.badgeCenter.y - chosen.routeAnchor.y)
-                    if dist > 10 {
-                        let mid = CGPoint(
-                            x: (chosen.routeAnchor.x + chosen.badgeCenter.x) * 0.5 - (chosen.badgeCenter.y - chosen.routeAnchor.y) * 0.22,
-                            y: (chosen.routeAnchor.y + chosen.badgeCenter.y) * 0.5 + (chosen.badgeCenter.x - chosen.routeAnchor.x) * 0.22
-                        )
-                        var stem = Path()
-                        stem.move(to: chosen.routeAnchor)
-                        stem.addQuadCurve(to: chosen.badgeCenter, control: mid)
-                        context.stroke(stem, with: .color(casing), style: StrokeStyle(lineWidth: 2.8, lineCap: .round))
-                        context.stroke(stem, with: .color(stemColor), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
-                    }
-                    let pillPath = Path(roundedRect: pill, cornerRadius: 10)
-                    context.fill(pillPath, with: .color(JourneyPalette.cardFill(for: colorScheme)))
-                    context.stroke(pillPath, with: .color(JourneyPalette.cardBorder(for: colorScheme, selected: false)), lineWidth: 0.8)
-                    context.draw(
-                        Text(caption)
-                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(JourneyPalette.cardInk(for: colorScheme)),
-                        at: chosen.badgeCenter
-                    )
-                }
-            }
-
-            // 3. Delicate graphite S-curve stems for visible callout cards
-            for card in cards {
-                guard let pin = pins[card.id], CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24).contains(pin) else { continue }
-                let connector = journeyCardConnector(pin: pin, frame: card.frame, right: card.right)
-
-                context.stroke(connector.path, with: .color(casing.opacity(0.85)), style: StrokeStyle(lineWidth: 3.2, lineCap: .round))
-                context.stroke(connector.path, with: .color(stemColor), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
-
-                let dotRect = CGRect(x: connector.anchor.x - 2.6, y: connector.anchor.y - 2.6, width: 5.2, height: 5.2)
-                context.fill(Path(ellipseIn: dotRect), with: .color(pinFill))
-                context.stroke(Path(ellipseIn: dotRect), with: .color(pinRim), lineWidth: 1.0)
-            }
-
-            // 4. Ceramic charcoal/ivory pebble pins for every located stop on the single-page map
-            for (idx, stop) in allStops.enumerated() {
-                guard let pin = pins[stop.id], CGRect(origin: .zero, size: size).insetBy(dx: -24, dy: -24).contains(pin) else { continue }
-                let pinRect = CGRect(x: pin.x - 13, y: pin.y - 11, width: 26, height: 22)
-                let shadowRect = pinRect.offsetBy(dx: 0, dy: 1.8)
-                context.fill(JourneyPebble().path(in: shadowRect), with: .color(.black.opacity(colorScheme == .dark ? 0.34 : 0.14)))
-
-                let pebble = JourneyPebble().path(in: pinRect)
-                context.fill(pebble, with: .color(pinFill))
-                context.stroke(pebble, with: .color(pinRim), lineWidth: 1.8)
-                context.draw(
-                    Text("\(idx + 1)")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(pinText),
-                    at: pin
-                )
-            }
-        }
     }
 }

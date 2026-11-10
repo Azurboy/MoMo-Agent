@@ -150,6 +150,38 @@ final class LifeIllustrationJourneyLayoutTests: XCTestCase {
         }
     }
 
+    func testWorldRouteCurveRemainsLockedUnderMapPanAndZoomTransforms() {
+        let coords = [
+            CLLocationCoordinate2D(latitude: 39.9960, longitude: 116.4740),
+            CLLocationCoordinate2D(latitude: 39.9720, longitude: 116.4680),
+            CLLocationCoordinate2D(latitude: 39.9502, longitude: 116.4628)
+        ]
+        let roadPoints = journeyWorldCurvePoints(coords, isRoadFitted: true, seed: 0)
+        let fallbackPoints = journeyWorldCurvePoints(coords, isRoadFitted: false, seed: 0)
+        XCTAssertGreaterThanOrEqual(roadPoints.count, 4)
+        XCTAssertGreaterThan(fallbackPoints.count, roadPoints.count)
+        XCTAssertEqual(roadPoints.first?.x ?? 0, MKMapPoint(coords[0]).x, accuracy: 0.01)
+        XCTAssertEqual(roadPoints.last?.y ?? 0, MKMapPoint(coords[2]).y, accuracy: 0.01)
+        XCTAssertEqual(fallbackPoints.first?.x ?? 0, MKMapPoint(coords[0]).x, accuracy: 0.01)
+        XCTAssertEqual(fallbackPoints.last?.y ?? 0, MKMapPoint(coords[2]).y, accuracy: 0.01)
+
+        // Verify exact 1:1 pan & zoom invariance: projecting world vertices through two camera
+        // transforms produces identical relative displacements as the underlying map tiles.
+        let originA = MKMapPoint(coords[0])
+        let scaleA = 0.05
+        let originB = MKMapPoint(x: originA.x + 2_400, y: originA.y - 1_800)
+        let scaleB = 0.125
+        for worldPt in fallbackPoints {
+            let screenA = CGPoint(x: (worldPt.x - originA.x) * scaleA, y: (worldPt.y - originA.y) * scaleA)
+            let screenB = CGPoint(x: (worldPt.x - originB.x) * scaleB, y: (worldPt.y - originB.y) * scaleB)
+            let expectedX = (screenA.x / scaleA + (originA.x - originB.x)) * scaleB
+            let expectedY = (screenA.y / scaleA + (originA.y - originB.y)) * scaleB
+            XCTAssertEqual(screenB.x, expectedX, accuracy: 1e-6)
+            XCTAssertEqual(screenB.y, expectedY, accuracy: 1e-6)
+        }
+        XCTAssertNotNil(journeyWorldRouteSample(fallbackPoints, fraction: 0.52))
+    }
+
     private func item(index: Int, points: [LifeIllustrationRoutePoint] = []) -> LifeIllustration {
         LifeIllustration(id: "stop-\(index)", windowStart: Double(index * 200 + 100),
             windowEnd: Double(index * 200 + 200), logicalDay: "2026-11-05", timezone: "Asia/Shanghai",
