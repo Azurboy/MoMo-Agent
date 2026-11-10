@@ -27,9 +27,11 @@ struct ClientTranscriptRow<Detail: View>: View {
                     VStack(alignment: .leading, spacing: 4) { Text(time).phoneText(.menu).monospacedDigit(); state }
                 }
                 detail()
-                Text(preview).phoneText(.menu).foregroundStyle(MoMoPalette.muted)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !preview.isEmpty {
+                    Text(preview).phoneText(.menu).foregroundStyle(MoMoPalette.muted)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }.padding(.top, 10).padding(.bottom, bottomSpacing)
         }
         .foregroundStyle(MoMoPalette.ink)

@@ -512,7 +512,7 @@ final class TimelineDateNavigationTests: XCTestCase {
 
         let pager = try await waitForSingleAlignedPane(stage: "initial-26-day-entry")
         XCTAssertEqual(model.timeline.selectedDay, today)
-        try await assertProgressText(in: window, contains: "待处理1分钟录音", excludes: ["%"], name: "pager-initial-today")
+        try await assertProgressText(in: window, contains: "1分钟待整理", excludes: ["%"], name: "pager-initial-today")
 
         // Simulate a swipe interrupted mid-page (45% yesterday / 55% today, matching the 181pt split).
         let todayAlignedX = pager.contentOffset.x
@@ -564,6 +564,50 @@ final class TimelineDateNavigationTests: XCTestCase {
         XCTAssertTrue(model.timeline.snapshots[calendarDay, default: []].isEmpty)
     }
 
+    func testShortPendingTailKeepsStatusAndActionOnOneRow() async throws {
+        let root = temporaryRoot()
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        let archive = try ArchiveStore(rootURL: root, receiverDeviceID: UUID())
+        let day = TimelineDay(Date()), at = day.date().addingTimeInterval(12 * 3_600)
+        try await receive(archive, root: root, at: at, offset: TimeZone.current.secondsFromGMT(for: at), frames: 48_000)
+        let fingerprint = ContentHash.sha256(Data("short-pending-tail".utf8))
+        let model = LibraryModel(archive: archive, configurationFingerprint: fingerprint)
+        await model.refresh()
+        await model.timeline.load(day)
+        let player = AudioPlaybackController(archive: archive)
+        addTeardownBlock { await player.stop() }
+        let waiting = MoMoAgent.TranscriptionSnapshot(phase: .waitingForContext, userPaused: false,
+            activeSessionID: nil, completedWindows: 0, failureCode: nil, execution: nil, batch: nil, nativeInFlight: false)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 375, height: 812)
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+        for appearance in [ColorScheme.light, .dark] {
+            window.rootViewController = UIHostingController(rootView: NavigationStack {
+                LibraryView(model: model, playback: player, transcription: waiting, speechFailure: nil, batches: [],
+                    delete: { _ in }, refresh: { await model.refresh() }, canDiscuss: false, discuss: { _ in },
+                    continueInBackground: {})
+            }.environment(\.colorScheme, appearance))
+            window.overrideUserInterfaceStyle = appearance == .dark ? .dark : .light
+            window.makeKeyAndVisible()
+            try await assertProgressText(in: window, contains: "3秒待整理",
+                excludes: ["最新片段等待", "前面的内容", "后台继续整理", "完成后生成总结"],
+                name: appearance == .dark ? "short-tail-dark" : "short-tail-light")
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate; request.recognitionLanguages = ["zh-Hans", "en-US"]
+            try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([request])
+            let lines = request.results ?? []
+            let title = try XCTUnwrap(lines.first { $0.topCandidates(1).first?.string.replacingOccurrences(of: " ", with: "").contains("3秒待整理") == true })
+            let action = try XCTUnwrap(lines.first { $0.topCandidates(1).first?.string.replacingOccurrences(of: " ", with: "").contains("后台整理") == true })
+            XCTAssertLessThan(abs(title.boundingBox.midY - action.boundingBox.midY), 0.015,
+                              "The pending status and background action share one row.")
+        }
+    }
+
     private func checkReceivedAudioProgress(dayOffset: Int) async throws {
         let root = temporaryRoot()
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
@@ -599,12 +643,12 @@ final class TimelineDateNavigationTests: XCTestCase {
         window.overrideUserInterfaceStyle = .light
         window.makeKeyAndVisible()
         if dayOffset == 0 {
-            try await assertProgressText(in: window, contains: "待处理1分钟录音", excludes: ["%"],
+            try await assertProgressText(in: window, contains: "1分钟待整理", excludes: ["%"],
                 name: "today-processing-remaining")
             try await receive(archive, root: root, at: at.addingTimeInterval(240), offset: offset, frames: 960_000)
             await model.refresh()
             await model.timeline.load(day)
-            try await assertProgressText(in: window, contains: "待处理2分钟录音", excludes: ["%"],
+            try await assertProgressText(in: window, contains: "2分钟待整理", excludes: ["%"],
                 name: "today-processing-new-arrival")
             while let job = try await archive.claimAnalysisJob(configurationHash: fingerprint) {
                 _ = try await archive.commitTranscript(ticket: job, spans: [TranscriptSpan(chunkID: job.chunkID,
@@ -613,10 +657,10 @@ final class TimelineDateNavigationTests: XCTestCase {
             await model.refresh()
             await model.timeline.load(day)
             XCTAssertEqual(model.timeline.processingProgress[day]?.remaining, 0)
-            try await assertProgressText(in: window, contains: "今天", excludes: ["待处理", "%", "后台继续整理"],
+            try await assertProgressText(in: window, contains: "今天", excludes: ["待整理", "%", "后台整理"],
                 name: "today-processing-complete")
         } else {
-            try await assertProgressText(in: window, contains: "50%", excludes: ["待处理"],
+            try await assertProgressText(in: window, contains: "50%", excludes: ["1分钟待整理", "2分钟待整理"],
                 name: "yesterday-processing-progress")
         }
     }
@@ -636,7 +680,7 @@ final class TimelineDateNavigationTests: XCTestCase {
                 .replacingOccurrences(of: " ", with: "")
             visible = text.contains(expected) && !excludes.contains(where: { text.contains($0) })
             if visible {
-                if expected.hasPrefix("待处理") {
+                if expected.hasSuffix("待整理") {
                     let line = try XCTUnwrap(request.results?.first {
                         $0.topCandidates(1).first?.string.replacingOccurrences(of: " ", with: "").contains(expected) == true
                     })
