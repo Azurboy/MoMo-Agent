@@ -356,6 +356,7 @@ final class PhoneReceiveCoordinator {
             requested = false
             pendingInboxRecovery = true
             var contentsChanged = false
+            var notifiedFirstAccepted = false
             do {
                 // Release the shared Inbox lock between bounded pages so a live WC reply can persist promptly.
                 let batch = try controls.loadBackgroundPage(limit: 32)
@@ -398,8 +399,6 @@ final class PhoneReceiveCoordinator {
                 if listed.count > inboxPageLimit {
                     requested = true
                 }
-                var notifiedFirstAccepted = false
-                var lastChangedNotificationUptime = Double(DispatchTime.now().uptimeNanoseconds) * 1e-9
                 // Process bounded pages so outbound receipts/reconcile responses and live transcription
                 // are never starved behind a large inbox. Keep Receipt/ReceiveResult strictly synchronous
                 // and out of async suspension frames.
