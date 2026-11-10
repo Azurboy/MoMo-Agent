@@ -214,60 +214,85 @@ struct LibraryView: View {
 
     private func processingProgress(_ progress: TimelineDayProgress) -> some View {
         let isToday = timeline.selectedDay == TimelineDay(Date())
+        let remaining = progress.remaining ?? progress.received
         return VStack(alignment: .leading, spacing: 6) {
-            if let processed = progress.processed, (progress.remaining ?? 0) >= 0.01 {
-                if isToday {
-                    Text("待处理 \(TimelineDate.duration(progress.received - processed))录音")
-                        .phoneText(.metadata).monospacedDigit()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("timeline.todayProcessing")
-                } else {
-                    HStack {
-                        Text("已接收音频的处理进度")
-                        Spacer(minLength: 8)
-                        Text("\(Int(min(1, processed / progress.received) * 100))%").monospacedDigit()
-                    }.phoneText(.metadata)
-                    ProgressView(value: processed, total: progress.received).tint(MoMoPalette.ink)
-                        .accessibilityLabel("录音整理进度")
-                        .accessibilityIdentifier("timeline.processingProgress")
-                }
-                if let processingNotice {
-                    Text(processingNotice).phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-                }
-                if !isToday {
-                    Text("已处理 \(Duration.seconds(processed).formatted(.time(pattern: .minuteSecond))) / 已收到 \(Duration.seconds(progress.received).formatted(.time(pattern: .minuteSecond)))")
-                        .phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-                }
-            } else if progress.processed == nil {
-                Text("已收到 \(TimelineDate.duration(progress.received)) 原音，处理状态尚未就绪")
-                    .phoneText(.metadata).foregroundStyle(MoMoPalette.muted)
-            }
-            if progress.awaitingSync > 0 { Text("另有 \(TimelineDate.duration(progress.awaitingSync)) 原音待同步").phoneText(.caption).foregroundStyle(MoMoPalette.muted) }
-            if progress.unavailable > 0, (progress.remaining ?? 0) > 0 { Text("部分原音当前不可用，完整性可在录音信息中查看").phoneText(.caption).foregroundStyle(MoMoPalette.muted) }
-            if (progress.remaining ?? progress.received) >= 0.01, let continueInBackground {
-                Button {
-                    requestingContinuation = true
-                    continuationFailure = nil
-                    Task {
-                        defer { requestingContinuation = false }
-                        do { try await continueInBackground() }
-                        catch let error as BackgroundTranscriptionError { continuationFailure = error.localizedDescription }
-                        catch is TranscriptionExecutionError { continuationFailure = String(localized: "当前整理任务正在切换，请稍后再试。") }
-                        catch { continuationFailure = String(localized: "暂未能申请后台整理，已有原音和进度会保留。") }
+            HStack(spacing: 12) {
+                HStack(spacing: 7) {
+                    Image(systemName: "clock")
+                        .foregroundStyle(MoMoPalette.muted)
+                        .accessibilityHidden(true)
+                    if !isToday, let processed = progress.processed, remaining >= 0.01 {
+                        Text("整理进度")
+                        Text("\(Int(min(1, processed / progress.received) * 100))%")
+                            .foregroundStyle(MoMoPalette.muted)
+                    } else {
+                        processingSummary(progress)
+                            .accessibilityIdentifier("timeline.todayProcessing")
                     }
-                } label: {
-                    Label(requestingContinuation ? String(localized: "正在申请…") : hasBackgroundContinuation ? String(localized: "后台整理已申请") : String(localized: "后台继续整理"),
-                        systemImage: "arrow.down.circle")
-                        .phoneText(.metadata).frame(minHeight: 44)
                 }
-                .disabled(requestingContinuation || hasBackgroundContinuation)
-                .accessibilityIdentifier("timeline.continueInBackground")
-                if let continuationFailure {
-                    Text(continuationFailure).phoneText(.caption).foregroundStyle(MoMoPalette.muted)
-                        .accessibilityIdentifier("timeline.continueInBackground.status")
+                .phoneText(.metadata).monospacedDigit()
+                .foregroundStyle(MoMoPalette.ink)
+                .accessibilityElement(children: .combine)
+                .accessibilityHint(processingNotice ?? "")
+                Spacer(minLength: 0)
+                if remaining >= 0.01, let continueInBackground {
+                    Button {
+                        requestingContinuation = true
+                        continuationFailure = nil
+                        Task {
+                            defer { requestingContinuation = false }
+                            do { try await continueInBackground() }
+                            catch let error as BackgroundTranscriptionError { continuationFailure = error.localizedDescription }
+                            catch is TranscriptionExecutionError { continuationFailure = String(localized: "当前整理任务正在切换，请稍后再试。") }
+                            catch { continuationFailure = String(localized: "暂未能申请后台整理，已有原音和进度会保留。") }
+                        }
+                    } label: {
+                        Text(requestingContinuation ? String(localized: "正在申请…") : hasBackgroundContinuation ? String(localized: "已申请") : String(localized: "后台整理"))
+                            .phoneText(.metadata)
+                    }
+                    .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                    .tint(MoMoPalette.ink)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                    .disabled(requestingContinuation || hasBackgroundContinuation)
+                    .accessibilityLabel(requestingContinuation ? String(localized: "正在申请…") : hasBackgroundContinuation ? String(localized: "后台整理已申请") : String(localized: "后台继续整理"))
+                    .accessibilityIdentifier("timeline.continueInBackground")
                 }
+            }
+            if !isToday, let processed = progress.processed, remaining >= 0.01 {
+                ProgressView(value: processed, total: progress.received).tint(MoMoPalette.muted)
+                    .accessibilityLabel("录音整理进度")
+                    .accessibilityIdentifier("timeline.processingProgress")
+            }
+            if progress.awaitingSync > 0, remaining >= 0.01 {
+                Text("另有 \(TimelineDate.duration(progress.awaitingSync)) 原音待同步")
+                    .phoneText(.caption).foregroundStyle(MoMoPalette.muted)
+            }
+            if let continuationFailure {
+                Text(continuationFailure).phoneText(.caption).foregroundStyle(MoMoPalette.failure)
+                    .accessibilityIdentifier("timeline.continueInBackground.status")
             }
         }.accessibilityElement(children: .contain)
+    }
+
+    private func processingSummary(_ progress: TimelineDayProgress) -> Text {
+        guard let remaining = progress.remaining else {
+            return Text("已接收 \(TimelineDate.duration(progress.received)) 原音")
+        }
+        guard remaining >= 0.01 else {
+            return Text("\(TimelineDate.duration(progress.awaitingSync))原音待同步")
+        }
+        if TimelinePresentation.resourceExplanation(transcription) != nil {
+            return Text("整理已暂停")
+        }
+        switch transcription?.phase {
+        case .paused: return Text("整理已暂停")
+        case .systemSuspended: return Text("后台整理已暂停")
+        case .failed: return Text("整理暂未完成")
+        case .waitingForAudio: return Text("等待原音同步")
+        case .audioUnavailable: return Text("部分原音暂不可用")
+        default: return Text("\(TimelineDate.duration(remaining))待整理")
+        }
     }
 
     private var selectedDayFileIssues: [RecordingFileIssue] {

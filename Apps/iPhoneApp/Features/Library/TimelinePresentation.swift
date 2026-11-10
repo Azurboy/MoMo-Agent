@@ -154,7 +154,7 @@ enum TimelinePresentation {
         }
         if !text.isEmpty { return String(text.prefix(256)).replacingOccurrences(of: "\n", with: " ") }
         switch window.state {
-        case .waitingForTranscription: return String(localized: "正在整理，完成后生成总结。")
+        case .waitingForTranscription: return ""
         case .waitingForSync: return String(localized: "等待原音传到手机后自动整理。")
         case .failed: return String(localized: "暂未生成文字，原音仍保留。")
         case .complete:
