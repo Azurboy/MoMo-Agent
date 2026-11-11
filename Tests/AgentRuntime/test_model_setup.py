@@ -246,6 +246,68 @@ class ModelSetupTests(unittest.TestCase):
         self.assertIn('error', json.loads(output.getvalue()))
         self.assertNotIn('access-token-secret', output.getvalue())
 
+    def test_antigravity_authorization_url_and_catalog_parsing(self):
+        import antigravity_bridge as agy_bridge
+
+        self.assertTrue(setup.authorization_url('https://accounts.google.com/o/oauth2/v2/auth?client_id=abc', 'antigravity'))
+        self.assertFalse(setup.authorization_url('http://accounts.google.com/o/oauth2/v2/auth', 'antigravity'))
+        self.assertFalse(setup.authorization_url('https://evil.example.com/o/oauth2/v2/auth', 'antigravity'))
+
+        raw = (
+            '\x1b[2K\rFetching available models...\n'
+            'gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n'
+            'claude-opus-5-5-high\tClaude Opus 5.5 (High)\n'
+            'gemini-4-carbon-high  Gemini 4 Carbon (High)\n'
+        )
+        models = agy_bridge.parse_antigravity_models_output(raw)
+        self.assertEqual(models[:3], ['gemini-4-carbon-high', 'claude-opus-5-5-high', 'gemini-4-carbon-medium'])
+
+    def test_antigravity_tool_envelope_and_sse_serialization(self):
+        import antigravity_bridge as agy_bridge
+
+        cli_json = json.dumps({
+            'status': 'SUCCESS',
+            'structured_output': {
+                'content': '',
+                'tool_calls': [{'name': 'write_memory_notebook', 'arguments_json': '{"path":"projects/AI访谈/架构.md"}'}],
+            },
+            'usage': {'input_tokens': 120, 'output_tokens': 24, 'total_tokens': 144},
+        })
+        parsed = agy_bridge.parse_antigravity_cli_response(
+            cli_json,
+            expect_tool_envelope=True,
+            declared_names={'write_memory_notebook'},
+        )
+        self.assertEqual(len(parsed['tool_calls']), 1)
+        self.assertEqual(parsed['tool_calls'][0]['function']['name'], 'write_memory_notebook')
+        self.assertEqual(json.loads(parsed['tool_calls'][0]['function']['arguments']), {'path': 'projects/AI访谈/架构.md'})
+
+        completion = {
+            'id': 'chatcmpl-test',
+            'object': 'chat.completion',
+            'created': 1700000000,
+            'model': 'gemini-4-carbon-high',
+            'choices': [{
+                'index': 0,
+                'message': {'role': 'assistant', 'content': None, 'tool_calls': parsed['tool_calls']},
+                'finish_reason': 'tool_calls',
+            }],
+            'usage': parsed['usage'],
+        }
+        sse_text = agy_bridge.format_sse_chunks_from_completion(completion).decode('utf-8')
+        self.assertIn('write_memory_notebook', sse_text)
+        self.assertIn('"finish_reason": "tool_calls"', sse_text)
+        self.assertTrue(sse_text.endswith('data: [DONE]\n\n'))
+
+    def test_antigravity_verify_and_save_commits_provider(self):
+        with patch.object(setup, 'resolve_credentials', return_value={'provider': 'antigravity', 'api_key': 'antigravity-cli'}), \
+                patch.object(setup, 'probe') as probe:
+            result = setup.verify_and_save(self.data, 'antigravity', 'gemini-4-carbon-high')
+        probe.assert_called_once()
+        config = json.loads(self.file.read_text())
+        self.assertEqual(config['model'], {'provider': 'antigravity', 'default': 'gemini-4-carbon-high'})
+        self.assertTrue(result['connected'])
+
 
 if __name__ == '__main__':
     unittest.main()

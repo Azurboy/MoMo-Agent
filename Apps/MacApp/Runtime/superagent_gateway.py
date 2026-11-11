@@ -419,6 +419,8 @@ class SuperAgentGateway:
         app.router.add_post("/momo/internal/superagent/outbound", self.handle_internal_outbound)
         app.router.add_post("/momo/internal/superagent/computer", self.handle_internal_computer)
         app.router.add_post("/momo/internal/superagent/pim", self.handle_internal_pim)
+        app.router.add_get("/momo/internal/antigravity/v1/models", self.handle_internal_antigravity_models)
+        app.router.add_post("/momo/internal/antigravity/v1/chat/completions", self.handle_internal_antigravity_completions)
         app.on_startup.append(self.on_startup)
         app.on_cleanup.append(self.on_cleanup)
         return app
@@ -439,6 +441,83 @@ class SuperAgentGateway:
         if not self.bridge_secret or not provided or not hmac.compare_digest(provided, self.bridge_secret):
             return web.json_response({"error": "forbidden"}, status=403)
         return None
+
+    def _check_internal_antigravity_auth(self, request: web.Request) -> web.Response | None:
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return web.json_response({"error": {"code": "unauthorized", "message": "Missing bearer token"}}, status=401)
+        provided = header[len("Bearer ") :].strip()
+        if not provided:
+            return web.json_response({"error": {"code": "unauthorized", "message": "Empty bearer token"}}, status=401)
+        if self.bridge_secret and hmac.compare_digest(provided, self.bridge_secret):
+            return None
+        if self.api_key and hmac.compare_digest(provided, self.api_key):
+            return None
+        return web.json_response({"error": {"code": "unauthorized", "message": "Invalid bearer token"}}, status=401)
+
+    async def handle_internal_antigravity_models(self, request: web.Request) -> web.Response:
+        if refused := self._check_internal_antigravity_auth(request):
+            return refused
+        from antigravity_bridge import list_antigravity_models
+
+        _, models = await asyncio.to_thread(list_antigravity_models)
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"id": mid, "object": "model", "owned_by": "antigravity"} for mid in models],
+            }
+        )
+
+    async def handle_internal_antigravity_completions(self, request: web.Request) -> web.StreamResponse:
+        if refused := self._check_internal_antigravity_auth(request):
+            return refused
+        from antigravity_bridge import format_sse_chunks_from_completion, run_antigravity_completion_async
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"error": {"message": "Expected JSON object", "type": "invalid_request_error"}}, status=400)
+
+        model = str(payload.get("model") or self.model_name or "").strip()
+        messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+        tools = payload.get("tools") if isinstance(payload.get("tools"), list) else None
+        tool_choice = payload.get("tool_choice")
+        response_format = payload.get("response_format") if isinstance(payload.get("response_format"), dict) else None
+        stream_requested = bool(payload.get("stream"))
+
+        try:
+            completion = await run_antigravity_completion_async(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                response_format=response_format,
+                data_dir=self.data,
+                timeout=180.0,
+            )
+        except Exception as err:
+            return web.json_response(
+                {"error": {"message": str(err)[:400], "type": "server_error"}},
+                status=502,
+            )
+
+        if not stream_requested:
+            return web.json_response(completion)
+
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+        await resp.write(format_sse_chunks_from_completion(completion))
+        await resp.write_eof()
+        return resp
 
     # ── Lifecycle & dsh supervision ─────────────────────────────────────────────
 
@@ -1642,7 +1721,7 @@ class SuperAgentGateway:
             f"Current Local Time: {local_now_str} (Logical Day: {logical_day}, day boundary: {day_hour:02d}:00).\n"
             "Use:\n"
             "- `memory` to update compact core `MEMORY.md` (`target='memory'`) or `USER.md` (`target='user'`);\n"
-            "- `notebook` to read/write pure Markdown (`.md`) notes in `BRIEFING.md` (`category='briefing'`), `journal/<YYYY-MM-DD>.md` (`category='journal'`), `people/<姓名>.md` (`category='person'`), and `topics/<主题>.md` (`category='topic'`);\n"
+            "- `notebook` to freely read, write, move, or remove pure Markdown (`.md`) notes anywhere in the multi-level `memories/` vault (`BRIEFING.md` via `category='briefing'` or `path='BRIEFING.md'`, and multi-level directories via `path='projects/<project>/<doc>.md'`, `path='journal/YYYY-MM/YYYY-MM-DD.md'`, `path='people/<group>/<name>.md'`, or any custom folder hierarchy you design);\n"
             "- `relabel_speakers` to fix or name speaker labels (`[说话人 1]` -> real name or fix `[我]` vs `[他人]`) when dialogue semantics make speaker identity clear;\n"
             "- `list_recordings`, `read_recording`, `search_recordings`, `phone_context`, and `session_search` to gather grounded evidence.\n"
             "Never claim `outcome: \"updated\"` unless at least one `memory`, `notebook` (write/remove), or `relabel_speakers` call returned `success: true`.\n\n"
@@ -1657,11 +1736,11 @@ class SuperAgentGateway:
             {
                 "name": "notebook",
                 "description": (
-                    "Read, write, list, or remove pure Markdown (.md) living notebook pages under memories/: "
-                    "category='briefing' (BRIEFING.md with morning overview and 1-2 actionable cards), "
-                    "category='project' (projects/<slug>.md for distinct active projects/workstreams & projects/overview.md), "
-                    "category='journal' (journal/YYYY-MM-DD.md or YYYY-Www.md), "
-                    "category='person' (people/<name>.md), or category='topic' (topics/<slug>.md). "
+                    "Read, write, list, move, or remove pure Markdown (.md) living notebook pages under memories/, "
+                    "with full freedom to organize multi-level directories (2nd/3rd-level subfolders or custom domain folders). "
+                    "Prefer passing `path` directly (e.g. 'BRIEFING.md', 'projects/AI访谈/overview.md', 'projects/AI访谈/双月OKR.md', "
+                    "'journal/2026-11/2026-11-10.md', 'people/核心团队/小林.md', or custom folders), or pass `category` + `slug` "
+                    "(where `slug` or `category` may contain '/' subdirectories). Use action='move' with `path` + `to_path` to reorganize flat notes into subdirectories. "
                     "Content must be pure Markdown, never JSON."
                 ),
                 "parameters": {
@@ -1669,17 +1748,24 @@ class SuperAgentGateway:
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["list", "read", "write", "remove"],
+                            "enum": ["list", "read", "write", "remove", "move"],
                             "description": "Operation to perform on the Markdown notebook.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Relative Markdown path inside memories/ (supports multi-level folders, e.g. 'projects/AI访谈/双月OKR.md', 'journal/2026-11/2026-11-10.md', 'BRIEFING.md').",
+                        },
+                        "to_path": {
+                            "type": "string",
+                            "description": "Destination relative Markdown path for action='move' (e.g. 'projects/AI访谈/架构设计.md').",
                         },
                         "category": {
                             "type": "string",
-                            "enum": ["briefing", "project", "journal", "person", "topic"],
-                            "description": "Notebook section (required for read/write/remove; optional filter for list).",
+                            "description": "Optional top-level or nested folder/section ('briefing', 'project', 'journal', 'person', 'topic', or custom folder path like 'projects/AI访谈').",
                         },
                         "slug": {
                             "type": "string",
-                            "description": "Note filename stem (e.g. '2026-11-10', '小林', 'momo-sync'). Omit for category='briefing'.",
+                            "description": "Optional note stem or nested sub-path (e.g. '2026-11-10', 'AI访谈/双月OKR', '小林').",
                         },
                         "title": {
                             "type": "string",
@@ -1693,6 +1779,10 @@ class SuperAgentGateway:
                             "type": "string",
                             "enum": ["replace", "append"],
                             "description": "Write mode: 'replace' (default) overwrites the note; 'append' appends a new section.",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "For action='move', overwrite destination if it already exists (default false).",
                         },
                     },
                     "required": ["action"],
@@ -1827,18 +1917,20 @@ class SuperAgentGateway:
                 action = str(args.get("action") or "list").strip().lower()
                 category = args.get("category")
                 slug = args.get("slug")
+                rel_path = args.get("path")
                 try:
                     if action == "list":
-                        res = {"success": True, "notes": momo_mem.list_notebook(category)}
+                        res = {"success": True, "notes": momo_mem.list_notebook(category, path_prefix=rel_path)}
                     elif action == "read":
-                        res = momo_mem.read_notebook(str(category or "briefing"), slug)
+                        res = momo_mem.read_notebook(category, slug, path=rel_path)
                     elif action == "write":
                         res = momo_mem.write_notebook(
-                            str(category or "briefing"),
+                            category,
                             str(args.get("content") or ""),
                             slug=slug,
                             title=args.get("title"),
                             mode=str(args.get("mode") or "replace"),
+                            path=rel_path,
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
                         memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
@@ -1846,7 +1938,20 @@ class SuperAgentGateway:
                             self._deliver_briefing_message_if_needed()
                         return result_json
                     elif action == "remove":
-                        res = momo_mem.remove_notebook(str(category or ""), slug)
+                        res = momo_mem.remove_notebook(category, slug, path=rel_path)
+                        result_json = json.dumps(res, ensure_ascii=False)
+                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        return result_json
+                    elif action == "move":
+                        res = momo_mem.move_notebook(
+                            category,
+                            slug,
+                            path=rel_path,
+                            to_path=args.get("to_path"),
+                            to_category=args.get("to_category"),
+                            to_slug=args.get("to_slug"),
+                            overwrite=bool(args.get("overwrite", False)),
+                        )
                         result_json = json.dumps(res, ensure_ascii=False)
                         memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
                         return result_json
@@ -2042,6 +2147,52 @@ class SuperAgentGateway:
             {"role": "user", "content": prompt},
         ]
 
+        if provider == "antigravity":
+            from antigravity_bridge import run_antigravity_completion
+
+            for _ in range(14):
+                resp = run_antigravity_completion(
+                    model=model_id,
+                    messages=messages,
+                    tools=openai_tools,
+                    data_dir=self.data,
+                    timeout=150.0,
+                )
+                msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    return self._finalize_memory_review_output(session_id, str(msg.get("content") or "").strip())
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.get("content"),
+                        "tool_calls": tool_calls,
+                    }
+                )
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    tc_name = str(fn.get("name") or "")
+                    tc_args = str(fn.get("arguments") or "{}")
+                    result_str = execute_tool(tc_name, tc_args)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id") or "",
+                            "name": tc_name,
+                            "content": result_str,
+                        }
+                    )
+            with suppress(Exception):
+                resp = run_antigravity_completion(
+                    model=model_id,
+                    messages=messages,
+                    data_dir=self.data,
+                    timeout=90.0,
+                )
+                msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
+                return self._finalize_memory_review_output(session_id, str(msg.get("content") or "").strip())
+            return self._finalize_memory_review_output(session_id, "")
+
         if provider == "anthropic":
             from agent.anthropic_adapter import build_anthropic_client, build_anthropic_kwargs, create_anthropic_message
             from agent.anthropic_credentials import _is_oauth_token
@@ -2198,6 +2349,18 @@ class SuperAgentGateway:
                         if event.type == "response.output_text.delta":
                             chunks.append(event.delta)
                     return "".join(chunks).strip()
+        if provider == "antigravity":
+            from antigravity_bridge import run_antigravity_completion
+
+            resp = run_antigravity_completion(
+                model=model_id,
+                messages=[{"role": "user", "content": prompt}],
+                data_dir=self.data,
+                timeout=90.0,
+            )
+            msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
+            return str(msg.get("content") or "").strip()
+
         if provider == "anthropic":
             from agent.anthropic_adapter import build_anthropic_client, build_anthropic_kwargs
             from agent.anthropic_credentials import _is_oauth_token
@@ -3638,24 +3801,50 @@ class SuperAgentGateway:
                     raise PermissionError("Ticket assignment is no longer running")
             op = str(body.get("op") or "").strip()
             args = body["args"]
-            if op in ("list_memory_notebooks", "read_memory_notebook", "write_memory_notebook", "remove_memory_notebook", "update_core_memory"):
+            if op in (
+                "list_memory_notebooks",
+                "read_memory_notebook",
+                "write_memory_notebook",
+                "remove_memory_notebook",
+                "move_memory_notebook",
+                "update_core_memory",
+            ):
                 from momo_memory import MoMoMemory, execute_memory_tool
 
                 mem = MoMoMemory(self.data)
                 if op == "list_memory_notebooks":
                     cat = str(args.get("category") or "").strip() or None
-                    return web.json_response({"ok": True, "notes": mem.list_notebook(cat)})
+                    pfx = str(args.get("path") or "").strip() or None
+                    return web.json_response({"ok": True, "notes": mem.list_notebook(cat, path_prefix=pfx)})
                 if op == "read_memory_notebook":
-                    cat = str(args.get("category") or "briefing").strip().lower()
-                    if cat in ("user", "memory"):
-                        fname = "USER.md" if cat == "user" else "MEMORY.md"
+                    raw_path = str(args.get("path") or "").strip() or None
+                    cat = str(args.get("category") or ("" if raw_path else "briefing")).strip()
+                    lower_target = (raw_path or cat).lower()
+                    if lower_target in ("user", "memory", "user.md", "memory.md"):
+                        is_user = lower_target.startswith("user")
+                        fname = "USER.md" if is_user else "MEMORY.md"
                         fpath = mem.memories_dir / fname
                         txt = fpath.read_text(encoding="utf-8").strip() if fpath.is_file() else ""
-                        return web.json_response({"ok": True, "category": cat, "path": fname, "content": txt, "characters": len(txt)})
-                    res = mem.read_notebook(cat, args.get("slug"))
+                        return web.json_response({"ok": True, "category": "user" if is_user else "memory", "path": fname, "content": txt, "characters": len(txt)})
+                    res = mem.read_notebook(cat or None, args.get("slug"), path=raw_path)
                     return web.json_response({"ok": bool(res.get("success")), **res})
                 if op == "remove_memory_notebook":
-                    res = mem.remove_notebook(str(args.get("category") or "").strip().lower(), args.get("slug"))
+                    res = mem.remove_notebook(
+                        str(args.get("category") or "").strip() or None,
+                        args.get("slug"),
+                        path=str(args.get("path") or "").strip() or None,
+                    )
+                    return web.json_response({"ok": bool(res.get("success")), **res})
+                if op == "move_memory_notebook":
+                    res = mem.move_notebook(
+                        str(args.get("category") or "").strip() or None,
+                        args.get("slug"),
+                        path=str(args.get("from_path") or args.get("path") or "").strip() or None,
+                        to_path=str(args.get("to_path") or "").strip() or None,
+                        to_category=str(args.get("to_category") or "").strip() or None,
+                        to_slug=args.get("to_slug"),
+                        overwrite=bool(args.get("overwrite", False)),
+                    )
                     return web.json_response({"ok": bool(res.get("success")), **res})
                 if op == "update_core_memory":
                     with mem.store() as mem_store:
@@ -3669,15 +3858,17 @@ class SuperAgentGateway:
                         )
                     parsed = json.loads(raw_res)
                     return web.json_response({"ok": bool(parsed.get("success")), **parsed})
-                cat_write = str(args.get("category") or "briefing").strip().lower()
+                raw_write_path = str(args.get("path") or "").strip() or None
+                cat_write = str(args.get("category") or ("" if raw_write_path else "briefing")).strip()
                 res = mem.write_notebook(
-                    cat_write,
+                    cat_write or None,
                     str(args.get("content") or ""),
                     slug=args.get("slug"),
                     title=args.get("title"),
                     mode=str(args.get("mode") or "replace"),
+                    path=raw_write_path,
                 )
-                if res.get("success") and cat_write == "briefing":
+                if res.get("success") and str(res.get("category") or "").lower() == "briefing":
                     self._deliver_briefing_message_if_needed()
                 return web.json_response({"ok": bool(res.get("success")), **res})
             if op in ("list_recordings", "read_recording", "search_recordings", "relabel_recording_speakers"):

@@ -43,27 +43,34 @@ struct ModelConnectionFields: View {
                             if provider != DesktopModelProvider.allCases.last { Divider() }
                         }
                     }
-                }.disabled(model.busy != nil || model.loadingModelAccount || model.status?.agentOnline == true)
+                }.disabled(model.busy != nil || model.loadingModelAccount)
                     .accessibilityElement(children: .contain).accessibilityLabel("接入方式")
                 if model.modelProvider == .claude, model.modelAccount?.loginAvailable == false {
                     Link("安装 Claude Code", destination: URL(string: "https://code.claude.com/docs/en/setup")!)
+                        .font(.callout)
+                } else if model.modelProvider == .antigravity, model.modelAccount?.loginAvailable == false {
+                    Link("安装 Antigravity CLI (agy)", destination: URL(string: "https://antigravity.google/docs")!)
                         .font(.callout)
                 }
             case .api:
                 if continueSetup {
                     pageTitle("配置 API")
-                }
-                if !continueSetup, model.status?.agentOnline == true {
-                    VStack(spacing: 4) {
-                        modelValue("服务", value: "API")
-                        modelValue("模型", value: model.modelName)
-                        modelValue("API 地址", value: model.providerURL)
-                    }.font(.system(size: 14))
                 } else {
-                    apiFields
-                    Text("密钥保存在这台电脑。验证时会发送一条测试消息。")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    HStack {
+                        Label("自定义兼容 OpenAI API", systemImage: "key.horizontal").font(.system(size: 14, weight: .medium))
+                        Spacer()
+                        Button("更换服务") {
+                            choosingModel = false
+                            page = .choices
+                            model.failure = nil
+                        }
+                        .buttonStyle(DesktopSetupButton(minimumHeight: 28, fontSize: 12))
+                        .disabled(model.busy != nil || model.loadingModelAccount)
+                    }.padding(.vertical, 6)
                 }
+                apiFields
+                Text("密钥保存在这台电脑。验证时会发送一条测试消息。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 if continueSetup { continueButton }
             case .subscription:
                 if continueSetup { pageTitle("选择模型") }
@@ -116,15 +123,17 @@ struct ModelConnectionFields: View {
             }
             if continueSetup {
                 backButton
-            } else if model.status?.agentOnline != true, currentPage != .choices {
+            } else if currentPage != .choices {
                 HStack {
                     backButton
                     Spacer()
                     if currentPage == .api || currentPage == .subscription {
-                        Button("保存并启动") { Task { await model.connectModel(continueSetup: false) } }
-                            .buttonStyle(DesktopSetupButton(minimumHeight: 36, fontSize: 13)).frame(width: 112)
-                            .disabled(model.busy != nil || model.loadingModelAccount)
-                            .accessibilityIdentifier("model.continue")
+                        Button(model.status?.agentOnline == true ? "保存并重启" : "保存并启动") {
+                            Task { await model.connectModel(continueSetup: false) }
+                        }
+                        .buttonStyle(DesktopSetupButton(minimumHeight: 36, fontSize: 13))
+                        .disabled(model.busy != nil || model.loadingModelAccount)
+                        .accessibilityIdentifier("model.continue")
                     }
                 }
             }
@@ -162,17 +171,30 @@ struct ModelConnectionFields: View {
         }
     }
 
-    private var backButton: some View {
-        Button(continueSetup || currentPage == .login ? "返回" : "更换服务") {
-            choosingModel = false
-            let origin = currentPage
-            if origin == .login { model.cancelModelConnection() }
-            if origin == .choices { model.advanceSetup(.prepare) }
-            else { page = .choices; model.failure = nil }
+    @ViewBuilder private var backButton: some View {
+        if continueSetup {
+            Button("返回") {
+                choosingModel = false
+                let origin = currentPage
+                if origin == .login { model.cancelModelConnection() }
+                if origin == .choices { model.advanceSetup(.prepare) }
+                else { page = .choices; model.failure = nil }
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary).padding(.vertical, 6)
+            .disabled(model.busy != nil || model.loadingModelAccount)
+            .accessibilityIdentifier("model.back")
+        } else {
+            Button(currentPage == .login ? "返回" : "更换接入服务") {
+                choosingModel = false
+                let origin = currentPage
+                if origin == .login { model.cancelModelConnection() }
+                page = .choices
+                model.failure = nil
+            }
+            .buttonStyle(DesktopSetupButton(minimumHeight: 32, fontSize: 13))
+            .disabled(model.busy != nil || model.loadingModelAccount)
+            .accessibilityIdentifier("model.back")
         }
-        .buttonStyle(.plain).foregroundStyle(.secondary).padding(.vertical, 6)
-        .disabled(model.busy != nil || model.loadingModelAccount)
-        .accessibilityIdentifier("model.back")
     }
 
     private func copy(_ text: String) {
@@ -210,11 +232,7 @@ struct ModelConnectionFields: View {
                 HStack(spacing: 24) {
                     Text("模型").font(.system(size: 14, weight: .medium))
                     Spacer(minLength: 0)
-                    if model.status?.agentOnline == true {
-                        Text(model.modelName).font(.system(size: 14)).foregroundStyle(.secondary)
-                            .multilineTextAlignment(.trailing).textSelection(.enabled)
-                            .help("停止运行后可更换模型").accessibilityIdentifier("model.current")
-                    } else { modelSelection.frame(maxWidth: 264) }
+                    modelSelection.frame(maxWidth: 264)
                 }.desktopSettingsRow()
             }
         }
@@ -234,7 +252,6 @@ struct ModelConnectionFields: View {
                 Text("已配置").font(.system(size: 12)).foregroundStyle(.secondary)
             } else {
                 Button("重新登录") { model.beginModelLogin() }.buttonStyle(.plain)
-                    .disabled(model.status?.agentOnline == true)
             }
         }
     }
@@ -252,7 +269,7 @@ struct ModelConnectionFields: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("模型").accessibilityValue(model.modelName).accessibilityIdentifier("model.selection")
-        .disabled(model.busy != nil || model.status?.agentOnline == true || model.modelAccount?.models.isEmpty != false)
+        .disabled(model.busy != nil || (model.modelAccount?.models.isEmpty ?? true))
         .anchorPreference(key: ModelSelectionAnchor.self, value: .bounds) { $0 }
     }
 
@@ -301,6 +318,7 @@ struct ModelConnectionFields: View {
         switch provider {
         case .codex: Image("OpenAIMark").renderingMode(.template).resizable().scaledToFit()
         case .claude: Image("AnthropicMark").renderingMode(.template).resizable().scaledToFit()
+        case .antigravity: Image("AntigravityMark").renderingMode(.template).resizable().scaledToFit()
         case .api: Image(systemName: "key.horizontal").font(.system(size: 24, weight: .regular))
         }
     }
@@ -316,7 +334,7 @@ struct ModelConnectionFields: View {
             apiField("密钥") {
                 SecureField("API 密钥", text: $model.providerKey).accessibilityIdentifier("onboarding.modelKey")
             }
-        }.multilineTextAlignment(.leading).disabled(model.busy != nil || model.status?.agentOnline == true)
+        }.multilineTextAlignment(.leading).disabled(model.busy != nil)
     }
 
     @ViewBuilder private func apiField<Content: View>(_ title: String, @ViewBuilder input: () -> Content) -> some View {
@@ -339,11 +357,11 @@ struct ModelConnectionFields: View {
     }
 
     private var continueButton: some View {
-        Button(continueSetup ? "验证并继续" : "保存并启动") {
+        Button(continueSetup ? "验证并继续" : (model.status?.agentOnline == true ? "保存并重启" : "保存并启动")) {
             Task { await model.connectModel(continueSetup: continueSetup) }
         }
         .buttonStyle(DesktopSetupButton())
-        .disabled(model.busy != nil || model.loadingModelAccount || model.status?.agentOnline == true)
+        .disabled(model.busy != nil || model.loadingModelAccount)
         .accessibilityIdentifier("model.continue")
     }
 

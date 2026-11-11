@@ -177,8 +177,8 @@ MOMO_PROMPT_CONFIG = {
             "- 搜索全部录音内容：`\"$DSH_SUPERAGENT_MOMO_CLI\" search \"关键词\" --limit 20`\n"
             "- 读取手机端日历/提醒/到访同步快照：`\"$DSH_SUPERAGENT_MOMO_CLI\" phone-context --kind all`\n"
             "- 读取健康步数与心率快照：`\"$DSH_SUPERAGENT_MOMO_CLI\" health`\n"
-            "- 查看共享长期记忆（含纯 Markdown 晨间简报、每日日志、人物与主题活页）：内置工具 `list_memory_notebooks` / `read_memory_notebook`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" memories` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook list` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook read --category person --slug \"姓名\"`\n"
-            "- 写入共享长期记忆或纯 Markdown 活页笔记：内置工具 `write_memory_notebook(category='person'|'topic'|'journal'|'briefing', slug=..., content=...)`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" remember --target memory \"事实或项目约定\"` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook write --category topic --slug \"主题\" --content \"# 标题\\n...\"`\n"
+            "- 查看共享长期记忆（支持 Obsidian 式多级目录树，含晨间简报、多级项目目录、日志、人物与专题活页）：内置工具 `list_memory_notebooks` / `read_memory_notebook(path=...)`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" memories` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook list` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook read --path \"projects/AI访谈/双月OKR.md\"`\n"
+            "- 写入或自由组织多级记忆目录：内置工具 `write_memory_notebook(path='projects/AI访谈/双月OKR.md', content=...)` / `move_memory_notebook(from_path=..., to_path=...)`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" remember --target memory \"事实或项目约定\"` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook write --path \"projects/AI访谈/双月OKR.md\" --content \"# 标题\\n...\"`\n"
             "- 根据对话语义修正录音中的匿名/误判说话人标签并同步至手机声纹库：内置工具 `relabel_recording_speakers(source_id=..., to_speaker=\"真实姓名\", from_speaker=\"说话人 1\", reason=\"对话中直接称呼确认\")`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" relabel-speakers <source_id> \"真实姓名\" --from-speaker \"说话人 1\" --reason \"对话中直接称呼确认\"`\n"
             "- 查看近期聊天上下文：`\"$DSH_SUPERAGENT_MOMO_CLI\" conversation --limit 20`\n"
             "- 落盘用户可见产物（仅用于深度调研/对比方案/原型，纯待办/日程操作无需落盘文档）：在 `\"$DSH_SUPERAGENT_MOMO_WORKSPACE/$DSH_SUPERAGENT_NAME/\"` 下生成结构化 `.md` 报告或自包含单文件 `.html`。\n"
@@ -524,6 +524,39 @@ def resolve_superagent_llm(data: Path) -> dict:
                         "baseURL": base_url,
                         "apiKeyEnv": "MOMO_LLM_API_KEY",
                         "models": [{"id": model_id, "input": ["text", "image"]}],
+                    }
+                },
+            }
+
+        if provider in {"antigravity", "google-antigravity"}:
+            resolve_credentials("antigravity", model_id)
+            from momo_agent import read_connection
+
+            conn_port = int(read_connection(data).get("port") or 8765)
+            state_dir = Path(data) / "superagent/state"
+            state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            bridge_secret_file = state_dir / "momo-bridge.json"
+            bridge_secret = ""
+            if bridge_secret_file.is_file():
+                try:
+                    bridge_secret = str(json.loads(bridge_secret_file.read_text(encoding="utf-8")).get("secret") or "").strip()
+                except ValueError:
+                    bridge_secret = ""
+            if len(bridge_secret) < 24:
+                bridge_secret = secrets.token_urlsafe(32)
+                _atomic_private(bridge_secret_file, json.dumps({"secret": bridge_secret}, indent=2) + "\n", 0o600)
+            base_url = f"http://127.0.0.1:{conn_port}/momo/internal/antigravity/v1"
+            return {
+                "dsh_provider": "antigravity",
+                "model_id": model_id,
+                "base_url": base_url,
+                "env": {"MOMO_LLM_API_KEY": bridge_secret},
+                "providers_config": {
+                    "antigravity": {
+                        "api": "openai-completions",
+                        "baseURL": base_url,
+                        "apiKeyEnv": "MOMO_LLM_API_KEY",
+                        "models": [{"id": model_id, "input": ["text"]}],
                     }
                 },
             }

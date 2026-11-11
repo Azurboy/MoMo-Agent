@@ -151,23 +151,31 @@ struct LifeIllustrationMetadata: View {
 
 extension LifeIllustrationStore {
     var settingsRowStatus: String {
-        if settings.supported { return String(localized: "Codex 订阅可用") }
+        if settings.supported {
+            return settings.provider == "antigravity"
+                ? String(localized: "Antigravity (Nano Banana) 可用")
+                : String(localized: "Codex 订阅可用")
+        }
         if settings.provider == "anthropic" { return String(localized: "Claude 订阅暂不支持") }
         if !isConfigured { return String(localized: "连接 Mac 后可用") }
         if !hasLoadedSettings { return isRefreshing ? String(localized: "正在同步…") : String(localized: "连接 Mac 后同步") }
         if settings.serviceStatus == "unavailable" { return String(localized: "暂不可用") }
-        return String(localized: "需要 Codex 订阅")
+        return String(localized: "需要 Codex 或 Antigravity 订阅")
     }
 
     var settingsDetailStatus: String {
-        if settings.supported { return String(localized: "Codex 订阅可用") }
+        if settings.supported {
+            return settings.provider == "antigravity"
+                ? String(localized: "Antigravity 订阅已连接，使用 Nano Banana 生成生活插画。")
+                : String(localized: "Codex 订阅可用")
+        }
         if settings.provider == "anthropic" {
-            return String(localized: "Claude 订阅暂不支持，切换为 Codex 订阅后可用。")
+            return String(localized: "Claude 订阅暂不支持，切换为 Codex 或 Antigravity 订阅后可用。")
         }
         if !isConfigured { return String(localized: "连接 Mac 后可用") }
         if !hasLoadedSettings { return isRefreshing ? String(localized: "正在同步…") : String(localized: "连接 Mac 后同步") }
         if settings.serviceStatus == "unavailable" { return String(localized: "暂不可用") }
-        return String(localized: "登录 Codex 订阅后可用。")
+        return String(localized: "登录 Codex 或 Antigravity 订阅后可用。")
     }
 }
 

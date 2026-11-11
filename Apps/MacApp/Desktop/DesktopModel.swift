@@ -374,6 +374,7 @@ final class DesktopModel {
             modelProvider = switch model["provider"] {
             case "openai-codex", "codex": .codex
             case "anthropic", "claude": .claude
+            case "antigravity", "google-antigravity": .antigravity
             default: .api
             }
             providerURL = model["base_url"] ?? ""; modelName = name
@@ -429,8 +430,14 @@ final class DesktopModel {
     }
 
     func startAgent() async {
-        guard busy == nil, agentProcess?.isRunning != true, status?.agentOnline != true else { return }
-        busy = String(localized: "正在启动 MoMo…"); failure = nil
+        guard busy == nil else { return }
+        let wasRunning = agentProcess?.isRunning == true || status?.agentOnline == true
+        if wasRunning, !ownsAgent {
+            failure = String(localized: "当前 MoMo 进程由外部启动，请先停止后再切换。")
+            return
+        }
+        busy = wasRunning ? String(localized: "正在切换并重启 MoMo…") : String(localized: "正在启动 MoMo…")
+        failure = nil
         defer { busy = nil }
         do {
             modelConnectionCancelled = false
@@ -453,6 +460,13 @@ final class DesktopModel {
             } else {
                 applyModelAccount(try await modelCommand("verify", provider: modelProvider), updateSelection: false)
                 guard !modelConnectionCancelled else { return }
+            }
+            if agentProcess?.isRunning == true || status?.agentOnline == true {
+                stopAgent()
+                for _ in 0..<25 where agentProcess?.isRunning == true || status?.agentOnline == true {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    await refresh()
+                }
             }
             try startAccess()
             try launchAgent()

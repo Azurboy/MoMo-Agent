@@ -18,9 +18,16 @@ from urllib.parse import urlsplit
 if sys.flags.isolated:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from antigravity_bridge import (
+    find_antigravity_cli,
+    is_antigravity_authorization_url,
+    list_antigravity_models,
+    login_antigravity,
+    run_antigravity_completion,
+)
 from momo_agent import SOURCE, atomic_private, child_environment, read_connection
 
-PROVIDERS = {"codex": "openai-codex", "claude": "anthropic"}
+PROVIDERS = {"codex": "openai-codex", "claude": "anthropic", "antigravity": "antigravity"}
 
 
 class ModelSetupError(Exception):
@@ -32,6 +39,8 @@ def catalog(provider: str, credentials: dict | None = None) -> list[str]:
         from hermes_cli.codex_models import get_codex_model_ids
         return list(get_codex_model_ids(
             access_token=(credentials or {}).get("api_key"), base_url=(credentials or {}).get("base_url")))
+    if provider == "antigravity":
+        return list_antigravity_models()[1]
     from hermes_cli.models import _PROVIDER_MODELS
     return list(_PROVIDER_MODELS["anthropic"])
 
@@ -41,16 +50,24 @@ def account(provider: str) -> dict:
         from hermes_cli.auth import get_codex_auth_status
         connected = bool(get_codex_auth_status().get("logged_in"))
         available = True
+        models = catalog(provider)
+    elif provider == "antigravity":
+        cli = find_antigravity_cli()
+        available = cli is not None
+        connected, models = list_antigravity_models(cli)
     else:
         from agent.anthropic_credentials import read_claude_code_credentials, is_claude_code_token_valid
         from agent.anthropic_adapter import find_claude_code_cli
         credentials = read_claude_code_credentials()
         connected = bool(credentials and (is_claude_code_token_valid(credentials) or credentials.get("refreshToken")))
         available = find_claude_code_cli("claude") is not None
-    return {"provider": provider, "connected": connected, "models": catalog(provider), "loginAvailable": available}
+        models = catalog(provider)
+    return {"provider": provider, "connected": connected, "models": models, "loginAvailable": available}
 
 
 def authorization_url(value: str, provider: str) -> bool:
+    if provider == "antigravity":
+        return is_antigravity_authorization_url(value)
     url = urlsplit(value)
     if url.scheme != "https" or url.username or url.password or url.port not in {None, 443}:
         return False
@@ -93,6 +110,15 @@ def login(provider: str, authorize=lambda **fields: None, flow: str = "device") 
             user_code=device["user_code"], poll_interval=device["interval"])
         tokens = _codex_exchange_authorization_code(issuer, CODEX_OAUTH_CLIENT_ID, response)
         _save_codex_tokens(tokens)
+    elif provider == "antigravity":
+        if not find_antigravity_cli():
+            raise ModelSetupError("请先安装 Antigravity CLI (agy)，再使用 Antigravity 订阅登录。")
+        try:
+            connected, _ = login_antigravity(authorize)
+        except RuntimeError as err:
+            raise ModelSetupError(str(err)) from err
+        if not connected:
+            raise ModelSetupError("Antigravity 登录没有完成，请先在终端运行 `agy` 完成 Google 账号登录后重试。")
     else:
         from agent.anthropic_adapter import find_claude_code_cli
         cli = find_claude_code_cli("claude")
@@ -133,11 +159,33 @@ def resolve_credentials(provider: str, model: str) -> dict:
         if not get_codex_auth_status().get("logged_in"):
             raise ModelSetupError("请先登录 Codex。")
         return resolve_codex_runtime_credentials()
+    if provider == "antigravity":
+        cli = find_antigravity_cli()
+        if not cli:
+            raise ModelSetupError("请先安装 Antigravity CLI (agy)。")
+        connected, _ = list_antigravity_models(cli)
+        if not connected:
+            raise ModelSetupError("请先使用 Antigravity CLI (agy) 登录 Google 账号。")
+        return {"provider": "antigravity", "api_key": "antigravity-cli", "cli_path": cli}
     from hermes_cli.runtime_provider import resolve_runtime_provider
     return resolve_runtime_provider(requested="anthropic", target_model=model)
 
 
 def probe(provider: str, model: str, credentials: dict) -> None:
+    if provider == "antigravity":
+        try:
+            completion = run_antigravity_completion(
+                model=model,
+                messages=[{"role": "user", "content": "Connection test. Reply OK."}],
+                timeout=45,
+            )
+        except Exception as err:
+            raise ModelSetupError("Antigravity 连接验证失败，请检查订阅登录状态或更换模型。") from err
+        choice = (completion.get("choices") or [{}])[0]
+        reply_text = str((choice.get("message") or {}).get("content") or "").strip()
+        if not reply_text:
+            raise ModelSetupError("Antigravity 没有完成连接验证，请重试。")
+        return
     if provider == "codex":
         from openai import OpenAI
         from agent.codex_headers import apply_required_codex_headers
