@@ -9,13 +9,13 @@ struct PhoneRemoteView: View {
     var watchStatus: WatchStatusObservation?
     var requestWatchStatus: (() -> Void)?
     let openLibrary: () -> Void
+    var openMemory: () -> Void = {}
     var speech: SpeechEngine? = nil
     var stopPlayback: () async -> Void = {}
     var chatIsVisible = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var showingTasks = false
     @State private var tasksSheetDetent: PresentationDetent = .medium
-    @State private var showingNotebook = false
     @State private var showingDesktop = false
     @State private var reconnecting = false
 
@@ -28,9 +28,9 @@ struct PhoneRemoteView: View {
             if let store = agent.store {
                 RemoteConversationView(store: store, agent: agent, watchStatus: watchStatus,
                     requestWatchStatus: requestWatchStatus, openLibrary: openLibrary, reconnect: { reconnecting = true },
-                    openDesktop: { showingDesktop = true }, openNotebook: { showingNotebook = true },
+                    openDesktop: { showingDesktop = true }, openNotebook: openMemory,
                     speech: speech, stopPlayback: stopPlayback,
-                    voiceInputEnabled: chatIsVisible && !showingDesktop && !showingTasks && !showingNotebook && !reconnecting)
+                    voiceInputEnabled: chatIsVisible && !showingDesktop && !showingTasks && !reconnecting)
             } else {
                 VStack(spacing: 24) {
                     RemoteAvatar(size: 120, active: false, watchStatus: watchStatus,
@@ -64,22 +64,6 @@ struct PhoneRemoteView: View {
             .presentationDetents([.medium, .large], selection: $tasksSheetDetent)
             .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showingNotebook) {
-            if let sync = agent.context {
-                NavigationStack {
-                    RemoteMemoryView(sync: sync, taskStore: agent.store) { card in
-                        showingNotebook = false
-                        if let store = agent.store {
-                            store.setDraft(card.prompt)
-                            try? store.enqueue()
-                            Task { await store.refresh(userInitiated: true) }
-                        }
-                    }
-                }
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-            }
-        }
         .fullScreenCover(isPresented: $reconnecting) { PhoneConnectionFlow(agent: agent, reconnecting: true, finish: { reconnecting = false }) }
         .fullScreenCover(isPresented: $showingDesktop) { PhoneDesktopView(agent: agent) }
     }
@@ -87,9 +71,6 @@ struct PhoneRemoteView: View {
     private var headerActions: some View {
         HStack(spacing: 10) {
             headerButton("设置", icon: "gearshape", id: "remote.settings", action: openSettings)
-            if agent.context != nil {
-                headerButton("记忆与晨间简报", icon: "sparkles", id: "remote.memory") { showingNotebook = true }
-            }
             Spacer()
             tasksHeaderButton
             headerButton("电脑桌面", icon: "desktopcomputer", id: "remote.desktop") { showingDesktop = true }

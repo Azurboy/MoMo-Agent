@@ -1,7 +1,7 @@
 import SwiftUI
 import MoMoArchive
 
-private enum PhoneTab: Hashable { case chat, transcripts }
+private enum PhoneTab: Hashable { case chat, memory, transcripts }
 
 struct PhoneRootView: View {
     let runtime: PhoneRuntime
@@ -38,10 +38,42 @@ struct PhoneRootView: View {
                 NavigationStack {
                     PhoneRemoteView(agent: runtime.remoteAgent, openSettings: { showingSettings = true },
                         watchStatus: runtime.library.watchStatus, requestWatchStatus: runtime.requestWatchStatus,
-                        openLibrary: { selectedTab = .transcripts }, speech: runtime.speech,
+                        openLibrary: { selectedTab = .transcripts },
+                        openMemory: { selectedTab = .memory },
+                        speech: runtime.speech,
                         stopPlayback: { await runtime.playback.stop(deactivateImmediately: true) },
                         chatIsVisible: selectedTab == .chat && !showingSettings)
                         .recordingSourceLinks(archive: runtime.archive, playback: runtime.playback)
+                }
+            }
+            Tab(String(localized: "记忆"), systemImage: "brain", value: .memory) {
+                NavigationStack {
+                    if let sync = runtime.remoteAgent.context {
+                        RemoteMemoryView(sync: sync, taskStore: runtime.remoteAgent.store) { card in
+                            selectedTab = .chat
+                            if let store = runtime.remoteAgent.store {
+                                store.setDraft(card.prompt)
+                                try? store.enqueue()
+                                Task { await store.refresh(userInitiated: true) }
+                            }
+                        }
+                        .recordingSourceLinks(archive: runtime.archive, playback: runtime.playback)
+                    } else {
+                        ContentUnavailableView {
+                            Label("尚未连接 Mac", systemImage: "brain")
+                        } description: {
+                            Text("配对并连接 Mac 后，即可在这里查看和管理长期记忆。")
+                        } actions: {
+                            Button("连接 Mac") {
+                                runtime.remoteAgent.advanceSetup(.connect)
+                            }
+                            .buttonStyle(ClientPrimaryButton())
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .phonePageSurface()
+                        .navigationTitle("记忆")
+                        .navigationBarTitleDisplayMode(.inline)
+                    }
                 }
             }
             Tab(String(localized: "转录"), systemImage: "doc.text", value: .transcripts) {

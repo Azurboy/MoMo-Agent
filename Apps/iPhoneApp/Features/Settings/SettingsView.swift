@@ -29,7 +29,7 @@ struct SettingsView: View {
                         if let sync = remoteAgent.context {
                             rowDivider
                             NavigationLink { RemoteMemoryView(sync: sync, taskStore: remoteAgent.store) } label: {
-                                PhoneSettingsLinkRow(title: "记忆", symbol: "sparkles")
+                                PhoneSettingsLinkRow(title: "记忆", symbol: "brain")
                             }.accessibilityIdentifier("settings.memories")
                         }
                         if remoteAgent.connection != nil {

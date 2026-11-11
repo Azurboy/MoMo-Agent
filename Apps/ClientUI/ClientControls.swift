@@ -2033,7 +2033,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         case .topic: return "doc.text"
         case .person: return "person.2"
         case .journal: return "calendar"
-        case .core: return "sparkles"
+        case .core: return "brain"
         }
     }
 
@@ -2122,7 +2122,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         case "person": return ("人物档案", "person")
         case "topic": return ("专题活页", "doc.text")
         case "user": return ("关于你", "person.crop.circle")
-        default: return ("核心记忆", "sparkles")
+        default: return ("核心记忆", "brain")
         }
     }
 
@@ -2209,7 +2209,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         case "topic": return "doc.text"
         case "person": return "person.2"
         case "journal": return "calendar"
-        default: return "sparkles"
+        default: return "brain"
         }
     }
 }
