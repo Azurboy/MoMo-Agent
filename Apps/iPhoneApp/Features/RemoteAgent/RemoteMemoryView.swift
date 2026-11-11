@@ -6,39 +6,24 @@ struct RemoteMemoryView: View {
     var taskStore: RemoteTaskStore? = nil
     var onSelectBriefingCard: ((DreamBriefingCard) -> Void)? = nil
     @State private var forgetting: ContextMemory?
-    @State private var selectedCategory: DreamMemoryCategory? = nil
     @State private var searchQuery = ""
     @State private var expandedFolderIDs: Set<String>? = nil
-    @State private var expandedParentIDs: Set<String> = []
     @Environment(\.colorScheme) private var scheme
 
     private var allMemories: [ContextMemory] { sync.memories.filter { $0.status != "forgotten" } }
-
-    private var activeCategory: DreamMemoryCategory {
-        selectedCategory ?? DreamMemoryCategory.preferredInitialCategory(for: allMemories)
-    }
-
-    private var visibleCategories: [DreamMemoryCategory] {
-        let nonEmpty = DreamMemoryCategory.allCases.filter { cat in
-            cat == .all || allMemories.contains(where: { cat.matches($0) })
-        }
-        return nonEmpty.isEmpty ? DreamMemoryCategory.allCases : nonEmpty
-    }
 
     private var directoryFolders: [DreamMemorySection] {
         DreamMemoryCategory.directoryFolders(from: allMemories)
     }
 
-    private var baseSections: [DreamMemorySection] {
-        activeCategory == .all
-            ? directoryFolders
-            : DreamMemoryCategory.sections(from: allMemories, category: activeCategory)
+    private var trimmedQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var sections: [DreamMemorySection] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return baseSections }
-        return baseSections.compactMap { folder in
+        let q = trimmedQuery
+        guard !q.isEmpty else { return directoryFolders }
+        return directoryFolders.compactMap { folder in
             let matches = folder.items.filter { item in
                 let digest = MemoryCardDigest.cached(for: item)
                 return digest.title.localizedStandardContains(q)
@@ -60,7 +45,6 @@ struct RemoteMemoryView: View {
         withAnimation(.easeInOut(duration: 0.16)) {
             if allFoldersExpanded {
                 expandedFolderIDs = []
-                expandedParentIDs.removeAll()
             } else {
                 expandedFolderIDs = DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
             }
@@ -68,7 +52,7 @@ struct RemoteMemoryView: View {
     }
 
     private func isFolderExpanded(_ folderID: String) -> Bool {
-        if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !trimmedQuery.isEmpty {
             return true
         }
         let current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
@@ -87,22 +71,23 @@ struct RemoteMemoryView: View {
         }
     }
 
+    private func searchSnippet(for memory: ContextMemory, query: String) -> String? {
+        guard !query.isEmpty else { return nil }
+        for rawLine in memory.text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("# ") else { continue }
+            if line.localizedStandardContains(query) {
+                return MemoryCardDigest.cleanInlineNoise(
+                    line.replacingOccurrences(of: #"^[#>*\-\d.\s]+"#, with: "", options: .regularExpression)
+                )
+            }
+        }
+        return nil
+    }
+
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
         VStack(alignment: .leading, spacing: 0) {
-            if !allMemories.isEmpty {
-                vaultHeaderBar(colors: colors)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .padding(.bottom, 6)
-            }
-
-            if visibleCategories.count > 2 {
-                categoryFilterStrip
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 6)
-            }
-
             if sync.hasLegacyChanges {
                 Text("旧版待同步修改已保留，请核对当前记忆后重新修改。")
                     .phoneText(.metadata)
@@ -124,13 +109,13 @@ struct RemoteMemoryView: View {
                         ContentUnavailableView {
                             Label(
                                 allMemories.isEmpty ? "还没有记忆" : "没有匹配的笔记",
-                                systemImage: allMemories.isEmpty ? "folder" : "magnifyingglass"
+                                systemImage: allMemories.isEmpty ? "brain" : "magnifyingglass"
                             )
                         } description: {
                             Text(
                                 allMemories.isEmpty
                                     ? (sync.isSyncing ? "正在读取记忆…" : "下拉即可同步记忆。")
-                                    : "试试其他关键词或切换分类。"
+                                    : "试试其他关键词。"
                             )
                         }
                         .accessibilityIdentifier("remote.memoryEmpty")
@@ -142,11 +127,10 @@ struct RemoteMemoryView: View {
                     await sync.refresh()
                 }
             } else {
-                let childrenByParent = MemoryCardDigest.linkedChildrenMap(for: allMemories)
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(sections) { section in
-                            let showHeader = activeCategory == .all && (sections.count > 1 || section.id != "core")
+                            let showHeader = sections.count > 1 || section.id != "core"
                             let expanded = !showHeader || isFolderExpanded(section.id)
 
                             VStack(alignment: .leading, spacing: 0) {
@@ -164,20 +148,16 @@ struct RemoteMemoryView: View {
                                             if idx > 0 {
                                                 Divider()
                                                     .overlay(colors.line.opacity(0.55))
-                                                    .padding(.leading, 26)
+                                                    .padding(.leading, 34)
                                             }
-                                            directoryItemView(
-                                                memory,
-                                                childMemories: childrenByParent[memory.id] ?? [],
-                                                colors: colors
-                                            )
+                                            directoryNoteRow(memory, colors: colors)
                                         }
                                     }
                                     .padding(.leading, showHeader ? 12 : 0)
                                     .overlay(alignment: .leading) {
                                         if showHeader {
                                             Rectangle()
-                                                .fill(colors.line.opacity(0.8))
+                                                .fill(colors.line.opacity(0.75))
                                                 .frame(width: 1)
                                                 .padding(.leading, 16)
                                                 .padding(.vertical, 4)
@@ -196,8 +176,10 @@ struct RemoteMemoryView: View {
                         syncStatusFooter
                     }
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .padding(.top, 6)
+                    .padding(.bottom, 16)
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .refreshable {
                     await sync.refresh()
                 }
@@ -209,8 +191,13 @@ struct RemoteMemoryView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(colors.desk, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        .searchable(
+            text: $searchQuery,
+            placement: .navigationBarDrawer(displayMode: .automatic),
+            prompt: "搜索笔记、项目、人物…"
+        )
         .toolbar {
-            if activeCategory == .all && directoryFolders.count > 1 {
+            if directoryFolders.count > 1 && trimmedQuery.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(allFoldersExpanded ? "全部折叠" : "全部展开",
                            systemImage: allFoldersExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
@@ -232,168 +219,59 @@ struct RemoteMemoryView: View {
         .task { await sync.refresh() }
     }
 
-    private func vaultHeaderBar(colors: MemoryNotebookPalette) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 13.5))
-                .foregroundStyle(colors.secondaryInk)
-            TextField("搜索笔记、项目、人物或关键词…", text: $searchQuery)
-                .font(.system(size: 14))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            if !searchQuery.isEmpty {
-                Button {
-                    searchQuery = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(colors.secondaryInk)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
-        .background(colors.paper, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(colors.line, lineWidth: 0.7)
-        }
-    }
-
     @ViewBuilder
-    private func directoryItemView(_ memory: ContextMemory, childMemories: [ContextMemory], colors: MemoryNotebookPalette) -> some View {
-        let digest = MemoryCardDigest.cached(for: memory)
-        let isParentExpanded = expandedParentIDs.contains(memory.id)
+    private func directoryNoteRow(_ memory: ContextMemory, colors: MemoryNotebookPalette) -> some View {
+        let matchedSnippet = searchSnippet(for: memory, query: trimmedQuery)
 
-        VStack(alignment: .leading, spacing: 0) {
-            if childMemories.isEmpty {
-                NavigationLink {
-                    RemoteMemoryDetail(sync: sync, taskStore: taskStore, memoryID: memory.id)
-                } label: {
-                    MemoryPreviewRow(memory: memory)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("remote.memoryRow." + memory.id)
-                .contextMenu {
-                    Button("复制 Markdown", systemImage: "doc.on.doc") {
-                        MemoryCardDigest.copyToPasteboard(memory.text)
-                    }
-                    Divider()
-                    Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
-                        forgetting = memory
-                    }
-                }
-            } else {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        if isParentExpanded {
-                            expandedParentIDs.remove(memory.id)
-                        } else {
-                            expandedParentIDs.insert(memory.id)
-                        }
-                    }
-                } label: {
-                    MemoryCardView(
-                        memory: memory,
-                        childCount: childMemories.count,
-                        isExpanded: isParentExpanded
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("remote.memoryRow." + memory.id)
-                .contextMenu {
-                    Button("复制 Markdown", systemImage: "doc.on.doc") {
-                        MemoryCardDigest.copyToPasteboard(memory.text)
-                    }
-                    Divider()
-                    Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
-                        forgetting = memory
-                    }
-                }
-            }
+        NavigationLink {
+            RemoteMemoryDetail(sync: sync, taskStore: taskStore, memoryID: memory.id)
+        } label: {
+            if let matchedSnippet {
+                let digest = MemoryCardDigest.cached(for: memory)
+                HStack(alignment: .center, spacing: 9) {
+                    Image(systemName: digest.badge.symbol)
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundStyle(colors.tabAccent(memory.kind))
+                        .frame(width: 14)
+                        .accessibilityHidden(true)
 
-            if !childMemories.isEmpty && isParentExpanded {
-                VStack(alignment: .leading, spacing: 0) {
-                    NavigationLink {
-                        RemoteMemoryDetail(sync: sync, taskStore: taskStore, memoryID: memory.id)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(colors.tabAccent(memory.kind))
-                                .frame(width: 14)
-                                .accessibilityHidden(true)
-                            Text("打开「\(digest.title)」全文")
-                                .font(.system(size: 13.5, weight: .medium))
+                    VStack(alignment: .leading, spacing: 2.5) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(digest.title)
+                                .font(.system(size: 14.5, weight: .regular))
                                 .foregroundStyle(colors.ink)
                                 .lineLimit(1)
                             Spacer(minLength: 4)
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(colors.secondaryInk.opacity(0.6))
-                                .accessibilityHidden(true)
-                        }
-                        .padding(.leading, 12)
-                        .padding(.trailing, 10)
-                        .padding(.vertical, 9)
-                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    ForEach(Array(childMemories.enumerated()), id: \.element.id) { idx, child in
-                        Divider()
-                            .overlay(colors.line.opacity(0.5))
-                            .padding(.leading, 12)
-                        NavigationLink {
-                            RemoteMemoryDetail(sync: sync, taskStore: taskStore, memoryID: child.id)
-                        } label: {
-                            MemoryDirectoryChildRowLabel(
-                                child: child,
-                                isLast: idx == childMemories.count - 1
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("复制 Markdown", systemImage: "doc.on.doc") {
-                                MemoryCardDigest.copyToPasteboard(child.text)
-                            }
-                            Divider()
-                            Button(child.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
-                                forgetting = child
+                            if let date = digest.dateBadge {
+                                Text(date)
+                                    .font(.system(size: 11, weight: .regular))
+                                    .monospacedDigit()
+                                    .foregroundStyle(colors.secondaryInk)
                             }
                         }
+                        Text(matchedSnippet)
+                            .font(.system(size: 12))
+                            .foregroundStyle(colors.secondaryInk)
+                            .lineLimit(1)
                     }
                 }
-                .padding(.leading, 18)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(colors.line.opacity(0.8))
-                        .frame(width: 1)
-                        .padding(.leading, 18)
-                        .padding(.vertical, 4)
-                        .accessibilityHidden(true)
-                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            } else {
+                MemoryCardView(memory: memory)
             }
         }
-    }
-
-    private var categoryFilterStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 5) {
-                ForEach(visibleCategories) { category in
-                    let isSelected = activeCategory == category
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            selectedCategory = category
-                        }
-                    } label: {
-                        MemoryBinderTab(category: category, isSelected: isSelected)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("remote.memoryCategory.\(category.rawValue)")
-                }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("remote.memoryRow." + memory.id)
+        .contextMenu {
+            Button("复制 Markdown", systemImage: "doc.on.doc") {
+                MemoryCardDigest.copyToPasteboard(memory.text)
+            }
+            Divider()
+            Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
+                forgetting = memory
             }
         }
     }
@@ -423,23 +301,22 @@ struct RemoteMemoryView: View {
     }
 }
 
-private struct MemoryPreviewRow: View {
-    let memory: ContextMemory
-    var body: some View {
-        MemoryCardView(memory: memory)
-    }
-}
-
 private struct RemoteMemoryDetail: View {
     let sync: PhoneContextSync
     var taskStore: RemoteTaskStore? = nil
-    @State var memoryID: String
-    @State private var navigationStack: [String] = []
-    @State private var forwardStack: [String] = []
+    let memoryID: String
+    @State private var pushedLinkedMemoryID: String? = nil
+    @State private var showingInstructionBar = false
+    @State private var instructionDraft = ""
+    @State private var submittingInstruction = false
+    @State private var instructionReceipt: String? = nil
+    @State private var instructionError: String? = nil
     @State private var confirmingForget = false
     @State private var forgetInFlight = false
+    @FocusState private var instructionFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openURL) private var parentOpenURL
 
     private var activeMemories: [ContextMemory] {
         sync.memories.filter { $0.status != "forgotten" }
@@ -449,46 +326,50 @@ private struct RemoteMemoryDetail: View {
         activeMemories.first { $0.id == memoryID }
     }
 
-    private var previousMemory: ContextMemory? {
-        guard let prevID = navigationStack.last else { return nil }
-        return activeMemories.first { $0.id == prevID }
+    private func folderBreadcrumbTitle(for kind: String) -> String {
+        switch kind {
+        case "project": return "在研项目"
+        case "briefing": return "晨间简报"
+        case "topic": return "专题活页"
+        case "person": return "人物档案"
+        case "journal": return "每日日志"
+        default: return "核心记忆"
+        }
     }
 
-    private var siblingMemories: [ContextMemory] {
-        guard let memory else { return [] }
-        let sameKind = DreamMemoryCategory.sortMemories(activeMemories.filter { $0.kind == memory.kind })
-        if sameKind.count > 1 {
-            return sameKind
-        }
-        if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) {
-            let allNotebooks = DreamMemoryCategory.directoryFolders(from: activeMemories)
-                .filter { $0.id != "core" }
-                .flatMap(\.items)
-            if allNotebooks.count > 1 {
-                return allNotebooks
-            }
-        }
-        return sameKind.isEmpty ? [memory] : sameKind
-    }
-
-    private func push(_ nextID: String) {
+    private func openLinked(_ nextID: String) {
         guard nextID != memoryID else { return }
-        navigationStack.append(memoryID)
-        forwardStack.removeAll()
-        memoryID = nextID
+        pushedLinkedMemoryID = nextID
     }
 
-    private var instructHandler: ((String) async throws -> Void)? {
-        guard let store = taskStore else { return nil }
-        return { fullPrompt in
-            let previousDraft = store.draft
-            store.setDraft(fullPrompt)
-            defer {
-                if !previousDraft.isEmpty {
-                    store.setDraft(previousDraft)
-                }
+    private var canInstruct: Bool {
+        taskStore != nil
+    }
+
+    private func submitInstruction() {
+        guard let memory, let store = taskStore else { return }
+        let trimmed = instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !submittingInstruction else { return }
+        let fullPrompt = MemoryCardDigest.buildInstructionPrompt(for: memory, instruction: trimmed)
+        submittingInstruction = true
+        instructionError = nil
+
+        let previousDraft = store.draft
+        store.setDraft(fullPrompt)
+        defer {
+            if !previousDraft.isEmpty {
+                store.setDraft(previousDraft)
             }
+        }
+        do {
             try store.enqueue()
+            instructionDraft = ""
+            instructionFieldFocused = false
+            withAnimation(.easeInOut(duration: 0.16)) {
+                showingInstructionBar = false
+                instructionReceipt = "已交给 MoMo 修改记忆与说话人，完成后自动同步"
+            }
+            submittingInstruction = false
             Task {
                 await store.refresh(userInitiated: true)
                 for delay in [6, 10, 15, 22] {
@@ -496,127 +377,109 @@ private struct RemoteMemoryDetail: View {
                     await sync.refresh()
                 }
             }
+        } catch {
+            submittingInstruction = false
+            instructionError = error.localizedDescription
         }
     }
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        let backAction: (() -> Void)? = previousMemory.map { prev in
-            {
-                _ = navigationStack.popLast()
-                forwardStack.append(memoryID)
-                memoryID = prev.id
-            }
-        }
-        let forwardAction: (() -> Void)? = (!navigationStack.isEmpty || !forwardStack.isEmpty) ? {
-            guard let nextID = forwardStack.popLast() else { return }
-            navigationStack.append(memoryID)
-            memoryID = nextID
-        } : nil
 
         Group {
             if let memory {
-                if siblingMemories.count > 1 {
-                    TabView(
-                        selection: Binding(
-                            get: { memory.id },
-                            set: { newID in
-                                guard newID != memoryID else { return }
-                                navigationStack.removeAll()
-                                forwardStack.removeAll()
-                                memoryID = newID
-                            }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ClientMemoryContent(
+                            memory: memory,
+                            allMemories: activeMemories,
+                            onSelectLinkedMemory: { openLinked($0.id) },
+                            borderless: true,
+                            showsInlineTopBar: false,
+                            showsInlineInstructionBar: false
                         )
-                    ) {
-                        ForEach(siblingMemories) { item in
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 14) {
-                                    ClientMemoryContent(
-                                        memory: item,
-                                        allMemories: activeMemories,
-                                        siblingItems: siblingMemories,
-                                        onSelectSibling: {
-                                            navigationStack.removeAll()
-                                            forwardStack.removeAll()
-                                            memoryID = $0.id
-                                        },
-                                        onSelectLinkedMemory: { push($0.id) },
-                                        backLabel: "后退",
-                                        onBack: backAction,
-                                        canGoForward: !forwardStack.isEmpty,
-                                        onForward: forwardAction,
-                                        borderless: true,
-                                        onInstruct: instructHandler
-                                    )
-                                    if let failure = sync.failure {
-                                        Text(failure)
-                                            .phoneText(.metadata)
-                                            .foregroundStyle(MoMoPalette.failure)
-                                    }
-                                }
-                                .padding(.horizontal, 20)
-                                .padding(.top, 14)
-                                .padding(.bottom, 28)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .tag(item.id)
+                        if let failure = sync.failure {
+                            Text(failure)
+                                .phoneText(.metadata)
+                                .foregroundStyle(MoMoPalette.failure)
                         }
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            ClientMemoryContent(
-                                memory: memory,
-                                allMemories: activeMemories,
-                                onSelectLinkedMemory: { push($0.id) },
-                                backLabel: "后退",
-                                onBack: backAction,
-                                canGoForward: !forwardStack.isEmpty,
-                                onForward: forwardAction,
-                                borderless: true,
-                                onInstruct: instructHandler
-                            )
-                            if let failure = sync.failure {
-                                Text(failure)
-                                    .phoneText(.metadata)
-                                    .foregroundStyle(MoMoPalette.failure)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.top, 14)
-                        .padding(.bottom, 28)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 36)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollDismissesKeyboard(.interactively)
             }
         }
+        .navigationDestination(item: $pushedLinkedMemoryID) { targetID in
+            RemoteMemoryDetail(sync: sync, taskStore: taskStore, memoryID: targetID)
+        }
         .environment(\.openURL, OpenURLAction { url in
-            if let next = DreamMemoryLinkResolver.resolve(url: url, in: sync.memories), next.id != memoryID {
-                push(next.id)
+            if DreamMemoryLinkResolver.isMemoryURL(url) {
+                if let next = DreamMemoryLinkResolver.resolve(url: url, in: sync.memories), next.id != memoryID {
+                    openLinked(next.id)
+                }
                 return .handled
             }
-            return .systemAction
+            parentOpenURL(url)
+            return .handled
         })
+        .safeAreaInset(edge: .bottom) {
+            bottomInstructionOverlay(colors: colors)
+        }
         .background(colors.paper.ignoresSafeArea())
-        .navigationTitle(memory.map { MemoryCardDigest.cached(for: $0).title } ?? "记忆详情")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(colors.paper, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .principal) {
                 if let memory {
+                    Text(folderBreadcrumbTitle(for: memory.kind))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(colors.secondaryInk)
+                }
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if let memory {
+                    if canInstruct {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showingInstructionBar.toggle()
+                                instructionError = nil
+                            }
+                            if showingInstructionBar {
+                                instructionFieldFocused = true
+                            } else {
+                                instructionFieldFocused = false
+                            }
+                        } label: {
+                            Image(systemName: "wand.and.stars")
+                                .foregroundStyle(showingInstructionBar ? colors.tabAccent(memory.kind) : colors.ink)
+                        }
+                        .accessibilityLabel("指令修改")
+                        .accessibilityIdentifier("remote.memoryInstructToggle")
+                    }
+
                     Menu {
                         Button {
                             MemoryCardDigest.copyToPasteboard(memory.text)
                         } label: {
                             Label("复制 Markdown", systemImage: "doc.on.doc")
                         }
-                        ShareLink(item: memory.text) { Label("分享", systemImage: "square.and.arrow.up") }
+                        ShareLink(item: memory.text) {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
                         Divider()
-                        Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) { confirmingForget = true }
-                            .accessibilityIdentifier("remote.forgetMemory")
-                    } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
+                        Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash", role: .destructive) {
+                            confirmingForget = true
+                        }
+                        .accessibilityIdentifier("remote.forgetMemory")
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
                     .accessibilityLabel("记忆操作")
                     .accessibilityIdentifier("remote.memoryActions")
                     .disabled(forgetInFlight)
@@ -637,6 +500,99 @@ private struct RemoteMemoryDetail: View {
                  : "连接 Mac 后删除这条记忆。原始录音与聊天记录仍保留。")
         }
         .onChange(of: memory == nil) { _, missing in if missing { dismiss() } }
+    }
+
+    @ViewBuilder
+    private func bottomInstructionOverlay(colors: MemoryNotebookPalette) -> some View {
+        if showingInstructionBar, let memory {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(colors.tabAccent(memory.kind))
+                    TextField("告诉 MoMo 怎么改（如：这段是 shengli 说的）…", text: $instructionDraft, axis: .vertical)
+                        .lineLimit(1...3)
+                        .font(.system(size: 14.5))
+                        .focused($instructionFieldFocused)
+                        .disabled(submittingInstruction)
+                        .onSubmit {
+                            submitInstruction()
+                        }
+                        .accessibilityIdentifier("remote.memoryInstructInput")
+
+                    if submittingInstruction {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button {
+                            submitInstruction()
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 26))
+                                .foregroundStyle(
+                                    instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                        ? colors.secondaryInk.opacity(0.35)
+                                        : colors.ink
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityLabel("发送修改指令")
+                        .accessibilityIdentifier("remote.memoryInstructSend")
+                    }
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 8)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(colors.line, lineWidth: 0.7)
+                }
+                .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
+
+                if let instructionError {
+                    Text(instructionError)
+                        .font(.footnote)
+                        .foregroundStyle(MoMoPalette.failure)
+                        .padding(.horizontal, 6)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        } else if let receipt = instructionReceipt {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(MoMoPalette.success)
+                Text(receipt)
+                    .font(.footnote)
+                    .foregroundStyle(colors.ink)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        instructionReceipt = nil
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(colors.secondaryInk)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭提示")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(.regularMaterial, in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(colors.line, lineWidth: 0.7)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
     }
 }
 

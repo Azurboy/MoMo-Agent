@@ -1,7 +1,7 @@
 import SwiftUI
 import MoMoArchive
 
-private enum PhoneTab: Hashable { case chat, memory, transcripts }
+private enum PhoneTab: Hashable { case chat, transcripts, memory }
 
 struct PhoneRootView: View {
     let runtime: PhoneRuntime
@@ -46,6 +46,27 @@ struct PhoneRootView: View {
                         .recordingSourceLinks(archive: runtime.archive, playback: runtime.playback)
                 }
             }
+            Tab(String(localized: "转录"), systemImage: "doc.text", value: .transcripts) {
+                NavigationStack {
+                    LibraryView(model: runtime.library, playback: runtime.playback,
+                        transcription: runtime.transcriptionSnapshot, speechFailure: runtime.speechFailure,
+                        batches: runtime.activeBatches,
+                        delete: { try await runtime.delete(sessionID: $0) },
+                        refresh: { await runtime.refresh() },
+                        onAppearRefresh: { await runtime.refreshLibraryOnAppear() },
+                        canDiscuss: runtime.remoteAgent.store != nil,
+                        discuss: { discuss([$0]) }, illustrations: runtime.lifeIllustrations, openSettings: { showingSettings = true },
+                        retryTranscription: { try await runtime.retryTranscription(sessionID: $0, expectedGeneration: $1) },
+                        discussSources: discuss,
+                        retryTimeline: { try await runtime.retryTimeline($0) },
+                        continueInBackground: runtime.supportsTranscriptionContinuation
+                            ? { try await runtime.continueTranscriptionInBackground() } : nil,
+                        hasBackgroundContinuation: runtime.hasTranscriptionContinuation,
+                        requestWatchStatus: runtime.requestWatchStatus,
+                        onSpeakersChanged: { await runtime.didCommitTargetedSpeakerFeedback() },
+                        resolveFiles: { try await runtime.resolveFiles($0, choosing: $1) })
+                }
+            }
             Tab(String(localized: "记忆"), systemImage: "brain", value: .memory) {
                 NavigationStack {
                     if let sync = runtime.remoteAgent.context {
@@ -74,27 +95,6 @@ struct PhoneRootView: View {
                         .navigationTitle("记忆")
                         .navigationBarTitleDisplayMode(.inline)
                     }
-                }
-            }
-            Tab(String(localized: "转录"), systemImage: "doc.text", value: .transcripts) {
-                NavigationStack {
-                    LibraryView(model: runtime.library, playback: runtime.playback,
-                        transcription: runtime.transcriptionSnapshot, speechFailure: runtime.speechFailure,
-                        batches: runtime.activeBatches,
-                        delete: { try await runtime.delete(sessionID: $0) },
-                        refresh: { await runtime.refresh() },
-                        onAppearRefresh: { await runtime.refreshLibraryOnAppear() },
-                        canDiscuss: runtime.remoteAgent.store != nil,
-                        discuss: { discuss([$0]) }, illustrations: runtime.lifeIllustrations, openSettings: { showingSettings = true },
-                        retryTranscription: { try await runtime.retryTranscription(sessionID: $0, expectedGeneration: $1) },
-                        discussSources: discuss,
-                        retryTimeline: { try await runtime.retryTimeline($0) },
-                        continueInBackground: runtime.supportsTranscriptionContinuation
-                            ? { try await runtime.continueTranscriptionInBackground() } : nil,
-                        hasBackgroundContinuation: runtime.hasTranscriptionContinuation,
-                        requestWatchStatus: runtime.requestWatchStatus,
-                        onSpeakersChanged: { await runtime.didCommitTargetedSpeakerFeedback() },
-                        resolveFiles: { try await runtime.resolveFiles($0, choosing: $1) })
                 }
             }
         }

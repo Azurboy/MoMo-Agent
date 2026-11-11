@@ -553,9 +553,10 @@ struct MemoryCardDigest: Equatable, Sendable {
         pattern: #"^(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:[–—-]\d{1,2})?)\s+"#
     )
     private static let sourceLinkRegex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(momoagent://source/[^)]+\)"#)
+    private static let sourceLinkCaptureRegex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\((momoagent://source/[^)]+)\)"#)
     private static let timeLabelRegex = try? NSRegularExpression(pattern: #"\[(\d{1,2}:\d{2})\s*原音\]"#)
     private static let uuidWithTagRegex = try? NSRegularExpression(
-        pattern: #"(?:录音\s*)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?"#
+        pattern: #"(?:录音\s*)?(?<!/)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\s+v\d+(?:[–—-]\d+)?)?"#
     )
     private static let hexEpochRegex = try? NSRegularExpression(
         pattern: #"(?<![0-9a-fA-F])[0-9a-fA-F]{8}\s+17[89]\d{7}(?:[–—-]\d{4,10})?(?![0-9])"#
@@ -570,8 +571,11 @@ struct MemoryCardDigest: Equatable, Sendable {
     private static let notebookRefRegex = try? NSRegularExpression(
         pattern: #"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#
     )
+    private static let obsidianWikiLinkRegex = try? NSRegularExpression(
+        pattern: #"\[\[((?:projects|topics|people|journal)/[^\]|\n]+(?:\.md)?|BRIEFING\.md|MEMORY\.md|USER\.md)(?:\|([^\]\n]+))?\]\]"#
+    )
     private static let bareUUIDRegex = try? NSRegularExpression(
-        pattern: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        pattern: #"(?<!/)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
     )
 
     static func cached(for memory: ContextMemory) -> MemoryCardDigest {
@@ -1136,8 +1140,39 @@ extension MemoryCardDigest {
         if !joined.isEmpty {
             s = joined
         }
-        if s.contains("momoagent://source/") {
-            s = replace(sourceLinkRegex, in: s, with: "`⏱ $1`")
+        if s.contains("momoagent://source/"), let srcRegex = sourceLinkCaptureRegex {
+            let matches = srcRegex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed()
+            for match in matches {
+                guard let fullRange = Range(match.range, in: s),
+                      let labelRange = Range(match.range(at: 1), in: s),
+                      let urlRange = Range(match.range(at: 2), in: s) else { continue }
+                let rawLabel = String(s[labelRange]).trimmingCharacters(in: .whitespaces)
+                let urlStr = String(s[urlRange])
+                let cleanLabel = rawLabel.hasPrefix("⏱") ? rawLabel : "⏱ \(rawLabel)"
+                s.replaceSubrange(fullRange, with: "[\(cleanLabel)](\(urlStr))")
+            }
+        }
+        if s.contains("[["), let wikiRegex = obsidianWikiLinkRegex {
+            let matches = wikiRegex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed()
+            for match in matches {
+                guard let fullRange = Range(match.range, in: s),
+                      let pathRange = Range(match.range(at: 1), in: s) else { continue }
+                var relPath = String(s[pathRange]).trimmingCharacters(in: .whitespaces)
+                if !relPath.lowercased().hasSuffix(".md") && relPath.contains("/") {
+                    relPath += ".md"
+                }
+                let encoded = relPath
+                    .split(separator: "/")
+                    .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                    .joined(separator: "/")
+                let alias: String
+                if match.numberOfRanges > 2, let aliasRange = Range(match.range(at: 2), in: s) {
+                    alias = String(s[aliasRange]).trimmingCharacters(in: .whitespaces)
+                } else {
+                    alias = Self.humanizeNotebookPath(relPath)
+                }
+                s.replaceSubrange(fullRange, with: "[\(alias)](momoagent://memory/\(encoded))")
+            }
         }
         if s.contains("`"), let regex = notebookRefRegex {
             let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed()
@@ -1159,9 +1194,9 @@ extension MemoryCardDigest {
                         let adjustedLower = s.index(fullRange.lowerBound, offsetBy: -distance)
                         fullRange = adjustedLower..<fullRange.upperBound
                     }
-                    s.replaceSubrange(fullRange, with: "  [[\(friendly)]](momoagent://memory/\(encoded))")
+                    s.replaceSubrange(fullRange, with: "  [\(friendly)](momoagent://memory/\(encoded))")
                 } else {
-                    s.replaceSubrange(fullRange, with: "[[\(friendly)]](momoagent://memory/\(encoded))")
+                    s.replaceSubrange(fullRange, with: "[\(friendly)](momoagent://memory/\(encoded))")
                 }
             }
         }
@@ -1300,19 +1335,34 @@ struct ClientMemoryContent: View {
     var onDelete: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     var borderless: Bool = false
+    var showsInlineTopBar: Bool = true
+    var showsInlineInstructionBar: Bool = true
+    var externalShowingInstructionBar: Binding<Bool>? = nil
     var sourceLookup: ((ContextMemory.Evidence) -> ContextSource?)? = nil
     var onOpenSource: ((ContextSource) -> Void)? = nil
     var onInstruct: ((String) async throws -> Void)? = nil
     @State private var showEvidence = false
-    @State private var showBacklinks = true
+    @State private var showBacklinks = false
     @State private var copied = false
-    @State private var showingInstructionBar = false
+    @State private var internalShowingInstructionBar = false
     @State private var instructionDraft = ""
     @State private var submittingInstruction = false
     @State private var instructionReceipt: String? = nil
     @State private var instructionError: String? = nil
     @Environment(\.colorScheme) private var scheme
     @Environment(\.openURL) private var openURL
+
+    private var isInstructionBarPresented: Bool {
+        externalShowingInstructionBar?.wrappedValue ?? internalShowingInstructionBar
+    }
+
+    private func setInstructionBarPresented(_ value: Bool) {
+        if let externalShowingInstructionBar {
+            externalShowingInstructionBar.wrappedValue = value
+        } else {
+            internalShowingInstructionBar = value
+        }
+    }
 
     private var titleSize: CGFloat {
         #if os(macOS)
@@ -1348,201 +1398,177 @@ struct ClientMemoryContent: View {
         let incomingMemories = precomputedIncoming ?? (allMemories.isEmpty ? [] : MemoryCardDigest.backlinks(for: memory, in: allMemories))
 
         VStack(alignment: .leading, spacing: 16) {
-            // Obsidian-style top pane header: [< >] + Folder › Note breadcrumb + overflow
-            HStack(alignment: .center, spacing: 6) {
-                if onBack != nil || onForward != nil {
-                    HStack(spacing: 2) {
-                        Button {
-                            onBack?()
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(onBack != nil ? colors.ink : colors.secondaryInk.opacity(0.35))
-                                .frame(width: 26, height: 26)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(onBack == nil)
-                        .help(backLabel ?? "后退")
-                        .accessibilityLabel(backLabel ?? "返回")
-
-                        if onForward != nil {
+            if showsInlineTopBar {
+                // Obsidian-style top pane header: [< >] + Folder › Note breadcrumb + overflow
+                HStack(alignment: .center, spacing: 6) {
+                    if onBack != nil || onForward != nil {
+                        HStack(spacing: 2) {
                             Button {
-                                onForward?()
+                                onBack?()
                             } label: {
-                                Image(systemName: "chevron.right")
+                                Image(systemName: "chevron.left")
                                     .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(canGoForward ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                    .foregroundStyle(onBack != nil ? colors.ink : colors.secondaryInk.opacity(0.35))
                                     .frame(width: 26, height: 26)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .disabled(!canGoForward)
-                            .help("前进")
-                            .accessibilityLabel("前进")
+                            .disabled(onBack == nil)
+                            .help(backLabel ?? "后退")
+                            .accessibilityLabel(backLabel ?? "返回")
+
+                            if onForward != nil {
+                                Button {
+                                    onForward?()
+                                } label: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(canGoForward ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                        .frame(width: 26, height: 26)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!canGoForward)
+                                .help("前进")
+                                .accessibilityLabel("前进")
+                            }
                         }
-                    }
-                    .padding(.horizontal, 2)
-                    .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-
-                // Breadcrumb path: Folder › Note
-                HStack(spacing: 5) {
-                    Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(colors.tabAccent(memory.kind))
-                    Text(folderBreadcrumbTitle(for: memory.kind))
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(colors.secondaryInk)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(colors.secondaryInk.opacity(0.55))
-                    Text(digest.title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(colors.ink)
-                        .lineLimit(1)
-                }
-                .accessibilityHidden(true)
-
-                Spacer(minLength: 6)
-
-                if siblingItems.count > 1, let onSelectSibling {
-                    MemoryPageStepper(
-                        items: siblingItems,
-                        selectedID: memory.id,
-                        onSelect: onSelectSibling
-                    )
-                }
-
-                if onInstruct != nil {
-                    Button {
-                        showingInstructionBar.toggle()
-                        instructionError = nil
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "wand.and.stars")
-                                .font(.system(size: 11, weight: .medium))
-                            Text("指令修改")
-                                .font(.system(size: 11.5, weight: .medium))
-                        }
-                        .foregroundStyle(showingInstructionBar ? colors.ink : colors.secondaryInk)
-                        .padding(.horizontal, 8)
-                        .frame(height: 26)
-                        .background(
-                            showingInstructionBar ? colors.surface : colors.surface.opacity(0.75),
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        )
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("通过自然语言指令让 MoMo 修改这篇记忆或纠正说话人")
-                    .accessibilityIdentifier("remote.memoryInstructToggle")
-                }
-
-                if let onOpenFullNotebook {
-                    Button(action: onOpenFullNotebook) {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(colors.secondaryInk)
-                            .frame(width: 26, height: 26)
-                            .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .help("在记忆库中打开")
-                    .accessibilityLabel("在记忆库中打开")
-                }
-
-                Menu {
-                    Button {
-                        MemoryCardDigest.copyToPasteboard(memory.text)
-                        copied = true
-                    } label: {
-                        Label(copied ? "已复制 Markdown" : "复制 Markdown", systemImage: "doc.on.doc")
-                    }
-                    #if os(macOS)
-                    Button {
-                        MemoryCardDigest.shareText(memory.text)
-                    } label: {
-                        Label("分享", systemImage: "square.and.arrow.up")
-                    }
-                    #else
-                    ShareLink(item: memory.text) {
-                        Label("分享", systemImage: "square.and.arrow.up")
-                    }
-                    #endif
-                    if let onDelete {
-                        Divider()
-                        Button(role: .destructive, action: onDelete) {
-                            Label(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(colors.secondaryInk)
-                        .frame(width: 26, height: 26)
+                        .padding(.horizontal, 2)
                         .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("更多操作")
-                .accessibilityLabel("更多操作")
-                .accessibilityIdentifier("remote.inlineMemoryMore")
+                    }
 
-                if let onClose {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
+                    // Breadcrumb path: Folder › Note
+                    HStack(spacing: 5) {
+                        Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(colors.tabAccent(memory.kind))
+                        Text(folderBreadcrumbTitle(for: memory.kind))
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(colors.secondaryInk)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(colors.secondaryInk.opacity(0.55))
+                        Text(digest.title)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(colors.ink)
+                            .lineLimit(1)
+                    }
+                    .accessibilityHidden(true)
+
+                    Spacer(minLength: 6)
+
+                    if onInstruct != nil {
+                        Button {
+                            setInstructionBarPresented(!isInstructionBarPresented)
+                            instructionError = nil
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "wand.and.stars")
+                                    .font(.system(size: 11, weight: .medium))
+                                Text("指令修改")
+                                    .font(.system(size: 11.5, weight: .medium))
+                            }
+                            .foregroundStyle(isInstructionBarPresented ? colors.ink : colors.secondaryInk)
+                            .padding(.horizontal, 8)
+                            .frame(height: 26)
+                            .background(
+                                isInstructionBarPresented ? colors.surface : colors.surface.opacity(0.75),
+                                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("通过自然语言指令让 MoMo 修改这篇记忆或纠正说话人")
+                        .accessibilityIdentifier("remote.memoryInstructToggle")
+                    }
+
+                    if let onOpenFullNotebook {
+                        Button(action: onOpenFullNotebook) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(colors.secondaryInk)
+                                .frame(width: 26, height: 26)
+                                .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .help("在记忆库中打开")
+                        .accessibilityLabel("在记忆库中打开")
+                    }
+
+                    Menu {
+                        Button {
+                            MemoryCardDigest.copyToPasteboard(memory.text)
+                            copied = true
+                        } label: {
+                            Label(copied ? "已复制 Markdown" : "复制 Markdown", systemImage: "doc.on.doc")
+                        }
+                        #if os(macOS)
+                        Button {
+                            MemoryCardDigest.shareText(memory.text)
+                        } label: {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
+                        #else
+                        ShareLink(item: memory.text) {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
+                        #endif
+                        if let onDelete {
+                            Divider()
+                            Button(role: .destructive, action: onDelete) {
+                                Label(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(colors.secondaryInk)
                             .frame(width: 26, height: 26)
                             .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .help("关闭")
-                    .accessibilityLabel("关闭")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("更多操作")
+                    .accessibilityLabel("更多操作")
+                    .accessibilityIdentifier("remote.inlineMemoryMore")
+
+                    if let onClose {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(colors.secondaryInk)
+                                .frame(width: 26, height: 26)
+                                .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .help("关闭")
+                        .accessibilityLabel("关闭")
+                    }
                 }
             }
 
-            // Document Title + Obsidian Properties Strip
-            VStack(alignment: .leading, spacing: 10) {
+            // Clean Obsidian-style Inline Title + Quiet Optional Date
+            VStack(alignment: .leading, spacing: 6) {
                 Text(digest.title)
                     .font(.system(size: titleSize, weight: .bold))
                     .foregroundStyle(colors.ink)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
 
-                // Subtle Obsidian-style inline Properties metadata bar (wraps cleanly instead of clipping)
-                ObsidianTagFlowLayout(horizontalSpacing: 7, verticalSpacing: 6) {
-                    obsidianPropertyTag(icon: digest.badge.symbol, label: digest.badge.title, accent: colors.tabAccent(memory.kind), colors: colors)
-
-                    if let date = digest.dateBadge {
-                        obsidianPropertyTag(icon: "calendar", label: date, accent: nil, colors: colors, monospaced: true)
-                    }
-
-                    if let rawPath = memory.path, !rawPath.isEmpty {
-                        obsidianPropertyTag(icon: "link", label: rawPath, accent: nil, colors: colors, monospaced: true)
-                    }
-
-                    if !outgoingMemories.isEmpty || !digest.linkedPaths.isEmpty {
-                        let count = max(outgoingMemories.count, digest.linkedPaths.count)
-                        obsidianPropertyTag(icon: "arrow.up.right.square", label: "\(count) 个链接", accent: nil, colors: colors)
-                    }
-
-                    if !incomingMemories.isEmpty {
-                        obsidianPropertyTag(icon: "arrow.turn.down.left", label: "\(incomingMemories.count) 处反向提及", accent: nil, colors: colors)
-                    }
-
-                    if !memory.evidence.isEmpty {
-                        obsidianPropertyTag(icon: "waveform", label: "\(memory.evidence.count) 段原音", accent: nil, colors: colors)
-                    }
+                if let date = digest.dateBadge, !digest.title.contains(date) {
+                    Text(date)
+                        .font(.system(size: 12.5, weight: .regular))
+                        .monospacedDigit()
+                        .foregroundStyle(colors.secondaryInk)
                 }
 
-                if showingInstructionBar, let onInstruct {
+                if showsInlineInstructionBar, isInstructionBarPresented, let onInstruct {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Image(systemName: "sparkles")
+                            Image(systemName: "wand.and.stars")
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(colors.tabAccent(memory.kind))
                             TextField("告诉 MoMo 怎么改（如：这个 OKR 是 shengli 说的，帮我纠正说话人和相关记忆）…", text: $instructionDraft)
@@ -1705,33 +1731,32 @@ struct ClientMemoryContent: View {
                             }
                             .foregroundStyle(colors.secondaryInk)
 
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 6) {
-                                    ForEach(digest.linkedPaths, id: \.self) { relPath in
-                                        let label = MemoryCardDigest.humanizeNotebookPath(relPath)
-                                        let encoded = relPath
-                                            .split(separator: "/")
-                                            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-                                            .joined(separator: "/")
-                                        Button {
-                                            if let url = URL(string: "momoagent://memory/\(encoded)") {
-                                                openURL(url)
-                                            }
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "doc.text")
-                                                    .font(.system(size: 10.5))
-                                                    .foregroundStyle(colors.secondaryInk)
-                                                Text("[[\(label)]]")
-                                                    .font(.system(size: 12, weight: .medium))
-                                            }
-                                            .foregroundStyle(colors.ink)
-                                            .padding(.horizontal, 9)
-                                            .padding(.vertical, 5)
-                                            .background(colors.surface.opacity(0.8), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            ObsidianTagFlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
+                                ForEach(digest.linkedPaths, id: \.self) { relPath in
+                                    let label = MemoryCardDigest.humanizeNotebookPath(relPath)
+                                    let encoded = relPath
+                                        .split(separator: "/")
+                                        .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                                        .joined(separator: "/")
+                                    Button {
+                                        if let url = URL(string: "momoagent://memory/\(encoded)") {
+                                            openURL(url)
                                         }
-                                        .buttonStyle(.plain)
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "doc.text")
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(colors.secondaryInk)
+                                            Text(label)
+                                                .font(.system(size: 12.5, weight: .medium))
+                                                .lineLimit(1)
+                                        }
+                                        .foregroundStyle(colors.ink)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 5.5)
+                                        .background(colors.surface.opacity(0.8), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -1901,7 +1926,7 @@ struct ClientMemoryContent: View {
         .memoryNotebookPage(borderless: borderless)
         .onChange(of: memory.id) {
             copied = false
-            showingInstructionBar = false
+            setInstructionBarPresented(false)
             instructionDraft = ""
             instructionError = nil
             instructionReceipt = nil
@@ -1919,8 +1944,8 @@ struct ClientMemoryContent: View {
             do {
                 try await handler(fullPrompt)
                 instructionDraft = ""
-                showingInstructionBar = false
-                instructionReceipt = "已交给 MoMo 修正记忆与说话人（可在首页查看进度，完成后将自动同步）"
+                setInstructionBarPresented(false)
+                instructionReceipt = "已交给 MoMo 修正记忆与说话人（可在聊天页查看进度，完成后将自动同步）"
             } catch {
                 instructionError = error.localizedDescription
             }
@@ -1964,32 +1989,27 @@ private struct FlowingWikiLinkRow: View {
     let onSelect: (ContextMemory) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(memories) { item in
-                    let digest = MemoryCardDigest.cached(for: item)
-                    Button {
-                        onSelect(item)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: digest.badge.symbol)
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundStyle(colors.tabAccent(item.kind))
-                            Text(digest.title)
-                                .font(.system(size: 12.5, weight: .medium))
-                                .foregroundStyle(colors.ink)
-                                .lineLimit(1)
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(colors.secondaryInk.opacity(0.7))
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5.5)
-                        .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        ObsidianTagFlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
+            ForEach(memories) { item in
+                let digest = MemoryCardDigest.cached(for: item)
+                Button {
+                    onSelect(item)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: digest.badge.symbol)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(colors.tabAccent(item.kind))
+                        Text(digest.title)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(colors.ink)
+                            .lineLimit(1)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5.5)
+                    .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -2962,6 +2982,7 @@ struct MemoryNotePreviewSheet: View {
     @State private var forwardStack: [ContextMemory] = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openURL) private var parentOpenURL
 
     private var siblingMemories: [ContextMemory] {
         let active = allMemories.filter { $0.status != "forgotten" }
@@ -3035,56 +3056,57 @@ struct MemoryNotePreviewSheet: View {
             .frame(width: 560, height: 480)
             .background(colors.paper)
             #else
-            TabView(
-                selection: Binding(
-                    get: { memory.id },
-                    set: { newID in
-                        if let next = siblingMemories.first(where: { $0.id == newID }) {
-                            navigationStack.removeAll()
-                            forwardStack.removeAll()
-                            memory = next
+            NavigationStack {
+                ScrollView {
+                    ClientMemoryContent(
+                        memory: memory,
+                        allMemories: allMemories,
+                        siblingItems: siblingMemories,
+                        onSelectLinkedMemory: { pushMemory($0) },
+                        borderless: true,
+                        showsInlineTopBar: false
+                    )
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                    .padding(.bottom, 28)
+                }
+                .background(colors.paper.ignoresSafeArea())
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(colors.paper, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        if let backAction {
+                            Button(action: backAction) {
+                                Image(systemName: "chevron.left")
+                            }
+                            .accessibilityLabel("返回上一篇")
+                        } else if let openAllAction {
+                            Button("记忆库", systemImage: "brain", action: openAllAction)
                         }
                     }
-                )
-            ) {
-                ForEach(siblingMemories) { item in
-                    ScrollView {
-                        ClientMemoryContent(
-                            memory: item,
-                            allMemories: allMemories,
-                            siblingItems: siblingMemories,
-                            onSelectSibling: {
-                                navigationStack.removeAll()
-                                forwardStack.removeAll()
-                                memory = $0
-                            },
-                            onSelectLinkedMemory: { pushMemory($0) },
-                            backLabel: "后退",
-                            onBack: backAction,
-                            canGoForward: !forwardStack.isEmpty,
-                            onForward: forwardAction,
-                            onOpenFullNotebook: openAllAction,
-                            onClose: { dismiss() },
-                            borderless: true
-                        )
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-                        .padding(.bottom, 28)
+                    ToolbarItem(placement: .principal) {
+                        Text(MemoryCardDigest.cached(for: memory).badge.title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(colors.secondaryInk)
                     }
-                    .tag(item.id)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("完成") { dismiss() }
+                    }
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .background(colors.paper.ignoresSafeArea())
             .presentationDragIndicator(.visible)
             #endif
         }
         .environment(\.openURL, OpenURLAction { url in
-            if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories), next.id != memory.id {
-                pushMemory(next)
+            if DreamMemoryLinkResolver.isMemoryURL(url) {
+                if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories), next.id != memory.id {
+                    pushMemory(next)
+                }
                 return .handled
             }
-            return .systemAction
+            parentOpenURL(url)
+            return .handled
         })
     }
 }

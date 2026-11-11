@@ -110,7 +110,6 @@ struct DesktopMemory: View {
     }
 
     fileprivate func buildFlatEntries(folders: [DreamMemorySection], activeID: String?) -> [VaultSidebarEntry] {
-        let childrenByParent = vault.childrenByParentID
         let metaByID = vault.rowMetaByID
         var entries: [VaultSidebarEntry] = []
         entries.reserveCapacity(vault.activeMemories.count + folders.count)
@@ -132,33 +131,17 @@ struct DesktopMemory: View {
 
             for memory in section.items {
                 let meta = metaByID[memory.id]
-                let children = childrenByParent[memory.id] ?? []
-                let parentExpanded = !children.isEmpty && expandedParentIDs.contains(memory.id)
 
                 entries.append(.note(
                     memory: memory,
                     title: meta?.title ?? memory.id,
                     symbol: meta?.symbol ?? "doc.text",
                     shortJournalDate: meta?.shortJournalDate,
-                    childCount: children.count,
-                    isExpanded: parentExpanded,
+                    childCount: 0,
+                    isExpanded: false,
                     isSelected: activeID == memory.id,
                     underFolder: showFolderRow
                 ))
-
-                if parentExpanded {
-                    for child in children {
-                        let childMeta = metaByID[child.id]
-                        entries.append(.childNote(
-                            parentID: memory.id,
-                            child: child,
-                            title: childMeta?.title ?? child.id,
-                            symbol: childMeta?.symbol ?? "doc.text",
-                            isSelected: activeID == child.id,
-                            underFolder: showFolderRow
-                        ))
-                    }
-                }
             }
         }
         return entries
@@ -601,6 +584,7 @@ private struct DesktopNoteTopBar: View {
                     Text(folderBreadcrumbTitle(for: memory.kind))
                         .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(colors.secondaryInk)
+                        .fixedSize(horizontal: true, vertical: false)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8.5, weight: .semibold))
                         .foregroundStyle(colors.secondaryInk.opacity(0.55))
@@ -612,14 +596,6 @@ private struct DesktopNoteTopBar: View {
                 .accessibilityHidden(true)
 
                 Spacer(minLength: 6)
-
-                if siblingItems.count > 1 {
-                    MemoryPageStepper(
-                        items: siblingItems,
-                        selectedID: memory.id,
-                        onSelect: onSelectSibling
-                    )
-                }
 
                 if onInstruct != nil {
                     Button {
@@ -681,7 +657,7 @@ private struct DesktopNoteTopBar: View {
             if showingInstructionBar, let onInstruct {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "wand.and.stars")
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(colors.tabAccent(memory.kind))
                         TextField("告诉 MoMo 怎么改（如：这个 OKR 是 shengli 说的，帮我纠正说话人和相关记忆）…", text: $instructionDraft)
@@ -1402,16 +1378,16 @@ private enum MacFullNoteComposer {
         let digest = MemoryCardDigest.cached(for: memory)
         let ink = MacVaultPalette.ink
         let muted = MacVaultPalette.muted
-        let accent = MacVaultPalette.nsAccent(for: memory.kind)
 
         let result = NSMutableAttributedString()
         var shiftedQuotes: [NSRange] = []
         var ruleIndices: [Int] = []
 
-        // 1. Document H1 Title
+        // 1. Clean Obsidian-style Inline H1 Title + Quiet Optional Date
+        let hasSeparateDate = (digest.dateBadge != nil) && !digest.title.contains(digest.dateBadge!)
         let titleStyle = NSMutableParagraphStyle()
         titleStyle.lineSpacing = 4
-        titleStyle.paragraphSpacing = 8
+        titleStyle.paragraphSpacing = hasSeparateDate ? 6 : 20
         result.append(NSAttributedString(
             string: digest.title + "\n",
             attributes: [
@@ -1421,49 +1397,19 @@ private enum MacFullNoteComposer {
             ]
         ))
 
-        // 2. Obsidian Properties Metadata Strip
-        let metaStyle = NSMutableParagraphStyle()
-        metaStyle.lineSpacing = 3
-        metaStyle.paragraphSpacing = 22
-        let metaLine = NSMutableAttributedString()
-        metaLine.append(NSAttributedString(
-            string: digest.badge.title,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: accent,
-                .paragraphStyle: metaStyle
-            ]
-        ))
-
-        var metaParts: [String] = []
-        if let date = digest.dateBadge {
-            metaParts.append(date)
-        }
-        if let rawPath = memory.path, !rawPath.isEmpty {
-            metaParts.append(rawPath)
-        }
-        let linkCount = max(outgoing.count, digest.linkedPaths.count)
-        if linkCount > 0 {
-            metaParts.append("\(linkCount) 个链接")
-        }
-        if !incoming.isEmpty {
-            metaParts.append("\(incoming.count) 处反向提及")
-        }
-        if !memory.evidence.isEmpty {
-            metaParts.append("\(memory.evidence.count) 段原音")
-        }
-        if !metaParts.isEmpty {
-            metaLine.append(NSAttributedString(
-                string: "   ·   " + metaParts.joined(separator: "   ·   "),
+        if let date = digest.dateBadge, hasSeparateDate {
+            let dateStyle = NSMutableParagraphStyle()
+            dateStyle.lineSpacing = 3
+            dateStyle.paragraphSpacing = 18
+            result.append(NSAttributedString(
+                string: date + "\n",
                 attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular),
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular),
                     .foregroundColor: muted,
-                    .paragraphStyle: metaStyle
+                    .paragraphStyle: dateStyle
                 ]
             ))
         }
-        metaLine.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: metaStyle]))
-        result.append(metaLine)
         ruleIndices.append(max(0, result.length - 1))
 
         // 3. Main Markdown Body
@@ -1523,7 +1469,7 @@ private enum MacFullNoteComposer {
                     if let url = URL(string: "momoagent://memory-id/\(encodedID)") {
                         attrs[.link] = url
                     }
-                    line.append(NSAttributedString(string: "[[\(targetTitle)]]", attributes: attrs))
+                    line.append(NSAttributedString(string: targetTitle, attributes: attrs))
                 }
                 line.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12.5), .paragraphStyle: outStyle]))
                 result.append(line)
@@ -1557,7 +1503,7 @@ private enum MacFullNoteComposer {
                     if let url = URL(string: "momoagent://memory/\(encoded)") {
                         attrs[.link] = url
                     }
-                    line.append(NSAttributedString(string: "[[\(friendly)]]", attributes: attrs))
+                    line.append(NSAttributedString(string: friendly, attributes: attrs))
                 }
                 line.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12.5), .paragraphStyle: outStyle]))
                 result.append(line)

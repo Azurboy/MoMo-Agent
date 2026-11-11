@@ -155,6 +155,7 @@ private struct RemoteConversationView: View {
     let stopPlayback: () async -> Void
     let voiceInputEnabled: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openURL) private var parentOpenURL
     @State private var composeRevision = 0
     @State private var sendFailure: String?
     @State private var viewport = CGRect.zero
@@ -249,7 +250,10 @@ private struct RemoteConversationView: View {
             }
         }
         .environment(\.openURL, OpenURLAction { url in
-            guard DreamMemoryLinkResolver.isMemoryURL(url) else { return .systemAction }
+            guard DreamMemoryLinkResolver.isMemoryURL(url) else {
+                parentOpenURL(url)
+                return .handled
+            }
             let memories = agent.context?.memories ?? []
             if let matched = DreamMemoryLinkResolver.resolve(url: url, in: memories) {
                 previewingMemoryNote = matched
