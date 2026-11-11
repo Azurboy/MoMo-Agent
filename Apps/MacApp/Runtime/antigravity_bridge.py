@@ -13,9 +13,14 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.parse import urlsplit
 import uuid
+
+_AGY_TOTAL_SEM = threading.BoundedSemaphore(3)
+_AGY_BACKGROUND_SEM = threading.BoundedSemaphore(1)
+MAX_PROMPT_UTF8_BYTES = 140_000
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
 MODEL_LINE_RE = re.compile(r"^\s*([a-z0-9][a-z0-9._-]+)(?:\t+|\s{2,})(.+?)\s*$")
@@ -365,9 +370,53 @@ def build_antigravity_prompt(
 
     if system_chunks:
         sections.append("<system_instructions>\n" + "\n\n".join(system_chunks) + "\n</system_instructions>")
-    sections.append("<conversation>\n" + "\n\n".join(convo_chunks) + "\n</conversation>")
+
+    footer_sections: list[str] = []
     if not declared_tools:
-        sections.append("Write ONLY the assistant's direct response to the latest turn in <conversation>, with no meta-commentary.")
+        footer_sections.append("Write ONLY the assistant's direct response to the latest turn in <conversation>, with no meta-commentary.")
+
+    fixed_overhead = sum(len(s.encode("utf-8")) for s in (*sections, *footer_sections)) + 512
+    convo_budget = max(32_000, MAX_PROMPT_UTF8_BYTES - fixed_overhead)
+    full_convo = "\n\n".join(convo_chunks)
+    if len(full_convo.encode("utf-8")) > convo_budget and len(convo_chunks) > 2:
+        # Preserve the initial user/task framing plus as many recent turns/tool results as fit in budget.
+        head_chunks: list[str] = []
+        head_budget = min(20_000, convo_budget // 4)
+        used_head = 0
+        for idx, chunk in enumerate(convo_chunks[:2]):
+            encoded = chunk.encode("utf-8")
+            if len(encoded) > head_budget - used_head:
+                clipped = encoded[: max(1024, head_budget - used_head)].decode("utf-8", errors="ignore")
+                head_chunks.append(clipped + "\n...[首轮超长内容已截断]...")
+                break
+            head_chunks.append(chunk)
+            used_head += len(encoded)
+
+        tail_budget = max(16_000, convo_budget - used_head - 256)
+        tail_chunks_rev: list[str] = []
+        used_tail = 0
+        for chunk in reversed(convo_chunks[len(head_chunks) :]):
+            encoded = chunk.encode("utf-8")
+            if used_tail + len(encoded) > tail_budget:
+                if not tail_chunks_rev:
+                    clipped = encoded[-tail_budget:].decode("utf-8", errors="ignore")
+                    tail_chunks_rev.append("...[单条超长上下文前段已压缩]...\n" + clipped)
+                break
+            tail_chunks_rev.append(chunk)
+            used_tail += len(encoded) + 2
+        tail_chunks = list(reversed(tail_chunks_rev))
+        omitted = max(0, len(convo_chunks) - len(head_chunks) - len(tail_chunks))
+        marker = f"[SYSTEM_NOTE: 中间 {omitted} 条历史工具步骤已自动折叠，请结合首轮任务目标与最近进展直接继续完成剩余闭环。]"
+        full_convo = "\n\n".join([*head_chunks, marker, *tail_chunks])
+    elif len(full_convo.encode("utf-8")) > convo_budget:
+        encoded = full_convo.encode("utf-8")
+        half = convo_budget // 2
+        head_s = encoded[:half].decode("utf-8", errors="ignore")
+        tail_s = encoded[-half:].decode("utf-8", errors="ignore")
+        full_convo = f"{head_s}\n\n...[中间较早上下文已自动压缩以适配 CLI 参数上限]...\n\n{tail_s}"
+
+    sections.append("<conversation>\n" + full_convo + "\n</conversation>")
+    sections.extend(footer_sections)
 
     return "\n\n".join(sections), schema, declared_names
 
@@ -485,6 +534,17 @@ def parse_antigravity_cli_response(
     return {"content": content, "tool_calls": tool_calls, "usage": usage}
 
 
+@contextlib.contextmanager
+def _agy_concurrency_slot(*, background: bool = False):
+    if background:
+        with _AGY_BACKGROUND_SEM:
+            with _AGY_TOTAL_SEM:
+                yield
+    else:
+        with _AGY_TOTAL_SEM:
+            yield
+
+
 def run_antigravity_completion(
     *,
     model: str,
@@ -494,6 +554,7 @@ def run_antigravity_completion(
     response_format: dict | None = None,
     data_dir: Path | None = None,
     timeout: float = 180.0,
+    background: bool = False,
 ) -> dict:
     """Execute a synchronous chat completion via official `agy` CLI."""
     cli = find_antigravity_cli()
@@ -514,9 +575,10 @@ def run_antigravity_completion(
             if isinstance(js, dict) and isinstance(js.get("schema"), dict):
                 effective_schema = js["schema"]
 
-    if len(prompt.encode("utf-8")) > 160_000:
-        head = prompt[:64_000]
-        tail = prompt[-64_000:]
+    encoded_prompt = prompt.encode("utf-8")
+    if len(encoded_prompt) > MAX_PROMPT_UTF8_BYTES + 16_000:
+        head = encoded_prompt[:56_000].decode("utf-8", errors="ignore")
+        tail = encoded_prompt[-56_000:].decode("utf-8", errors="ignore")
         prompt = f"{head}\n\n...[中间较早上下文已自动压缩以适配 CLI 参数上限]...\n\n{tail}"
 
     sandbox_dir = _empty_sandbox_dir(data_dir)
@@ -542,16 +604,17 @@ def run_antigravity_completion(
             cmd.extend(["--json-schema", schema_str])
 
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(sandbox_dir),
-            env=_agy_env(),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        with _agy_concurrency_slot(background=background):
+            proc = subprocess.run(
+                cmd,
+                cwd=str(sandbox_dir),
+                env=_agy_env(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
     finally:
         if schema_file is not None:
             with contextlib.suppress(OSError):
@@ -683,6 +746,7 @@ async def run_antigravity_completion_async(
     response_format: dict | None = None,
     data_dir: Path | None = None,
     timeout: float = 180.0,
+    background: bool = False,
 ) -> dict:
     """Async non-blocking wrapper around `run_antigravity_completion`."""
     return await asyncio.to_thread(
@@ -694,4 +758,5 @@ async def run_antigravity_completion_async(
         response_format=response_format,
         data_dir=data_dir,
         timeout=timeout,
+        background=background,
     )

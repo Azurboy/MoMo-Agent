@@ -398,6 +398,50 @@ class ModelSetupTests(unittest.TestCase):
             setup.verify_and_save(self.data, 'antigravity', 'gemini-4-carbon-low')
         self.assertIsNone(pn.read_provider_notice(self.data, now=1705.0))
 
+    def test_antigravity_prompt_compaction_preserves_instructions_tools_and_endpoints(self):
+        import antigravity_bridge as ab
+
+        messages = [
+            {'role': 'system', 'content': 'SYSTEM_GUARDRAIL_MUST_SURVIVE'},
+            {'role': 'user', 'content': 'INITIAL_TASK_MERGE_YUESE_TO_OWNER'},
+        ]
+        for idx in range(60):
+            messages.append(
+                {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [{'id': f'call_{idx}', 'function': {'name': 'read_memory_notebook', 'arguments': '{"path":"people/约瑟.md"}'}}],
+                }
+            )
+            messages.append(
+                {
+                    'role': 'tool',
+                    'tool_call_id': f'call_{idx}',
+                    'name': 'read_memory_notebook',
+                    'content': f'STEP_{idx}_PAYLOAD:' + ('很长的历史录音转写片段与核查输出' * 900),
+                }
+            )
+        messages.append({'role': 'user', 'content': 'FINAL_TURN_FINISH_AND_REPORT'})
+        tools = [
+            {
+                'type': 'function',
+                'function': {
+                    'name': 'read_memory_notebook',
+                    'description': 'Read memory file',
+                    'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}},
+                },
+            }
+        ]
+        prompt, schema, declared = ab.build_antigravity_prompt(messages, tools=tools)
+        self.assertIsNotNone(schema)
+        self.assertIn('read_memory_notebook', declared)
+        self.assertLessEqual(len(prompt.encode('utf-8')), ab.MAX_PROMPT_UTF8_BYTES + 2048)
+        self.assertIn('<available_functions>', prompt)
+        self.assertIn('SYSTEM_GUARDRAIL_MUST_SURVIVE', prompt)
+        self.assertIn('INITIAL_TASK_MERGE_YUESE_TO_OWNER', prompt)
+        self.assertIn('FINAL_TURN_FINISH_AND_REPORT', prompt)
+        self.assertIn('历史工具步骤已自动折叠', prompt)
+
 
 if __name__ == '__main__':
     unittest.main()

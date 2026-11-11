@@ -197,8 +197,33 @@ class ApplePIMTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ok_json["resource"]["kind"], "reminder")
                 self.assertEqual(ok_json["resource"]["fields"]["title"], "明早十点给盛立发纪要")
 
-                # 3. When dsh_ready=True, stale/stopped ticket assignments are rejected with 409.
+                # 3. When dsh_ready=True, live open tickets succeed while stale/stopped/paused tickets are rejected with 409.
                 gateway.dsh_ready = True
+                with mock.patch.object(
+                    gateway,
+                    "_computer_ticket",
+                    return_value={
+                        "id": "tkt_open",
+                        "state": "open",
+                        "action": "running",
+                        "ended": None,
+                        "paused": False,
+                        "attention": None,
+                        "assignments": [{"id": "asg_live", "state": "running", "endedAt": None}],
+                    },
+                ):
+                    live_open_resp = await client.post(
+                        "/momo/internal/superagent/pim",
+                        headers=bridge_headers,
+                        json={
+                            "ticket_id": "tkt_open",
+                            "assignment_id": "asg_live",
+                            "op": "create_reminder",
+                            "args": {"title": "活跃开放工单正常调用"},
+                        },
+                    )
+                    self.assertEqual(live_open_resp.status, 200)
+
                 with mock.patch.object(
                     gateway,
                     "_computer_ticket",
@@ -215,6 +240,66 @@ class ApplePIMTests(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     self.assertEqual(stale_resp.status, 409)
+
+                # 3b. Open ticket with transient transport failure ("LlmError: Connection error.") auto-retries and reopens chat_run.
+                gateway.bridge.db.execute(
+                    """INSERT INTO chat_runs(
+                           run_id, operation_id, session_id, work_id, title, status,
+                           ticket_id, error, intent, cancellable, created_at, updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "run_recover_1",
+                        "op_recover_1",
+                        gateway.store.identity["root"],
+                        "work_recover_1",
+                        "纠正约瑟记忆",
+                        "failed",
+                        "tkt_conn_err",
+                        "执行未完成，请核对已有结果。",
+                        "new",
+                        0,
+                        1000.0,
+                        1005.0,
+                    ),
+                )
+                gateway.bridge.db.commit()
+                retried_calls: list[str] = []
+                with mock.patch(
+                    "superagent_gateway.dsh_api_request",
+                    side_effect=lambda port, method, path, payload=None, timeout=8.0: (retried_calls.append(path) or {}),
+                ):
+                    gateway._recover_interrupted_tickets(
+                        {"paused": False},
+                        [
+                            {
+                                "id": "tkt_conn_err",
+                                "state": "open",
+                                "action": "failed",
+                                "ended": None,
+                                "attention": None,
+                                "actions": {"retry": True},
+                                "summary": "LlmError: Connection error.",
+                                "updatedAt": "2026-11-11T12:46:00.000Z",
+                            },
+                            {
+                                "id": "tkt_quota_err",
+                                "state": "open",
+                                "action": "failed",
+                                "ended": None,
+                                "attention": None,
+                                "actions": {"retry": True},
+                                "summary": "Error code: 429 - insufficient_quota: exceeded your current quota",
+                                "updatedAt": "2026-11-11T12:46:00.000Z",
+                            },
+                        ],
+                    )
+                self.assertEqual(retried_calls, ["/orchestrator/api/tickets/tkt_conn_err/retry"])
+                recovered_row = gateway.bridge.db.execute(
+                    "SELECT status, error, cancellable FROM chat_runs WHERE run_id='run_recover_1'"
+                ).fetchone()
+                self.assertEqual(recovered_row["status"], "started")
+                self.assertIsNone(recovered_row["error"])
+                self.assertEqual(recovered_row["cancellable"], 1)
                 gateway.dsh_ready = False
 
                 # 4. Space-containing Application Support deliverable path is collected AND stripped from chat bubble!

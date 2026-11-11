@@ -763,10 +763,16 @@ def seed_superagent_orchestrator(
     model_id: str | None = None,
 ) -> dict:
     """Configure dsh-superagent settings & Personal Agent prompts idempotently over loopback."""
-    # 1. Enable and point momo source at SuperAgentGateway loopback bridge.
-    settings = dsh_api_request(dsh_port, "GET", "/orchestrator/api/settings")
-    sources = {item["id"]: item for item in settings.get("sources", ())}
-    momo_src = sources.get("momo")
+    # 1. Enable and point momo source at SuperAgentGateway loopback bridge (waiting briefly if plugin is still activating).
+    settings: dict = {}
+    momo_src: dict | None = None
+    for _ in range(25):
+        settings = dsh_api_request(dsh_port, "GET", "/orchestrator/api/settings")
+        sources = {item["id"]: item for item in settings.get("sources", ())}
+        momo_src = sources.get("momo")
+        if momo_src and momo_src.get("installed", True):
+            break
+        time.sleep(0.2)
     desired_momo = {
         "enabled": True,
         "config": {
@@ -778,7 +784,7 @@ def seed_superagent_orchestrator(
             "pollIntervalMs": 250,
         },
     }
-    if momo_src and momo_src.get("value") != desired_momo:
+    if momo_src and momo_src.get("installed", True) and momo_src.get("value") != desired_momo:
         dsh_api_request(
             dsh_port,
             "PUT",

@@ -413,7 +413,7 @@ class SuperAgentGateway:
         self.pim = ApplePIM(self.data)
 
     def create_app(self) -> web.Application:
-        app = web.Application(client_max_size=8 * 1024 * 1024)
+        app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_get("/health", self.handle_health)
         app.router.add_get("/v1/capabilities", self.handle_capabilities)
         app.router.add_get("/v1/models", self.handle_models)
@@ -546,9 +546,10 @@ class SuperAgentGateway:
                 "Connection": "keep-alive",
             },
         )
-        await resp.prepare(request)
-        await resp.write(format_sse_chunks_from_completion(completion))
-        await resp.write_eof()
+        with suppress(ConnectionError, web.HTTPException, Exception):
+            await resp.prepare(request)
+            await resp.write(format_sse_chunks_from_completion(completion))
+            await resp.write_eof()
         return resp
 
     # ── Lifecycle & dsh supervision ─────────────────────────────────────────────
@@ -908,8 +909,8 @@ class SuperAgentGateway:
                     if runtime_state == "error":
                         raise RuntimeError(f"DSH runtime reported error state: {fetched[0].get('health', {}).get('runtime')}")
                     self._dsh_consecutive_failures = 0
-                    self._apply_dsh_projections(*fetched)
                     await asyncio.to_thread(self._recover_interrupted_tickets, fetched[0], fetched[1])
+                    self._apply_dsh_projections(*fetched)
                     await asyncio.to_thread(self._unsubscribe_ended_transcript_threads, fetched[1])
                     self.publish_live_state()
                 except Exception as exc:
@@ -961,14 +962,36 @@ class SuperAgentGateway:
                     parts.append(code_labels[code])
         return "；".join(parts) if parts else None
 
+    @classmethod
+    def _is_transient_transport_ticket_failure(cls, ticket: dict) -> bool:
+        failure_text = cls._extract_ticket_failure_text(ticket)
+        if not failure_text:
+            return False
+        if classify_provider_issue(failure_text) is not None:
+            return False
+        return bool(
+            re.search(
+                r"(connection error|fetch failed|socket hang up|econnrefused|econnreset|etimedout|cannot write to closing transport|ticket is not running)",
+                failure_text,
+                re.IGNORECASE,
+            )
+        )
+
     def _recover_interrupted_tickets(self, state: dict, tickets: list[dict]) -> None:
-        """Auto-retry open tickets paused in transient `blocked` state (without human attention) once per dsh boot."""
+        """Auto-retry open tickets paused in `blocked` or transient transport `failed` state once per dsh boot."""
         if not self.dsh_ready or (isinstance(state, dict) and state.get("paused")):
             return
         for t in tickets:
             if not isinstance(t, dict) or t.get("ended"):
                 continue
-            if str(t.get("state") or "") != "open" or str(t.get("action") or "") != "blocked":
+            if str(t.get("state") or "") != "open":
+                continue
+            action = str(t.get("action") or "")
+            if action == "blocked":
+                pass
+            elif action == "failed" and self._is_transient_transport_ticket_failure(t):
+                pass
+            else:
                 continue
             if t.get("attention"):
                 continue
@@ -991,7 +1014,14 @@ class SuperAgentGateway:
                     {},
                     timeout=4.0,
                 )
-                log.info("Auto-retrying interrupted blocked ticket %s", tid)
+                with self.bridge.db:
+                    self.bridge.db.execute(
+                        """UPDATE chat_runs
+                           SET status='started', error=NULL, wait_reason=NULL, cancellable=1, updated_at=?
+                           WHERE ticket_id=? AND status='failed'""",
+                        (time.time(), tid),
+                    )
+                log.info("Auto-retrying interrupted %s ticket %s", action, tid)
 
     def _unsubscribe_ended_transcript_threads(self, tickets: list[dict]) -> None:
         """Drop ended tickets' subscriptions to transcript threads so subsequent recording chunks never force-reopen ended tickets."""
@@ -1203,6 +1233,24 @@ class SuperAgentGateway:
             and relay_h.get("state") == "ready"
             and relay_h.get("detail") == "Nothing waiting"
         )
+        # Reopen previously failed chat_runs if their open ticket was manually or automatically resumed.
+        failed_with_ticket = self.bridge.db.execute(
+            "SELECT run_id, ticket_id FROM chat_runs WHERE status='failed' AND ticket_id IS NOT NULL"
+        ).fetchall()
+        for frow in failed_with_ticket:
+            ft = tickets_by_id.get(frow["ticket_id"])
+            if (
+                isinstance(ft, dict)
+                and not ft.get("ended")
+                and str(ft.get("state") or "") == "open"
+                and str(ft.get("action") or "") in ("running", "starting")
+            ):
+                with self.bridge.db:
+                    self.bridge.db.execute(
+                        "UPDATE chat_runs SET status='started', error=NULL, wait_reason=NULL, cancellable=1, updated_at=? WHERE run_id=?",
+                        (now, frow["run_id"]),
+                    )
+
         active_rows = self.bridge.db.execute(
             "SELECT * FROM chat_runs WHERE status IN ('queued', 'started', 'waiting_for_input')"
         ).fetchall()
@@ -1239,13 +1287,22 @@ class SuperAgentGateway:
                     new_status = "cancelled"
                     wait_reason = None
                 elif t_action == "failed" or ended_outcome == "failed" or t_state == "failed":
-                    new_status = "failed"
-                    ticket_notice = self._record_provider_issue(self._extract_ticket_failure_text(ticket))
-                    recent_notice = ticket_notice or self.current_provider_notice()
-                    if recent_notice and (now - float(recent_notice.get("updated_at", 0))) <= 180.0:
-                        err = recent_notice["short_error"]
-                    else:
-                        err = "执行未完成，请核对已有结果。"
+                    prev_count, prev_updated = self._ticket_auto_retries.get(str(ticket_id), (0, ""))
+                    awaiting_transient_retry = (
+                        not ended_info
+                        and t_state == "open"
+                        and self._is_transient_transport_ticket_failure(ticket)
+                        and prev_count >= 1
+                        and str(ticket.get("updatedAt") or "") == prev_updated
+                    )
+                    if not awaiting_transient_retry:
+                        new_status = "failed"
+                        ticket_notice = self._record_provider_issue(self._extract_ticket_failure_text(ticket))
+                        recent_notice = ticket_notice or self.current_provider_notice()
+                        if recent_notice and (now - float(recent_notice.get("updated_at", 0))) <= 180.0:
+                            err = recent_notice["short_error"]
+                        else:
+                            err = "执行未完成，请核对已有结果。"
                 elif t_action == "blocked" and not ticket.get("attention"):
                     prev_count, prev_updated = self._ticket_auto_retries.get(str(ticket_id), (0, ""))
                     if prev_count >= 1 and str(ticket.get("updatedAt") or "") != prev_updated:
@@ -2437,6 +2494,7 @@ class SuperAgentGateway:
                     tools=openai_tools,
                     data_dir=self.data,
                     timeout=150.0,
+                    background=True,
                 )
                 msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
                 tool_calls = msg.get("tool_calls") or []
@@ -2468,6 +2526,7 @@ class SuperAgentGateway:
                     messages=messages,
                     data_dir=self.data,
                     timeout=90.0,
+                    background=True,
                 )
                 msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
                 return self._finalize_memory_review_output(session_id, str(msg.get("content") or "").strip())
@@ -2637,6 +2696,7 @@ class SuperAgentGateway:
                 messages=[{"role": "user", "content": prompt}],
                 data_dir=self.data,
                 timeout=90.0,
+                background=True,
             )
             msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
             return str(msg.get("content") or "").strip()
@@ -4077,7 +4137,12 @@ class SuperAgentGateway:
                 if not ticket_id:
                     raise PermissionError("Ticket is not running")
                 ticket = await self._computer_ticket(ticket_id)
-                if ticket.get("state") != "running" or ticket.get("attention"):
+                if (
+                    ticket.get("state") not in ("open", "running")
+                    or ticket.get("paused")
+                    or ticket.get("ended")
+                    or ticket.get("attention")
+                ):
                     raise PermissionError("Ticket is not running")
                 running = next(
                     (a for a in ticket.get("assignments") or () if isinstance(a, dict) and a.get("endedAt") is None),
@@ -4610,7 +4675,7 @@ class SuperAgentGateway:
             )
             self.bridge.db.execute(
                 """UPDATE chat_runs
-                   SET status='completed', ticket_id=coalesce(?, ticket_id), wait_reason=NULL, cancellable=0, updated_at=?
+                   SET status='completed', ticket_id=coalesce(?, ticket_id), wait_reason=NULL, error=NULL, cancellable=0, updated_at=?
                    WHERE run_id=?""",
                 (ticket_id, now, run_id),
             )
