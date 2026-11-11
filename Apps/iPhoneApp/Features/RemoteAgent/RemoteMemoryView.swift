@@ -129,7 +129,7 @@ struct RemoteMemoryView: View {
                         } description: {
                             Text(
                                 allMemories.isEmpty
-                                    ? (sync.isSyncing ? "正在读取记忆…" : "轻触右上角即可整理或同步。")
+                                    ? (sync.isSyncing ? "正在读取记忆…" : "下拉即可同步记忆。")
                                     : "试试其他关键词或切换分类。"
                             )
                         }
@@ -137,6 +137,9 @@ struct RemoteMemoryView: View {
                         syncStatusFooter
                     }
                     .padding(16)
+                }
+                .refreshable {
+                    await sync.refresh()
                 }
             } else {
                 let childrenByParent = MemoryCardDigest.linkedChildrenMap(for: allMemories)

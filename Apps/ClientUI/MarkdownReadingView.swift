@@ -20,7 +20,7 @@ struct MarkdownReadingView: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         #else
         let document = MarkdownDocument.cached(markdown)
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             if plainTextOnly {
                 Text(markdown)
                     .modifier(MarkdownReadingTypography(style: .body, handwriting: handwriting))
