@@ -104,7 +104,7 @@ struct DesktopRoot: View {
                 .padding(.horizontal, 24).padding(.top, 16).padding(.bottom, 20)
             VStack(spacing: 4) {
                 destination("首页", icon: "house", selection: "chat")
-                destination("记忆", icon: "book.pages", selection: "memory")
+                destination("记忆", icon: "brain", selection: "memory")
                 destination("转录", icon: "waveform", selection: "sources")
             }.padding(.horizontal, 12)
             Spacer(minLength: 24)
@@ -440,13 +440,12 @@ struct DesktopChat: View {
 
 struct DesktopSettings: View {
     private enum Page: String, CaseIterable, Identifiable {
-        case model = "模型", pairing = "设备", memory = "记忆", advanced = "通用"
+        case model = "模型", pairing = "设备", advanced = "通用"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .model: "sparkles"
             case .pairing: "iphone"
-            case .memory: "book.closed"
             case .advanced: "gearshape"
             }
         }
@@ -496,7 +495,6 @@ struct DesktopSettings: View {
                                 .padding(.horizontal, 10).padding(.bottom, 5)
                             sidebarRow(.advanced)
                             sidebarRow(.model)
-                            sidebarRow(.memory)
                             Text("设备").font(.system(size: 12)).foregroundStyle(.tertiary)
                                 .padding(.horizontal, 10).padding(.top, 22).padding(.bottom, 5)
                             sidebarRow(.pairing)
@@ -515,7 +513,6 @@ struct DesktopSettings: View {
                 switch page {
                 case .model: modelSettings
                 case .pairing: DesktopDevices(model: model)
-                case .memory: DesktopMemory(model: model)
                 case .advanced: advancedSettings
                 }
             }
@@ -536,12 +533,11 @@ struct DesktopSettings: View {
     }
 
     private var matchingPages: [Page] {
-        [Page.advanced, .model, .memory, .pairing].filter { destination in
+        [Page.advanced, .model, .pairing].filter { destination in
             let terms: [String]
             switch destination {
             case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), String(localized: "生活插画"), "Hermes", "SuperAgent", "Proactive"]
-            case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude"]
-            case .memory: terms = [String(localized: "记忆")]
+            case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude", "Antigravity", "Gemini"]
             case .pairing: terms = [String(localized: "设备"), String(localized: "配对手机"), String(localized: "远程访问")]
             }
             return terms.contains { $0.localizedStandardContains(search.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -575,7 +571,7 @@ struct DesktopSettings: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("MoMo 正在运行").font(.system(size: 14))
-                            Text("停止后可更换模型").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text("可直接点击「更换接入服务」切换供应商或模型，保存时将自动重启生效").font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Button("停止运行") { model.stopAgent() }

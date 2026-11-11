@@ -12,7 +12,6 @@ struct DesktopMemory: View {
     @State private var inspecting: ContextMemory?
     @State private var deletingMemory: ContextMemory?
     @State private var expandedFolderIDs: Set<String>? = nil
-    @State private var expandedParentIDs: Set<String> = []
     @State private var searching = false
     @State private var searchQuery = ""
     @State private var readingSource: ContextSource?
@@ -22,41 +21,35 @@ struct DesktopMemory: View {
         model.vaultSnapshot
     }
 
-    private var filteredFolders: [DreamMemorySection] {
-        vault.filteredFolders(matching: searchQuery)
+    private var filteredTree: MemoryVaultTree {
+        vault.filteredTree(matching: searchQuery)
     }
 
-    private func resolvedSelectedMemory(wide: Bool, folders: [DreamMemorySection]) -> ContextMemory? {
+    private func showsSingleFlatCoreOnly(_ tree: MemoryVaultTree) -> Bool {
+        tree.rootItems.isEmpty
+            && tree.rootFolders.count == 1
+            && tree.rootFolders[0].id == "core"
+            && tree.rootFolders[0].subfolders.isEmpty
+    }
+
+    private func resolvedSelectedMemory(wide: Bool, tree: MemoryVaultTree) -> ContextMemory? {
         if let selectedMemoryID, let direct = vault.byID[selectedMemoryID] {
             return direct
         }
         guard wide else { return nil }
-        return folders.first?.items.first
-    }
-
-    private func siblingItems(for memory: ContextMemory, folders: [DreamMemorySection]) -> [ContextMemory] {
-        if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return vault.siblingsByMemoryID[memory.id] ?? [memory]
-        }
-        if let folder = folders.first(where: { $0.items.contains(where: { $0.id == memory.id }) }),
-           folder.items.count > 1 {
-            return folder.items
-        }
-        let allVisible = folders.flatMap(\.items)
-        return allVisible.count > 1 ? allVisible : [memory]
+        return tree.flatOrderedItems.first
     }
 
     private var allFoldersExpanded: Bool {
-        let current = expandedFolderIDs ?? vault.defaultExpandedFolderIDs
-        return !vault.folders.isEmpty && vault.folders.allSatisfy { current.contains($0.id) }
+        let current = expandedFolderIDs ?? vault.tree.defaultExpandedFolderIDs
+        return !vault.tree.allFolderIDs.isEmpty && vault.tree.allFolderIDs.isSubset(of: current)
     }
 
     private func toggleAllFolders() {
         if allFoldersExpanded {
             expandedFolderIDs = []
-            expandedParentIDs.removeAll()
         } else {
-            expandedFolderIDs = vault.defaultExpandedFolderIDs
+            expandedFolderIDs = vault.tree.allFolderIDs
         }
     }
 
@@ -64,12 +57,12 @@ struct DesktopMemory: View {
         if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return true
         }
-        let current = expandedFolderIDs ?? vault.defaultExpandedFolderIDs
+        let current = expandedFolderIDs ?? vault.tree.defaultExpandedFolderIDs
         return current.contains(folderID)
     }
 
     private func toggleFolder(_ folderID: String) {
-        var current = expandedFolderIDs ?? vault.defaultExpandedFolderIDs
+        var current = expandedFolderIDs ?? vault.tree.defaultExpandedFolderIDs
         if current.contains(folderID) {
             current.remove(folderID)
         } else {
@@ -78,12 +71,35 @@ struct DesktopMemory: View {
         expandedFolderIDs = current
     }
 
+    private func expandAncestorsIfNeeded(for memory: ContextMemory) {
+        let segs = MemoryVaultTree.directorySegments(for: memory)
+        guard !segs.isEmpty else { return }
+        var current = expandedFolderIDs ?? vault.tree.defaultExpandedFolderIDs
+        var changed = false
+        var prefix = ""
+        for seg in segs {
+            prefix = prefix.isEmpty ? seg : "\(prefix)/\(seg)"
+            let lowerPrefix = prefix.lowercased()
+            for fid in vault.tree.allFolderIDs where fid.lowercased() == lowerPrefix {
+                if current.insert(fid).inserted {
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            expandedFolderIDs = current
+        }
+    }
+
     private func navigateToNote(_ targetID: String, currentID: String?) {
         guard targetID != currentID else { return }
         if let currentID {
             readerBackStack.append(currentID)
         }
         readerForwardStack.removeAll()
+        if let target = vault.byID[targetID] {
+            expandAncestorsIfNeeded(for: target)
+        }
         selectedMemoryID = targetID
         revealInExplorerID = targetID
     }
@@ -109,59 +125,77 @@ struct DesktopMemory: View {
         }
     }
 
-    fileprivate func buildFlatEntries(folders: [DreamMemorySection], activeID: String?) -> [VaultSidebarEntry] {
+    fileprivate func buildFlatEntries(tree: MemoryVaultTree, activeID: String?) -> [VaultSidebarEntry] {
         let metaByID = vault.rowMetaByID
         var entries: [VaultSidebarEntry] = []
-        entries.reserveCapacity(vault.activeMemories.count + folders.count)
+        entries.reserveCapacity(vault.activeMemories.count + tree.allFolderIDs.count)
 
-        for section in folders {
-            let showFolderRow = folders.count > 1 || section.id != "core"
-            let expanded = !showFolderRow || isFolderExpanded(section.id)
+        for memory in tree.rootItems {
+            let meta = metaByID[memory.id]
+            entries.append(.note(
+                memory: memory,
+                title: meta?.title ?? memory.id,
+                symbol: meta?.symbol ?? "doc.text",
+                shortJournalDate: meta?.shortJournalDate,
+                isSelected: activeID == memory.id,
+                depth: 0
+            ))
+        }
 
-            if showFolderRow {
+        let flatCoreOnly = showsSingleFlatCoreOnly(tree)
+
+        func emitFolder(_ node: MemoryVaultFolderNode, showHeader: Bool) {
+            let expanded = !showHeader || isFolderExpanded(node.id)
+            if showHeader {
                 entries.append(.folder(
-                    sectionID: section.id,
-                    title: section.title,
-                    itemCount: section.items.count,
+                    sectionID: node.id,
+                    title: node.name,
+                    accentKind: node.accentKind,
+                    depth: node.depth,
+                    itemCount: node.totalItemCount,
                     isExpanded: expanded
                 ))
             }
+            guard expanded else { return }
 
-            guard expanded else { continue }
-
-            for memory in section.items {
+            let childDepth = showHeader ? (node.depth + 1) : 0
+            for sub in node.subfolders {
+                emitFolder(sub, showHeader: true)
+            }
+            for memory in node.directItems {
                 let meta = metaByID[memory.id]
-
                 entries.append(.note(
                     memory: memory,
                     title: meta?.title ?? memory.id,
                     symbol: meta?.symbol ?? "doc.text",
                     shortJournalDate: meta?.shortJournalDate,
-                    childCount: 0,
-                    isExpanded: false,
                     isSelected: activeID == memory.id,
-                    underFolder: showFolderRow
+                    depth: childDepth
                 ))
             }
+        }
+
+        for root in tree.rootFolders {
+            emitFolder(root, showHeader: !flatCoreOnly)
         }
         return entries
     }
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        let folders = filteredFolders
+        let tree = filteredTree
 
         GeometryReader { geometry in
             let totalWidth = max(1, geometry.size.width)
             let totalHeight = max(1, geometry.size.height)
             let wide = totalWidth >= 680
-            let active = resolvedSelectedMemory(wide: wide, folders: folders)
+            let active = resolvedSelectedMemory(wide: wide, tree: tree)
             let sidebarWidth: CGFloat = wide ? 268 : totalWidth
             let paneWidth: CGFloat = wide ? max(1, totalWidth - sidebarWidth - 1) : totalWidth
 
             HStack(spacing: 0) {
                 if wide || active == nil {
-                    vaultExplorerSidebar(folders: folders, activeID: active?.id)
+                    vaultExplorerSidebar(tree: tree, activeID: active?.id)
                         .frame(width: sidebarWidth, height: totalHeight)
                         .background(MoMoPalette.canvas)
                 }
@@ -176,7 +210,7 @@ struct DesktopMemory: View {
                 if wide || active != nil {
                     documentWorkspacePane(
                         active: active,
-                        folders: folders,
+                        tree: tree,
                         wide: wide,
                         colors: colors
                     )
@@ -264,7 +298,7 @@ struct DesktopMemory: View {
                 if !searching { searchQuery = "" }
             }
 
-            if !vault.folders.isEmpty {
+            if !vault.tree.allFolderIDs.isEmpty && !showsSingleFlatCoreOnly(vault.tree) {
                 VaultIconButton(
                     symbol: allFoldersExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
                     isActive: false,
@@ -277,7 +311,7 @@ struct DesktopMemory: View {
         }
     }
 
-    private func vaultExplorerSidebar(folders: [DreamMemorySection], activeID: String?) -> some View {
+    private func vaultExplorerSidebar(tree: MemoryVaultTree, activeID: String?) -> some View {
         VStack(spacing: 8) {
             explorerToolbar
                 .padding(.horizontal, 14)
@@ -332,7 +366,7 @@ struct DesktopMemory: View {
                 ProgressView("正在读取记忆")
                     .padding(32)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            } else if folders.isEmpty {
+            } else if tree.isEmpty {
                 ContentUnavailableView(
                     vault.activeMemories.isEmpty ? "还没有记忆" : "没有匹配的笔记",
                     systemImage: vault.activeMemories.isEmpty ? "folder" : "magnifyingglass",
@@ -341,7 +375,7 @@ struct DesktopMemory: View {
                 .padding(.top, 32)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else {
-                let entries = buildFlatEntries(folders: folders, activeID: activeID)
+                let entries = buildFlatEntries(tree: tree, activeID: activeID)
                 MacVaultSidebarListView(
                     entries: entries,
                     revealMemoryID: revealInExplorerID,
@@ -353,23 +387,10 @@ struct DesktopMemory: View {
                     onToggleFolder: { sectionID in
                         toggleFolder(sectionID)
                     },
-                    onActivateNote: { memory, childCount, isExpanded in
-                        let wasSelected = activeID == memory.id
+                    onActivateNote: { memory in
                         readerBackStack.removeAll()
                         readerForwardStack.removeAll()
                         selectedMemoryID = memory.id
-                        if childCount > 0 {
-                            if wasSelected && isExpanded {
-                                expandedParentIDs.remove(memory.id)
-                            } else if !isExpanded {
-                                expandedParentIDs.insert(memory.id)
-                            }
-                        }
-                    },
-                    onSelectChild: { child in
-                        readerBackStack.removeAll()
-                        readerForwardStack.removeAll()
-                        selectedMemoryID = child.id
                     },
                     onOpenPopup: { item in
                         inspecting = item
@@ -387,12 +408,11 @@ struct DesktopMemory: View {
     @ViewBuilder
     private func documentWorkspacePane(
         active: ContextMemory?,
-        folders: [DreamMemorySection],
+        tree: MemoryVaultTree,
         wide: Bool,
         colors: MemoryNotebookPalette
     ) -> some View {
         if let memory = active {
-            let siblings = siblingItems(for: memory, folders: folders)
             let outgoing = vault.childrenByParentID[memory.id] ?? []
             let incoming = vault.backlinksByTargetID[memory.id] ?? []
             let sourceMap = model.transcriptSnapshot.sourceByIDRevision
@@ -402,6 +422,9 @@ struct DesktopMemory: View {
                     return {
                         _ = readerBackStack.popLast()
                         readerForwardStack.append(memory.id)
+                        if let prev = vault.byID[prevID] {
+                            expandAncestorsIfNeeded(for: prev)
+                        }
                         selectedMemoryID = prevID
                         revealInExplorerID = prevID
                     }
@@ -414,6 +437,9 @@ struct DesktopMemory: View {
             let forwardAction: (() -> Void)? = (!readerBackStack.isEmpty || !readerForwardStack.isEmpty) ? {
                 guard let nextID = readerForwardStack.popLast() else { return }
                 readerBackStack.append(memory.id)
+                if let next = vault.byID[nextID] {
+                    expandAncestorsIfNeeded(for: next)
+                }
                 selectedMemoryID = nextID
                 revealInExplorerID = nextID
             } : nil
@@ -422,17 +448,10 @@ struct DesktopMemory: View {
             VStack(spacing: 0) {
                 DesktopNoteTopBar(
                     memory: memory,
-                    siblingItems: siblings,
                     backLabel: backText,
                     onBack: backAction,
                     canGoForward: !readerForwardStack.isEmpty,
                     onForward: forwardAction,
-                    onSelectSibling: { next in
-                        readerBackStack.removeAll()
-                        readerForwardStack.removeAll()
-                        selectedMemoryID = next.id
-                        revealInExplorerID = next.id
-                    },
                     onDelete: { deletingMemory = memory },
                     onInstruct: model.taskStore != nil ? { prompt in
                         try await Self.dispatchInstruction(prompt, model: model)
@@ -489,12 +508,10 @@ struct DesktopMemory: View {
 
 private struct DesktopNoteTopBar: View {
     let memory: ContextMemory
-    let siblingItems: [ContextMemory]
     let backLabel: String?
     let onBack: (() -> Void)?
     let canGoForward: Bool
     let onForward: (() -> Void)?
-    let onSelectSibling: (ContextMemory) -> Void
     let onDelete: () -> Void
     let onInstruct: ((String) async throws -> Void)?
     let colors: MemoryNotebookPalette
@@ -505,17 +522,6 @@ private struct DesktopNoteTopBar: View {
     @State private var submittingInstruction = false
     @State private var instructionReceipt: String? = nil
     @State private var instructionError: String? = nil
-
-    private func folderBreadcrumbTitle(for kind: String) -> String {
-        switch kind {
-        case "project": return "在研项目"
-        case "briefing": return "晨间简报"
-        case "topic": return "专题活页"
-        case "person": return "人物档案"
-        case "journal": return "每日日志"
-        default: return "核心记忆"
-        }
-    }
 
     private func submitInstruction(using handler: @escaping (String) async throws -> Void) {
         let trimmed = instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -581,10 +587,11 @@ private struct DesktopNoteTopBar: View {
                     Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(colors.tabAccent(memory.kind))
-                    Text(folderBreadcrumbTitle(for: memory.kind))
+                    Text(MemoryVaultTree.breadcrumbText(for: memory))
                         .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(colors.secondaryInk)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .lineLimit(1)
+                        .truncationMode(.head)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8.5, weight: .semibold))
                         .foregroundStyle(colors.secondaryInk.opacity(0.55))
@@ -745,6 +752,8 @@ fileprivate enum VaultSidebarEntry: Identifiable, Equatable {
     case folder(
         sectionID: String,
         title: String,
+        accentKind: String,
+        depth: Int,
         itemCount: Int,
         isExpanded: Bool
     )
@@ -753,41 +762,26 @@ fileprivate enum VaultSidebarEntry: Identifiable, Equatable {
         title: String,
         symbol: String,
         shortJournalDate: String?,
-        childCount: Int,
-        isExpanded: Bool,
         isSelected: Bool,
-        underFolder: Bool
-    )
-    case childNote(
-        parentID: String,
-        child: ContextMemory,
-        title: String,
-        symbol: String,
-        isSelected: Bool,
-        underFolder: Bool
+        depth: Int
     )
 
     var id: String {
         switch self {
-        case .folder(let sectionID, _, _, _):
+        case .folder(let sectionID, _, _, _, _, _):
             return "folder:\(sectionID)"
-        case .note(let memory, _, _, _, _, _, _, _):
+        case .note(let memory, _, _, _, _, _):
             return memory.id
-        case .childNote(let parentID, let child, _, _, _, _):
-            return "child:\(parentID):\(child.id)"
         }
     }
 
     static func == (lhs: VaultSidebarEntry, rhs: VaultSidebarEntry) -> Bool {
         switch (lhs, rhs) {
-        case let (.folder(s1, t1, c1, e1), .folder(s2, t2, c2, e2)):
-            return s1 == s2 && t1 == t2 && c1 == c2 && e1 == e2
-        case let (.note(m1, t1, sym1, d1, cc1, exp1, sel1, uf1), .note(m2, t2, sym2, d2, cc2, exp2, sel2, uf2)):
+        case let (.folder(s1, t1, a1, d1, c1, e1), .folder(s2, t2, a2, d2, c2, e2)):
+            return s1 == s2 && t1 == t2 && a1 == a2 && d1 == d2 && c1 == c2 && e1 == e2
+        case let (.note(m1, t1, sym1, d1, sel1, dep1), .note(m2, t2, sym2, d2, sel2, dep2)):
             return m1.id == m2.id && m1.revision == m2.revision && t1 == t2 && sym1 == sym2
-                && d1 == d2 && cc1 == cc2 && exp1 == exp2 && sel1 == sel2 && uf1 == uf2
-        case let (.childNote(p1, c1, t1, sym1, sel1, uf1), .childNote(p2, c2, t2, sym2, sel2, uf2)):
-            return p1 == p2 && c1.id == c2.id && c1.revision == c2.revision
-                && t1 == t2 && sym1 == sym2 && sel1 == sel2 && uf1 == uf2
+                && d1 == d2 && sel1 == sel2 && dep1 == dep2
         default:
             return false
         }
@@ -850,15 +844,12 @@ private final class MacVaultRowCellView: NSTableCellView {
         self.entry = entry
         self.isHovered = hovered
         switch entry {
-        case let .folder(sectionID, title, itemCount, _):
+        case let .folder(sectionID, title, _, _, itemCount, _):
             setAccessibilityLabel("\(title)、\(itemCount)")
             setAccessibilityIdentifier("remote.memoryFolder.\(sectionID)")
-        case let .note(memory, title, _, _, _, _, _, _):
+        case let .note(memory, title, _, _, _, _):
             setAccessibilityLabel(title)
             setAccessibilityIdentifier("remote.memoryRow.\(memory.id)")
-        case let .childNote(parentID, child, title, _, _, _):
-            setAccessibilityLabel(title)
-            setAccessibilityIdentifier("remote.memoryChildRow.\(parentID).\(child.id)")
         }
         needsDisplay = true
     }
@@ -867,10 +858,18 @@ private final class MacVaultRowCellView: NSTableCellView {
         guard let entry else { return }
         let b = bounds
         let outerInset: CGFloat = 8
+        let stepIndent: CGFloat = 14
 
         switch entry {
-        case let .folder(sectionID, title, itemCount, isExpanded):
-            let pillRect = NSRect(x: outerInset, y: 2, width: max(10, b.width - outerInset * 2), height: max(10, b.height - 3))
+        case let .folder(sectionID, title, accentKind, depth, itemCount, isExpanded):
+            if depth > 0 {
+                MacVaultPalette.line.withAlphaComponent(0.75).setFill()
+                for level in 0..<depth {
+                    NSRect(x: outerInset + 9 + CGFloat(level) * stepIndent, y: 0, width: 1, height: b.height).fill()
+                }
+            }
+            let indent = CGFloat(depth) * stepIndent
+            let pillRect = NSRect(x: outerInset + indent, y: 1.5, width: max(10, b.width - outerInset * 2 - indent), height: max(10, b.height - 2.5))
             if isHovered {
                 MacVaultPalette.surface.withAlphaComponent(0.55).setFill()
                 NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
@@ -879,8 +878,8 @@ private final class MacVaultRowCellView: NSTableCellView {
             let chevronName = isExpanded ? "chevron.down" : "chevron.right"
             drawSymbol(chevronName, pointSize: 9, weight: .semibold, color: MacVaultPalette.muted.withAlphaComponent(0.85), in: NSRect(x: pillRect.minX + 6, y: pillRect.minY, width: 11, height: pillRect.height))
 
-            let folderSym = DreamMemoryCategory.folderSymbol(for: sectionID)
-            drawSymbol(folderSym, pointSize: 11.5, weight: .medium, color: MacVaultPalette.nsAccent(for: sectionID), in: NSRect(x: pillRect.minX + 21, y: pillRect.minY, width: 15, height: pillRect.height))
+            let folderSym = DreamMemoryCategory.folderSymbol(for: sectionID, depth: depth)
+            drawSymbol(folderSym, pointSize: 11.5, weight: .medium, color: MacVaultPalette.nsAccent(for: accentKind), in: NSRect(x: pillRect.minX + 21, y: pillRect.minY, width: 15, height: pillRect.height))
 
             let countStr = "\(itemCount)" as NSString
             let countAttrs: [NSAttributedString.Key: Any] = [
@@ -891,16 +890,19 @@ private final class MacVaultRowCellView: NSTableCellView {
             let countX = pillRect.maxX - 7 - countSize.width
             countStr.draw(at: NSPoint(x: countX, y: pillRect.midY - countSize.height * 0.5), withAttributes: countAttrs)
 
-            let titleX = pillRect.minX + 41
+            let titleX = pillRect.minX + 40
             let titleWidth = max(10, countX - titleX - 6)
-            drawTruncatedText(title, font: .systemFont(ofSize: 12.5, weight: .semibold), color: MacVaultPalette.ink.withAlphaComponent(0.9), in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
+            let weight: NSFont.Weight = depth == 0 ? .semibold : .medium
+            drawTruncatedText(title, font: .systemFont(ofSize: 12.5, weight: weight), color: MacVaultPalette.ink.withAlphaComponent(0.9), in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
 
-        case let .note(memory, title, symbol, shortJournalDate, childCount, isExpanded, isSelected, underFolder):
-            let indent: CGFloat = underFolder ? 14 : 0
-            if underFolder {
+        case let .note(memory, title, symbol, shortJournalDate, isSelected, depth):
+            if depth > 0 {
                 MacVaultPalette.line.withAlphaComponent(0.75).setFill()
-                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
+                for level in 0..<depth {
+                    NSRect(x: outerInset + 9 + CGFloat(level) * stepIndent, y: 0, width: 1, height: b.height).fill()
+                }
             }
+            let indent = CGFloat(depth) * stepIndent
             let pillRect = NSRect(x: outerInset + indent, y: 0.5, width: max(10, b.width - outerInset * 2 - indent), height: max(10, b.height - 1))
             if isSelected {
                 MacVaultPalette.surface.setFill()
@@ -913,25 +915,11 @@ private final class MacVaultRowCellView: NSTableCellView {
                 NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
             }
 
-            if childCount > 0 {
-                drawSymbol(isExpanded ? "chevron.down" : "chevron.right", pointSize: 8.5, weight: .bold, color: MacVaultPalette.muted, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
-            } else {
-                let symColor = isSelected ? MacVaultPalette.nsAccent(for: memory.kind) : MacVaultPalette.muted.withAlphaComponent(0.85)
-                drawSymbol(symbol, pointSize: 11, weight: .regular, color: symColor, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
-            }
+            let symColor = isSelected ? MacVaultPalette.nsAccent(for: memory.kind) : MacVaultPalette.muted.withAlphaComponent(0.85)
+            drawSymbol(symbol, pointSize: 11, weight: .regular, color: symColor, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
 
             var rightEdge = pillRect.maxX - 8
-            if childCount > 0 {
-                let trail = "\(childCount)" as NSString
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
-                    .foregroundColor: MacVaultPalette.muted
-                ]
-                let sz = trail.size(withAttributes: attrs)
-                rightEdge -= sz.width
-                trail.draw(at: NSPoint(x: rightEdge, y: pillRect.midY - sz.height * 0.5), withAttributes: attrs)
-                rightEdge -= 5
-            } else if let date = shortJournalDate {
+            if let date = shortJournalDate {
                 let trail = date as NSString
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
@@ -947,35 +935,6 @@ private final class MacVaultRowCellView: NSTableCellView {
             let titleWidth = max(10, rightEdge - titleX)
             let titleColor = isSelected ? MacVaultPalette.ink : MacVaultPalette.ink.withAlphaComponent(0.88)
             drawTruncatedText(title, font: .systemFont(ofSize: 13, weight: isSelected ? .medium : .regular), color: titleColor, in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
-
-        case let .childNote(_, child, title, symbol, isSelected, underFolder):
-            let indent: CGFloat = underFolder ? 29 : 15
-            MacVaultPalette.line.withAlphaComponent(0.75).setFill()
-            if underFolder {
-                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
-                NSRect(x: outerInset + 23, y: 0, width: 1, height: b.height).fill()
-            } else {
-                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
-            }
-            let pillRect = NSRect(x: outerInset + indent, y: 0.5, width: max(10, b.width - outerInset * 2 - indent), height: max(10, b.height - 1))
-            if isSelected {
-                MacVaultPalette.surface.setFill()
-                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
-                MacVaultPalette.nsAccent(for: child.kind).setFill()
-                let barRect = NSRect(x: pillRect.minX, y: pillRect.minY + 4, width: 2.5, height: max(4, pillRect.height - 8))
-                NSBezierPath(roundedRect: barRect, xRadius: 1.25, yRadius: 1.25).fill()
-            } else if isHovered {
-                MacVaultPalette.surface.withAlphaComponent(0.5).setFill()
-                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
-            }
-
-            let symColor = isSelected ? MacVaultPalette.nsAccent(for: child.kind) : MacVaultPalette.muted.withAlphaComponent(0.75)
-            drawSymbol(symbol, pointSize: 10.5, weight: .regular, color: symColor, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
-
-            let titleX = pillRect.minX + 25
-            let titleWidth = max(10, pillRect.maxX - 8 - titleX)
-            let titleColor = isSelected ? MacVaultPalette.ink : MacVaultPalette.muted
-            drawTruncatedText(title, font: .systemFont(ofSize: 12.5, weight: isSelected ? .medium : .regular), color: titleColor, in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
         }
     }
 
@@ -1075,16 +1034,14 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
     let revealMemoryID: String?
     let onConsumedReveal: () -> Void
     let onToggleFolder: (String) -> Void
-    let onActivateNote: (ContextMemory, Int, Bool) -> Void
-    let onSelectChild: (ContextMemory) -> Void
+    let onActivateNote: (ContextMemory) -> Void
     let onOpenPopup: (ContextMemory) -> Void
     let onDelete: (ContextMemory) -> Void
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var entries: [VaultSidebarEntry] = []
         var onToggleFolder: (String) -> Void
-        var onActivateNote: (ContextMemory, Int, Bool) -> Void
-        var onSelectChild: (ContextMemory) -> Void
+        var onActivateNote: (ContextMemory) -> Void
         var onOpenPopup: (ContextMemory) -> Void
         var onDelete: (ContextMemory) -> Void
         weak var tableView: MacVaultNSTableView?
@@ -1092,14 +1049,12 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
 
         init(
             onToggleFolder: @escaping (String) -> Void,
-            onActivateNote: @escaping (ContextMemory, Int, Bool) -> Void,
-            onSelectChild: @escaping (ContextMemory) -> Void,
+            onActivateNote: @escaping (ContextMemory) -> Void,
             onOpenPopup: @escaping (ContextMemory) -> Void,
             onDelete: @escaping (ContextMemory) -> Void
         ) {
             self.onToggleFolder = onToggleFolder
             self.onActivateNote = onActivateNote
-            self.onSelectChild = onSelectChild
             self.onOpenPopup = onOpenPopup
             self.onDelete = onDelete
         }
@@ -1136,9 +1091,8 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
             guard entries.indices.contains(row) else { return 28 }
             switch entries[row] {
-            case .folder: return 30
+            case let .folder(_, _, _, depth, _, _): return depth == 0 ? 30 : 28
             case .note: return 28
-            case .childNote: return 26
             }
         }
 
@@ -1166,12 +1120,10 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
         func handlePrimaryClick(row: Int) {
             guard entries.indices.contains(row) else { return }
             switch entries[row] {
-            case let .folder(sectionID, _, _, _):
+            case let .folder(sectionID, _, _, _, _, _):
                 onToggleFolder(sectionID)
-            case let .note(memory, _, _, _, childCount, isExpanded, _, _):
-                onActivateNote(memory, childCount, isExpanded)
-            case let .childNote(_, child, _, _, _, _):
-                onSelectChild(child)
+            case let .note(memory, _, _, _, _, _):
+                onActivateNote(memory)
             }
         }
 
@@ -1181,10 +1133,8 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
             switch entries[row] {
             case .folder:
                 return nil
-            case let .note(memory, _, _, _, _, _, _, _):
+            case let .note(memory, _, _, _, _, _):
                 targetMemory = memory
-            case let .childNote(_, child, _, _, _, _):
-                targetMemory = child
             }
             let menu = NSMenu()
             let copyItem = NSMenuItem(title: "复制 Markdown", action: #selector(contextCopy(_:)), keyEquivalent: "")
@@ -1227,7 +1177,6 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
         Coordinator(
             onToggleFolder: onToggleFolder,
             onActivateNote: onActivateNote,
-            onSelectChild: onSelectChild,
             onOpenPopup: onOpenPopup,
             onDelete: onDelete
         )
@@ -1279,7 +1228,6 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
         let coord = context.coordinator
         coord.onToggleFolder = onToggleFolder
         coord.onActivateNote = onActivateNote
-        coord.onSelectChild = onSelectChild
         coord.onOpenPopup = onOpenPopup
         coord.onDelete = onDelete
 
@@ -1307,8 +1255,7 @@ private struct MacVaultSidebarListView: NSViewRepresentable {
             if let idx = entries.firstIndex(where: { entry in
                 switch entry {
                 case .folder: return false
-                case .note(let m, _, _, _, _, _, _, _): return m.id == targetID
-                case .childNote(_, let c, _, _, _, _): return c.id == targetID
+                case .note(let m, _, _, _, _, _): return m.id == targetID
                 }
             }) {
                 tableView.scrollRowToVisible(idx)

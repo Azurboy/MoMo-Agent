@@ -123,8 +123,9 @@ import UIKit
         XCTAssertEqual(input.value as? String, "保留这个草稿")
         capture(app, "Keyboard dismissed with draft retained")
         app.buttons["remote.settings"].tap()
-        XCTAssertTrue(app.buttons["settings.memories"].waitForExistence(timeout: 5), app.debugDescription)
-        capture(app, "Memory is inside settings")
+        XCTAssertTrue(app.buttons["settings.mac"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["settings.memories"].exists)
+        capture(app, "Settings without duplicate memory entry")
         app.buttons["完成"].firstMatch.tap()
         app.buttons["remote.desktop"].tap()
         let control = app.buttons["desktop.takeControl"]

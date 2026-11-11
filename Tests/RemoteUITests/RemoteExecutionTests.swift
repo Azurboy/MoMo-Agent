@@ -26,14 +26,14 @@ final class RemoteExecutionTests: XCTestCase {
         capture(app, "Native WebRTC data channel connected")
         app.navigationBars["网络详情"].buttons["BackButton"].tap()
         app.navigationBars["配对"].buttons["BackButton"].tap()
-        let memory = app.buttons["settings.memories"]
+        if app.buttons["完成"].firstMatch.exists { app.buttons["完成"].firstMatch.tap() }
+        let memory = app.tabBars.buttons["记忆"]
         XCTAssertTrue(memory.waitForExistence(timeout: 10)); memory.tap()
         let memoryText = app.staticTexts["remote.memoryText"].firstMatch
         XCTAssertTrue(memoryText.waitForExistence(timeout: 100), app.debugDescription)
         XCTAssertTrue(memoryText.label.contains("小林"))
         capture(app, "Mac organized recording memory")
-        app.buttons["完成"].firstMatch.tap()
-        if app.buttons["完成"].firstMatch.exists { app.buttons["完成"].firstMatch.tap() }
+        app.tabBars.buttons["聊天"].tap()
         input.tap(); input.typeText("请根据录音整理要给小林的方案，在 Mac 保存草稿。")
         app.buttons["remote.send"].tap()
         XCTAssertTrue(app.buttons["chat.stop"].waitForExistence(timeout: 30))

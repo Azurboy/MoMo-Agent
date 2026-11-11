@@ -9271,22 +9271,30 @@ function momoMemoryPromptBlock() {
 	const briefingMd = readMd("BRIEFING.md", 2400);
 	if (briefingMd) sections.push(`### BRIEFING.md (最新 Dream 晨间简报)\n${briefingMd}`);
 	const notesIndex = [];
-	for (const [label, folder] of [
-		["project", "projects"],
-		["person", "people"],
-		["topic", "topics"],
-		["journal", "journal"]
-	]) try {
-		const dir = join(memDir, folder);
-		if (!existsSync(dir)) continue;
-		const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith(".")).sort().reverse().slice(0, 15);
-		for (const file of files) {
-			const title = (readMd(`${folder}/${file}`, 240).split("\n")[0] ?? file).replace(/^#+\s*/, "").trim();
-			notesIndex.push(`- [${label}] \`${join(memDir, folder, file)}\` — ${title}`);
-		}
-	} catch {}
-	if (notesIndex.length > 0) sections.push(`### Dream Markdown 活页笔记本索引 (可用 read 或 read_memory_notebook 工具按需精读)\n${notesIndex.join("\n")}`);
-	sections.push("### 记忆订正与说话人声纹回写工作流 (用户纠偏指令必读)\n当用户指出某段记忆/日志总结有误，或告知某段内容实际是某位说话人说的（如“这个 OKR 是 shengli 说的”、“把某处说话人改成某某”）：\n1. 立即派发或使用原生工具 `search_recordings` / `read_recording` 找到对应录音 `source_id` 及精确的 `span_ids`；\n2. 调用 `relabel_recording_speakers` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 `span_ids` + `scope=\"selection\"` 避免误改同场其他发言；若原标签是整组匿名 `[说话人 N]` 可用 `scope=\"cluster\"`）；\n3. 全量排查并用 `read_memory_notebook` / `write_memory_notebook` / `remove_memory_notebook` / `update_core_memory` 同步订正所有受影响的笔记（`journal/*.md`、`projects/*.md`、`people/<原误标人>.md`、`people/<真实说话人>.md`、`topics/*.md`、`BRIEFING.md`、`MEMORY.md`），顺手清除笔记里残留的 `remaining_parts` / `revision` 等内部调试字样。\n4. **记忆自治重整（严禁只追加不清理）**：更新记忆与活页时优先用 `mode=\"replace\"` 重整结构、确保首行有清晰的 `# 一级标题`，并主动合并重叠碎片、用 `remove_memory_notebook` 删除过时/冗余活页，绝不无脑堆砌流水账。");
+	const collectVaultMd = (relDir, depth) => {
+		if (depth > 6 || notesIndex.length >= 80) return;
+		try {
+			const absDir = relDir ? join(memDir, relDir) : memDir;
+			const entries = readdirSync(absDir, { withFileTypes: true }).filter((e) => !e.name.startsWith(".")).sort((a, b) => b.name.localeCompare(a.name));
+			for (const entry of entries) {
+				if (notesIndex.length >= 80) break;
+				const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+				if (entry.isDirectory()) collectVaultMd(relPath, depth + 1);
+				else if (entry.isFile() && entry.name.endsWith(".md")) {
+					if (!relDir && [
+						"MEMORY.MD",
+						"USER.MD",
+						"BRIEFING.MD"
+					].includes(entry.name.toUpperCase())) continue;
+					const title = (readMd(relPath, 240).split("\n")[0] ?? entry.name).replace(/^#+\s*/, "").trim();
+					notesIndex.push(`- \`${relPath}\` — ${title}`);
+				}
+			}
+		} catch {}
+	};
+	collectVaultMd("", 0);
+	if (notesIndex.length > 0) sections.push(`### Dream Markdown 活页知识库索引 (支持多级目录，可用 read_memory_notebook(path=...) 按需精读)\n${notesIndex.join("\n")}`);
+	sections.push("### 记忆订正、说话人声纹回写与多级目录自由组织工作流\n当用户指出某段记忆/日志总结有误，告知说话人归属，或要求整理记忆目录结构时：\n1. 若涉及录音事实或说话人，立即使用 `search_recordings` / `read_recording` 找到对应录音 `source_id` 及精确的 `span_ids`；\n2. 调用 `relabel_recording_speakers` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 `span_ids` + `scope=\"selection\"` 避免误改同场其他发言；若原标签是整组匿名 `[说话人 N]` 可用 `scope=\"cluster\"`）；\n3. 全量排查并用 `read_memory_notebook` / `write_memory_notebook` / `move_memory_notebook` / `remove_memory_notebook` / `update_core_memory` 同步订正所有受影响的笔记与 `BRIEFING.md` / `MEMORY.md`，顺手清除笔记里残留的 `remaining_parts` / `revision` 等内部调试字样。\n4. **多级目录自由组织与自治断舍离**：`memories/` 支持任意二级/三级目录及自定义目录（如 `projects/AI访谈/overview.md`、`projects/AI访谈/双月OKR.md`、`people/核心团队/shengli.md`、`journal/2026-11/2026-11-10.md`）。优先用 `mode=\"replace\"` 重整结构、确保首行有清晰的 `# 一级标题`，主动合并重叠碎片、用 `move_memory_notebook` 归整子目录、用 `remove_memory_notebook` 删除过时/冗余活页。");
 	return sections.length > 0 ? `\n\n## MoMo 共享长期记忆与 Dream Markdown 活页笔记本\n${sections.join("\n\n")}` : "";
 }
 function noWait({ name, arguments: input }, routed) {
@@ -10390,44 +10398,29 @@ function momoPimTools(host, ticketId) {
 		},
 		{
 			name: "list_memory_notebooks",
-			description: "List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, project, journal, person, topic).",
-			schema: z.object({ category: z.enum([
-				"briefing",
-				"project",
-				"journal",
-				"person",
-				"topic"
-			]).optional() }).strict(),
+			description: "List pure Markdown (.md) living notebook pages across the multi-level memories/ vault (optionally filtered by category or folder path prefix).",
+			schema: z.object({
+				category: z.string().max(180).optional(),
+				path: z.string().max(240).optional()
+			}).strict(),
 			execute: (args, signal) => call("list_memory_notebooks", args, signal)
 		},
 		{
 			name: "read_memory_notebook",
-			description: "Read a pure Markdown (.md) living notebook page or core memory file (briefing, project, journal, person, topic, user, memory).",
+			description: "Read a pure Markdown (.md) living notebook page or core memory file by relative multi-level `path` (e.g. \"projects/AI访谈/双月OKR.md\", \"BRIEFING.md\", \"MEMORY.md\") or `(category, slug)`.",
 			schema: z.object({
-				category: z.enum([
-					"briefing",
-					"project",
-					"journal",
-					"person",
-					"topic",
-					"user",
-					"memory"
-				]),
+				path: z.string().max(240).optional(),
+				category: z.string().max(180).optional(),
 				slug: z.string().max(180).optional()
 			}).strict(),
 			execute: (args, signal) => call("read_memory_notebook", args, signal)
 		},
 		{
 			name: "write_memory_notebook",
-			description: "Create or update a pure Markdown (.md) living notebook page (briefing, project, journal, person, topic). Content must be clean user-facing Markdown (never JSON, and strip internal debug noise like remaining_parts or revision).",
+			description: "Create or update a pure Markdown (.md) living notebook page anywhere in the multi-level memories/ vault. Prefer passing `path` directly with 2nd/3rd-level folders as needed (e.g. \"projects/AI访谈/双月OKR.md\", \"journal/2026-11/2026-11-10.md\", \"people/核心团队/小林.md\", or custom folders). Content must be clean user-facing Markdown.",
 			schema: z.object({
-				category: z.enum([
-					"briefing",
-					"project",
-					"journal",
-					"person",
-					"topic"
-				]),
+				path: z.string().max(240).optional(),
+				category: z.string().max(180).optional(),
 				slug: z.string().max(180).optional(),
 				title: z.string().max(200).optional(),
 				content: z.string().min(1).max(32e3),
@@ -10436,16 +10429,21 @@ function momoPimTools(host, ticketId) {
 			execute: (args, signal) => call("write_memory_notebook", args, signal)
 		},
 		{
-			name: "remove_memory_notebook",
-			description: "Remove an obsolete or erroneously created Markdown notebook page (project, journal, person, topic, briefing).",
+			name: "move_memory_notebook",
+			description: "Move or rename a Markdown notebook page to reorganize the memories/ vault into multi-level directories (automatically prunes empty folders).",
 			schema: z.object({
-				category: z.enum([
-					"briefing",
-					"project",
-					"journal",
-					"person",
-					"topic"
-				]),
+				from_path: z.string().min(1).max(240),
+				to_path: z.string().min(1).max(240),
+				overwrite: z.boolean().default(false)
+			}).strict(),
+			execute: (args, signal) => call("move_memory_notebook", args, signal)
+		},
+		{
+			name: "remove_memory_notebook",
+			description: "Remove an obsolete or merged Markdown notebook page by `path` or `(category, slug)`.",
+			schema: z.object({
+				path: z.string().max(240).optional(),
+				category: z.string().max(180).optional(),
 				slug: z.string().max(180).optional()
 			}).strict(),
 			execute: (args, signal) => call("remove_memory_notebook", args, signal)

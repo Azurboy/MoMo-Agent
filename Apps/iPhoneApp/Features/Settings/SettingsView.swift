@@ -26,12 +26,6 @@ struct SettingsView: View {
                             PhoneSettingsLinkRow(title: "Mac 连接", symbol: "desktopcomputer",
                                                  value: remoteAgent.connection == nil ? "尚未配对" : "已配对")
                         }.accessibilityIdentifier("settings.mac")
-                        if let sync = remoteAgent.context {
-                            rowDivider
-                            NavigationLink { RemoteMemoryView(sync: sync, taskStore: remoteAgent.store) } label: {
-                                PhoneSettingsLinkRow(title: "记忆", symbol: "brain")
-                            }.accessibilityIdentifier("settings.memories")
-                        }
                         if remoteAgent.connection != nil {
                             rowDivider
                             NavigationLink { PhoneNotificationSettings(notifications: remoteAgent.notifications) } label: {

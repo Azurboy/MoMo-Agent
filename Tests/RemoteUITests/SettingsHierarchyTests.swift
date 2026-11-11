@@ -55,19 +55,7 @@ final class SettingsHierarchyTests: XCTestCase {
         // Do not capture the existing configuration or device credentials.
         back(app)
         back(app)
-        app.buttons["settings.memories"].tap()
-        XCTAssertTrue(app.navigationBars["记忆"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["完成"].exists)
-        let details = app.descendants(matching: .any)["remote.memorySyncDetails"].firstMatch
-        if details.exists {
-            details.tap()
-            let detailContent = app.descendants(matching: .any).matching(NSPredicate(
-                format: "label BEGINSWITH %@ OR label CONTAINS %@ OR label CONTAINS %@", "最近同步", "批录音待整理", "份录音需核对")).firstMatch
-            XCTAssertTrue(detailContent.waitForExistence(timeout: 10))
-        }
-        else { XCTAssertTrue(app.descendants(matching: .any)["remote.memorySyncStatus"].exists) }
-        capture(app, "Memory — inline sync status")
-        back(app)
+        XCTAssertFalse(app.buttons["settings.memories"].exists)
         if app.buttons["settings.notifications"].exists {
             app.buttons["settings.notifications"].tap()
             XCTAssertTrue(app.navigationBars["通知"].waitForExistence(timeout: 10))
@@ -121,10 +109,9 @@ final class MemoryReadingTests: XCTestCase {
         if app.buttons["welcome.start"].waitForExistence(timeout: 5) { app.buttons["welcome.start"].tap() }
         if app.buttons["onboarding.finish"].waitForExistence(timeout: 10) { app.buttons["onboarding.finish"].tap() }
         XCTAssertTrue(app.buttons["remote.settings"].waitForExistence(timeout: 30))
-        app.buttons["remote.settings"].tap()
-        XCTAssertTrue(app.buttons["settings.mac"].waitForExistence(timeout: 10))
-        capture(app, "settings-overview")
-        app.buttons["settings.memories"].tap()
+        let memoryTab = app.tabBars.buttons["记忆"]
+        XCTAssertTrue(memoryTab.waitForExistence(timeout: 10))
+        memoryTab.tap()
         let row = app.buttons["remote.memoryRow.memory-layout-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertFalse(row.label.contains("0fcdf941"))

@@ -27,9 +27,9 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
-it('registers all 28 Reminders/Calendar/Notes, Recording & Dream Notebook tools only in a loopback MoMo host', () => {
+it('registers all 29 Reminders/Calendar/Notes, Recording & Dream Notebook tools only in a loopback MoMo host', () => {
   const names = momoPimTools(host, ticket.id).map(t => t.name)
-  expect(names).toHaveLength(28)
+  expect(names).toHaveLength(29)
   expect(names).toContain('create_reminder')
   expect(names).toContain('complete_reminder')
   expect(names).toContain('create_calendar_event')
@@ -37,6 +37,7 @@ it('registers all 28 Reminders/Calendar/Notes, Recording & Dream Notebook tools 
   expect(names).toContain('list_memory_notebooks')
   expect(names).toContain('read_memory_notebook')
   expect(names).toContain('write_memory_notebook')
+  expect(names).toContain('move_memory_notebook')
   expect(names).toContain('remove_memory_notebook')
   expect(names).toContain('update_core_memory')
   expect(names).toContain('list_recordings')

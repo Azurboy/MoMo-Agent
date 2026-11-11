@@ -205,20 +205,30 @@ def _cmd_notebook(data: Path, args: argparse.Namespace) -> dict:
     from momo_memory import MoMoMemory
     memory = MoMoMemory(data)
     act = args.action
+    rel_path = getattr(args, "path", None) or None
     if act == "list":
-        return {"notes": memory.list_notebook(args.category or None)}
+        return {"notes": memory.list_notebook(args.category or None, path_prefix=rel_path)}
     if act == "read":
-        return memory.read_notebook(args.category or "briefing", args.slug or None)
+        return memory.read_notebook(args.category or (None if rel_path else "briefing"), args.slug or None, path=rel_path)
     if act == "write":
         return memory.write_notebook(
-            args.category or "briefing",
+            args.category or (None if rel_path else "briefing"),
             args.content or "",
             slug=args.slug or None,
             title=args.title or None,
             mode=args.mode or "replace",
+            path=rel_path,
         )
     if act == "remove":
-        return memory.remove_notebook(args.category or "", args.slug or None)
+        return memory.remove_notebook(args.category or None, args.slug or None, path=rel_path)
+    if act == "move":
+        return memory.move_notebook(
+            args.category or None,
+            args.slug or None,
+            path=rel_path,
+            to_path=getattr(args, "to_path", None) or None,
+            overwrite=bool(getattr(args, "overwrite", False)),
+        )
     raise ValueError(f"Unknown notebook action: {act}")
 
 
@@ -541,13 +551,16 @@ def main() -> int:
     mem_del = sub.add_parser("forget", help="Delete a shared memory entry by id")
     mem_del.add_argument("memory_id")
 
-    nb = sub.add_parser("notebook", help="List, read, write, or remove pure Markdown (.md) living memory notes")
-    nb.add_argument("action", choices=("list", "read", "write", "remove"))
-    nb.add_argument("--category", choices=("briefing", "project", "journal", "person", "topic"), default=None)
+    nb = sub.add_parser("notebook", help="List, read, write, move, or remove pure Markdown (.md) living memory notes")
+    nb.add_argument("action", choices=("list", "read", "write", "remove", "move"))
+    nb.add_argument("--path", default=None, help="Relative path inside memories/ (supports multi-level folders)")
+    nb.add_argument("--to-path", default=None, help="Destination relative path for action=move")
+    nb.add_argument("--category", default=None)
     nb.add_argument("--slug", default=None)
     nb.add_argument("--title", default=None)
     nb.add_argument("--content", default=None)
     nb.add_argument("--mode", choices=("replace", "append"), default="replace")
+    nb.add_argument("--overwrite", action="store_true")
 
     relabel = sub.add_parser("relabel-speakers", help="Relabel speaker tags on a recording based on dialogue semantics")
     relabel.add_argument("source_id")

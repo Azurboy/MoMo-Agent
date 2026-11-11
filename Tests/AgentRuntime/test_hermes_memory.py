@@ -84,4 +84,53 @@ class HermesMemoryTests(unittest.TestCase):
         recreate = self.memory.write_notebook('person', '重新创建的说话人', slug='小林', title='小林')
         self.assertFalse(recreate['success'])
 
+    def test_multi_level_directories_custom_folders_and_move_reorganization(self):
+        # 1. Write 2nd- and 3rd-level nested notes via `path` and `(category, nested_slug)`
+        w1 = self.memory.write_notebook(
+            path='projects/AI访谈/overview.md',
+            content='# AI 访谈用研平台\n\n## 项目边界\n围绕异步主持人与日记法。',
+        )
+        self.assertTrue(w1['success'])
+        self.assertEqual('project', w1['category'])
+        self.assertEqual('projects/AI访谈/overview.md', w1['path'])
+
+        w2 = self.memory.write_notebook(
+            'project',
+            '# 双月 OKR\n\n- O1：核心能力与 benchmark；O3：SLA 99.5%。',
+            slug='AI访谈/架构与规划/双月OKR',
+        )
+        self.assertTrue(w2['success'])
+        self.assertEqual('projects/AI访谈/架构与规划/双月OKR.md', w2['path'])
+
+        # 2. Model-created custom top-level domain hierarchy
+        w3 = self.memory.write_notebook(
+            path='技术沉淀/语音链路/声纹聚类.md',
+            content='# 声纹聚类与语义纠偏\n\n结合上下文称呼修正匿名说话人。',
+        )
+        self.assertTrue(w3['success'])
+        self.assertEqual('note', w3['category'])
+        self.assertEqual('技术沉淀/语音链路/声纹聚类.md', w3['path'])
+
+        # 3. Move a flat note into a 2nd-level folder and verify empty parent cleanup
+        w_flat = self.memory.write_notebook('topic', '# 并发压测排障\n\nMeta 3.1MB 体积优化。', slug='load-test')
+        self.assertTrue(w_flat['success'])
+        mv = self.memory.move_notebook(path='topics/load-test.md', to_path='projects/AI访谈/并发压测排障.md')
+        self.assertTrue(mv['success'])
+        self.assertFalse((self.home / 'memories/topics/load-test.md').exists())
+        self.assertFalse((self.home / 'memories/topics').exists())
+        self.assertTrue((self.home / 'memories/projects/AI访谈/并发压测排障.md').is_file())
+
+        listed = self.memory.list_notebook(path_prefix='projects/AI访谈')
+        self.assertEqual(
+            {'projects/AI访谈/overview.md', 'projects/AI访谈/并发压测排障.md', 'projects/AI访谈/架构与规划/双月OKR.md'},
+            {n['path'] for n in listed},
+        )
+
+        # 4. Items + forget() on custom nested note prunes empty parent directories
+        items = self.memory.list()['items']
+        custom_item = next(i for i in items if i.get('path') == '技术沉淀/语音链路/声纹聚类.md')
+        self.assertEqual('note', custom_item['kind'])
+        self.memory.forget(custom_item['id'])
+        self.assertFalse((self.home / 'memories/技术沉淀').exists())
+
 

@@ -220,26 +220,29 @@ export function momoPimTools(host: ExecutorToolsHost, ticketId: string): Tool[] 
     // ── Dream Markdown Notebook, Core Memory & Semantic Speaker Relabeling ──────
     {
       name: 'list_memory_notebooks',
-      description: 'List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, project, journal, person, topic).',
+      description: 'List pure Markdown (.md) living notebook pages across the multi-level memories/ vault (optionally filtered by category or folder path prefix).',
       schema: z.object({
-        category: z.enum(['briefing', 'project', 'journal', 'person', 'topic']).optional(),
+        category: z.string().max(180).optional(),
+        path: z.string().max(240).optional(),
       }).strict(),
       execute: (args, signal) => call('list_memory_notebooks', args, signal),
     },
     {
       name: 'read_memory_notebook',
-      description: 'Read a pure Markdown (.md) living notebook page or core memory file (briefing, project, journal, person, topic, user, memory).',
+      description: 'Read a pure Markdown (.md) living notebook page or core memory file by relative multi-level `path` (e.g. "projects/AI访谈/双月OKR.md", "BRIEFING.md", "MEMORY.md") or `(category, slug)`.',
       schema: z.object({
-        category: z.enum(['briefing', 'project', 'journal', 'person', 'topic', 'user', 'memory']),
+        path: z.string().max(240).optional(),
+        category: z.string().max(180).optional(),
         slug: z.string().max(180).optional(),
       }).strict(),
       execute: (args, signal) => call('read_memory_notebook', args, signal),
     },
     {
       name: 'write_memory_notebook',
-      description: 'Create or update a pure Markdown (.md) living notebook page (briefing, project, journal, person, topic). Content must be clean user-facing Markdown (never JSON, and strip internal debug noise like remaining_parts or revision).',
+      description: 'Create or update a pure Markdown (.md) living notebook page anywhere in the multi-level memories/ vault. Prefer passing `path` directly with 2nd/3rd-level folders as needed (e.g. "projects/AI访谈/双月OKR.md", "journal/2026-11/2026-11-10.md", "people/核心团队/小林.md", or custom folders). Content must be clean user-facing Markdown.',
       schema: z.object({
-        category: z.enum(['briefing', 'project', 'journal', 'person', 'topic']),
+        path: z.string().max(240).optional(),
+        category: z.string().max(180).optional(),
         slug: z.string().max(180).optional(),
         title: z.string().max(200).optional(),
         content: z.string().min(1).max(32000),
@@ -248,10 +251,21 @@ export function momoPimTools(host: ExecutorToolsHost, ticketId: string): Tool[] 
       execute: (args, signal) => call('write_memory_notebook', args, signal),
     },
     {
-      name: 'remove_memory_notebook',
-      description: 'Remove an obsolete or erroneously created Markdown notebook page (project, journal, person, topic, briefing).',
+      name: 'move_memory_notebook',
+      description: 'Move or rename a Markdown notebook page to reorganize the memories/ vault into multi-level directories (automatically prunes empty folders).',
       schema: z.object({
-        category: z.enum(['briefing', 'project', 'journal', 'person', 'topic']),
+        from_path: z.string().min(1).max(240),
+        to_path: z.string().min(1).max(240),
+        overwrite: z.boolean().default(false),
+      }).strict(),
+      execute: (args, signal) => call('move_memory_notebook', args, signal),
+    },
+    {
+      name: 'remove_memory_notebook',
+      description: 'Remove an obsolete or merged Markdown notebook page by `path` or `(category, slug)`.',
+      schema: z.object({
+        path: z.string().max(240).optional(),
+        category: z.string().max(180).optional(),
         slug: z.string().max(180).optional(),
       }).strict(),
       execute: (args, signal) => call('remove_memory_notebook', args, signal),

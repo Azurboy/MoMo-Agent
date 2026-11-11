@@ -569,10 +569,10 @@ struct MemoryCardDigest: Equatable, Sendable {
     )
     private static let multiSpaceRegex = try? NSRegularExpression(pattern: #"\s{2,}"#)
     private static let notebookRefRegex = try? NSRegularExpression(
-        pattern: #"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#
+        pattern: #"`((?:[\p{L}\p{N}_.-]+/)+[\p{L}\p{N}_.-]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`"#
     )
     private static let obsidianWikiLinkRegex = try? NSRegularExpression(
-        pattern: #"\[\[((?:projects|topics|people|journal)/[^\]|\n]+(?:\.md)?|BRIEFING\.md|MEMORY\.md|USER\.md)(?:\|([^\]\n]+))?\]\]"#
+        pattern: #"\[\[((?:[\p{L}\p{N}_.-]+/)+[\p{L}\p{N}_.-]+(?:\.md)?|[\p{L}\p{N}_.-]+\.md)(?:\|([^\]\n]+))?\]\]"#
     )
     private static let bareUUIDRegex = try? NSRegularExpression(
         pattern: #"(?<!/)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
@@ -598,7 +598,7 @@ struct MemoryCardDigest: Equatable, Sendable {
 
     init(memory: ContextMemory) {
         self.badge = DreamMemoryCategory.badge(for: memory)
-        self.isNotebookMarkdown = ["briefing", "project", "journal", "person", "topic"].contains(memory.kind)
+        self.isNotebookMarkdown = ["briefing", "project", "journal", "person", "topic", "note"].contains(memory.kind)
             || (memory.path?.lowercased().hasSuffix(".md") == true)
         if memory.status == "stale" {
             self.statusBadge = "原文已改变"
@@ -713,6 +713,19 @@ struct MemoryCardDigest: Equatable, Sendable {
                 for match in regex.matches(in: bodyText, range: NSRange(bodyText.startIndex..., in: bodyText)) {
                     if let r = Range(match.range(at: 1), in: bodyText) {
                         let ref = String(bodyText[r])
+                        if !refs.contains(ref) {
+                            refs.append(ref)
+                        }
+                    }
+                }
+            }
+            if let wikiRegex = Self.obsidianWikiLinkRegex {
+                for match in wikiRegex.matches(in: bodyText, range: NSRange(bodyText.startIndex..., in: bodyText)) {
+                    if let r = Range(match.range(at: 1), in: bodyText) {
+                        var ref = String(bodyText[r]).trimmingCharacters(in: .whitespaces)
+                        if !ref.lowercased().hasSuffix(".md") && ref.contains("/") {
+                            ref += ".md"
+                        }
                         if !refs.contains(ref) {
                             refs.append(ref)
                         }
@@ -889,11 +902,315 @@ struct MemoryVaultRowMeta: Equatable, Sendable {
     let shortJournalDate: String?
 }
 
+struct MemoryVaultFolderNode: Identifiable, Equatable, Sendable {
+    let id: String              // Full relative folder path, e.g. "projects", "projects/AI访谈", "core"
+    let name: String            // Display title of this folder level
+    let depth: Int              // 0 = top-level folder, 1 = 2nd-level, 2 = 3rd-level...
+    let accentKind: String      // Accent kind for folder icon tint
+    let subfolders: [MemoryVaultFolderNode]
+    let directItems: [ContextMemory]
+    let totalItemCount: Int
+}
+
+struct MemoryVaultTree: Equatable, Sendable {
+    let rootItems: [ContextMemory]
+    let rootFolders: [MemoryVaultFolderNode]
+    let allFolderIDs: Set<String>
+    let defaultExpandedFolderIDs: Set<String>
+    let flatOrderedItems: [ContextMemory]
+
+    static let empty = MemoryVaultTree(
+        rootItems: [],
+        rootFolders: [],
+        allFolderIDs: [],
+        defaultExpandedFolderIDs: [],
+        flatOrderedItems: []
+    )
+
+    var isEmpty: Bool {
+        rootItems.isEmpty && rootFolders.isEmpty
+    }
+
+    static func localizedFolderSegmentName(_ raw: String, depth: Int) -> String {
+        if depth == 0 {
+            switch raw.lowercased() {
+            case "projects", "project": return "在研项目"
+            case "journal", "journals": return "每日日志"
+            case "people", "person": return "人物档案"
+            case "topics", "topic": return "专题活页"
+            case "core": return "核心记忆"
+            case "briefing": return "晨间简报"
+            default: break
+            }
+        }
+        let knownFolderNames: [String: String] = [
+            "ai-user-research": "AI访谈与用研平台",
+            "momo-agent": "MoMo智能体",
+        ]
+        if let mapped = knownFolderNames[raw.lowercased()] {
+            return mapped
+        }
+        return raw
+    }
+
+    static func accentKind(forRootSegment raw: String) -> String {
+        switch raw.lowercased() {
+        case "projects", "project": return "project"
+        case "journal", "journals": return "journal"
+        case "people", "person": return "person"
+        case "topics", "topic": return "topic"
+        case "core": return "core"
+        case "briefing": return "briefing"
+        default: return "note"
+        }
+    }
+
+    static func directorySegments(for memory: ContextMemory) -> [String] {
+        if memory.kind == "memory" || memory.kind == "user" {
+            return ["core"]
+        }
+        if let rawPath = memory.path?.trimmingCharacters(in: CharacterSet(charactersIn: "/")), !rawPath.isEmpty {
+            let parts = rawPath.split(separator: "/").map(String.init)
+            if parts.count <= 1 {
+                return [] // Root-level .md file (e.g. BRIEFING.md)
+            }
+            return Array(parts.dropLast())
+        }
+        switch memory.kind {
+        case "briefing": return []
+        case "project": return ["projects"]
+        case "journal": return ["journal"]
+        case "person": return ["people"]
+        case "topic": return ["topics"]
+        case "note": return []
+        default: return ["core"]
+        }
+    }
+
+    static func breadcrumbSegments(for memory: ContextMemory) -> [String] {
+        let dirParts = directorySegments(for: memory)
+        if dirParts.isEmpty {
+            return [DreamMemoryCategory.badge(for: memory).title]
+        }
+        return dirParts.enumerated().map { idx, seg in
+            localizedFolderSegmentName(seg, depth: idx)
+        }
+    }
+
+    static func breadcrumbText(for memory: ContextMemory) -> String {
+        breadcrumbSegments(for: memory).joined(separator: " › ")
+    }
+
+    private final class MutableTrieNode {
+        let segment: String
+        let fullID: String
+        let depth: Int
+        let accentKind: String
+        var children: [String: MutableTrieNode] = [:]
+        var directItems: [ContextMemory] = []
+
+        init(segment: String, fullID: String, depth: Int, accentKind: String) {
+            self.segment = segment
+            self.fullID = fullID
+            self.depth = depth
+            self.accentKind = accentKind
+        }
+    }
+
+    private static func rootFolderSortRank(_ segment: String) -> Int {
+        switch segment.lowercased() {
+        case "projects", "project": return 0
+        case "topics", "topic": return 2
+        case "people", "person": return 3
+        case "journal", "journals": return 4
+        case "core": return 5
+        default: return 1 // Custom model-created domain folders sit right after projects!
+        }
+    }
+
+    private static let yearMonthRegex = try? NSRegularExpression(pattern: #"^20\d{2}[-_](0[1-9]|1[0-2]|[Ww]\d{2})$"#)
+
+    private static func isYearMonthFolder(_ name: String) -> Bool {
+        guard let re = yearMonthRegex else { return false }
+        return re.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
+    }
+
+    private static func sortNotesInFolder(_ items: [ContextMemory]) -> [ContextMemory] {
+        let baseSorted = DreamMemoryCategory.sortMemories(items)
+        // Pin overview.md / index.md / readme.md to the top of its folder
+        return baseSorted.enumerated().sorted { lhs, rhs in
+            let lName = (lhs.element.path as NSString?)?.lastPathComponent.lowercased() ?? ""
+            let rName = (rhs.element.path as NSString?)?.lastPathComponent.lowercased() ?? ""
+            let lIndex = (lName == "overview.md" || lName == "index.md" || lName == "readme.md") ? 0 : 1
+            let rIndex = (rName == "overview.md" || rName == "index.md" || rName == "readme.md") ? 0 : 1
+            if lIndex != rIndex { return lIndex < rIndex }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    nonisolated static func build(from memories: [ContextMemory]) -> MemoryVaultTree {
+        let active = memories.filter { $0.status != "forgotten" }
+        guard !active.isEmpty else { return .empty }
+
+        var rootItemsRaw: [ContextMemory] = []
+        var rootMap: [String: MutableTrieNode] = [:]
+
+        for item in active {
+            let dirSegs = directorySegments(for: item)
+            if dirSegs.isEmpty {
+                rootItemsRaw.append(item)
+                continue
+            }
+            let rootSeg = dirSegs[0]
+            let rootKey = rootSeg.lowercased()
+            let rootAccent = accentKind(forRootSegment: rootSeg)
+            let rootNode = rootMap[rootKey] ?? {
+                let n = MutableTrieNode(segment: rootSeg, fullID: rootSeg, depth: 0, accentKind: rootAccent)
+                rootMap[rootKey] = n
+                return n
+            }()
+
+            var cur = rootNode
+            for idx in 1..<dirSegs.count {
+                let seg = dirSegs[idx]
+                let childKey = seg.lowercased()
+                let nextFullID = "\(cur.fullID)/\(seg)"
+                let child = cur.children[childKey] ?? {
+                    let c = MutableTrieNode(segment: seg, fullID: nextFullID, depth: idx, accentKind: rootAccent)
+                    cur.children[childKey] = c
+                    return c
+                }()
+                cur = child
+            }
+            cur.directItems.append(item)
+        }
+
+        let sortedRootItems = sortNotesInFolder(rootItemsRaw)
+        var allIDs: Set<String> = []
+        var depthMap: [String: Int] = [:]
+        var flatItems: [ContextMemory] = sortedRootItems
+
+        func freeze(_ node: MutableTrieNode) -> MemoryVaultFolderNode {
+            allIDs.insert(node.fullID)
+            depthMap[node.fullID] = node.depth
+
+            let sortedChildren = node.children.values.sorted { a, b in
+                if node.depth >= 0, isYearMonthFolder(a.segment), isYearMonthFolder(b.segment) {
+                    return a.segment > b.segment // Newer YYYY-MM first!
+                }
+                return a.segment.localizedStandardCompare(b.segment) == .orderedAscending
+            }.map(freeze)
+
+            let sortedDirect = sortNotesInFolder(node.directItems)
+            let total = sortedDirect.count + sortedChildren.reduce(0) { $0 + $1.totalItemCount }
+            return MemoryVaultFolderNode(
+                id: node.fullID,
+                name: localizedFolderSegmentName(node.segment, depth: node.depth),
+                depth: node.depth,
+                accentKind: node.accentKind,
+                subfolders: sortedChildren,
+                directItems: sortedDirect,
+                totalItemCount: total
+            )
+        }
+
+        let sortedRoots = rootMap.values.sorted { a, b in
+            let ra = rootFolderSortRank(a.segment)
+            let rb = rootFolderSortRank(b.segment)
+            if ra != rb { return ra < rb }
+            return a.segment.localizedStandardCompare(b.segment) == .orderedAscending
+        }.map(freeze)
+
+        func collectFlat(_ folder: MemoryVaultFolderNode) {
+            for sub in folder.subfolders {
+                collectFlat(sub)
+            }
+            flatItems.append(contentsOf: folder.directItems)
+        }
+        for root in sortedRoots {
+            collectFlat(root)
+        }
+
+        let defaultExpanded: Set<String>
+        if allIDs.count <= 24 {
+            defaultExpanded = allIDs
+        } else {
+            defaultExpanded = Set(depthMap.compactMap { $0.value <= 1 ? $0.key : nil })
+        }
+
+        return MemoryVaultTree(
+            rootItems: sortedRootItems,
+            rootFolders: sortedRoots,
+            allFolderIDs: allIDs,
+            defaultExpandedFolderIDs: defaultExpanded,
+            flatOrderedItems: flatItems
+        )
+    }
+
+    func filtered(matching rawQuery: String, searchTextByID: [String: String]? = nil) -> MemoryVaultTree {
+        let q = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return self }
+        let lowerQ = q.lowercased()
+
+        func itemMatches(_ item: ContextMemory) -> Bool {
+            if let map = searchTextByID, let hay = map[item.id] {
+                return hay.contains(lowerQ)
+            }
+            let digest = MemoryCardDigest.cached(for: item)
+            return digest.title.localizedStandardContains(q)
+                || item.text.localizedStandardContains(q)
+                || (item.path?.localizedStandardContains(q) ?? false)
+        }
+
+        let matchedRootItems = rootItems.filter(itemMatches)
+        var allIDs: Set<String> = []
+        var flatItems: [ContextMemory] = matchedRootItems
+
+        func filterFolder(_ node: MemoryVaultFolderNode) -> MemoryVaultFolderNode? {
+            let folderNameMatched = node.name.localizedStandardContains(q) || node.id.localizedStandardContains(q)
+            let subMatches = node.subfolders.compactMap(filterFolder)
+            let directMatches = folderNameMatched ? node.directItems : node.directItems.filter(itemMatches)
+            let total = directMatches.count + subMatches.reduce(0) { $0 + $1.totalItemCount }
+            guard total > 0 else { return nil }
+            allIDs.insert(node.id)
+            return MemoryVaultFolderNode(
+                id: node.id,
+                name: node.name,
+                depth: node.depth,
+                accentKind: node.accentKind,
+                subfolders: subMatches,
+                directItems: directMatches,
+                totalItemCount: total
+            )
+        }
+
+        let matchedFolders = rootFolders.compactMap(filterFolder)
+        func collectFlat(_ folder: MemoryVaultFolderNode) {
+            for sub in folder.subfolders {
+                collectFlat(sub)
+            }
+            flatItems.append(contentsOf: folder.directItems)
+        }
+        for f in matchedFolders {
+            collectFlat(f)
+        }
+
+        return MemoryVaultTree(
+            rootItems: matchedRootItems,
+            rootFolders: matchedFolders,
+            allFolderIDs: allIDs,
+            defaultExpandedFolderIDs: allIDs,
+            flatOrderedItems: flatItems
+        )
+    }
+}
+
 struct MemoryVaultSnapshot: Equatable, Sendable {
     let activeMemories: [ContextMemory]
     let byID: [String: ContextMemory]
     let rowMetaByID: [String: MemoryVaultRowMeta]
     let searchTextByID: [String: String]
+    let tree: MemoryVaultTree
     let folders: [DreamMemorySection]
     let defaultExpandedFolderIDs: Set<String>
     let flatVisibleItems: [ContextMemory]
@@ -907,6 +1224,7 @@ struct MemoryVaultSnapshot: Equatable, Sendable {
         byID: [:],
         rowMetaByID: [:],
         searchTextByID: [:],
+        tree: .empty,
         folders: [],
         defaultExpandedFolderIDs: [],
         flatVisibleItems: [],
@@ -938,7 +1256,8 @@ struct MemoryVaultSnapshot: Equatable, Sendable {
                 dateBadge: digest.dateBadge,
                 shortJournalDate: shortDate
             )
-            searchTextByID[item.id] = "\(digest.title)\n\(digest.badge.title)\n\(item.text)".lowercased()
+            let pathText = item.path ?? ""
+            searchTextByID[item.id] = "\(digest.title)\n\(pathText)\n\(digest.badge.title)\n\(item.text)".lowercased()
             if digest.isNotebookMarkdown {
                 _ = MarkdownDocument.cached(digest.cleanedNotebookMarkdown)
                 #if os(macOS)
@@ -951,17 +1270,27 @@ struct MemoryVaultSnapshot: Equatable, Sendable {
             }
         }
 
+        let tree = MemoryVaultTree.build(from: active)
         let folders = DreamMemoryCategory.directoryFolders(from: active)
-        let defaultExpanded = DreamMemoryCategory.defaultExpandedFolderIDs(for: folders)
-        let flatItems = folders.flatMap(\.items)
+        let defaultExpanded = tree.defaultExpandedFolderIDs
+        let flatItems = tree.flatOrderedItems
 
         var siblingsByID: [String: [ContextMemory]] = [:]
         siblingsByID.reserveCapacity(active.count)
-        for folder in folders {
-            let group = folder.items.count > 1 ? folder.items : (flatItems.count > 1 ? flatItems : folder.items)
-            for item in folder.items {
+        func assignSiblings(_ folder: MemoryVaultFolderNode) {
+            let group = folder.directItems.count > 1 ? folder.directItems : (flatItems.count > 1 ? flatItems : folder.directItems)
+            for item in folder.directItems {
                 siblingsByID[item.id] = group
             }
+            for sub in folder.subfolders {
+                assignSiblings(sub)
+            }
+        }
+        for rootItem in tree.rootItems {
+            siblingsByID[rootItem.id] = tree.rootItems.count > 1 ? tree.rootItems : flatItems
+        }
+        for rootFolder in tree.rootFolders {
+            assignSiblings(rootFolder)
         }
 
         let childrenMap = MemoryCardDigest.linkedChildrenMap(for: active)
@@ -973,6 +1302,7 @@ struct MemoryVaultSnapshot: Equatable, Sendable {
             byID: byID,
             rowMetaByID: rowMetaByID,
             searchTextByID: searchTextByID,
+            tree: tree,
             folders: folders,
             defaultExpandedFolderIDs: defaultExpanded,
             flatVisibleItems: flatItems,
@@ -981,6 +1311,10 @@ struct MemoryVaultSnapshot: Equatable, Sendable {
             backlinksByTargetID: backlinksMap,
             briefingDocument: briefing
         )
+    }
+
+    func filteredTree(matching rawQuery: String) -> MemoryVaultTree {
+        tree.filtered(matching: rawQuery, searchTextByID: searchTextByID)
     }
 
     func filteredFolders(matching rawQuery: String) -> [DreamMemorySection] {
@@ -1016,7 +1350,7 @@ extension MemoryCardDigest {
         「\(instruction.trimmingCharacters(in: .whitespacesAndNewlines))」
         请使用原生工具完成闭环：
         1. 若涉及说话人归属或原音核对，先用 `search_recordings` / `read_recording` 找到对应录音 `source_id` 与精确 `span_ids`，调用 `relabel_recording_speakers` 修正说话人标签并同步回写 iPhone 声纹库（若原标签已是具名人物或“我”、仅局部片段被串轨误标，务必传精确 `span_ids` 且 `scope="selection"`，避免误改同场其他发言；若原标签为整组匿名 `[说话人 N]` 可用 `scope="cluster"`）；
-        2. 用 `read_memory_notebook` / `write_memory_notebook` / `update_core_memory` 同步修改当前笔记以及所有关联的 `journal/*.md`、`projects/*.md`、`people/*.md`、`topics/*.md`、`BRIEFING.md` 与 `MEMORY.md`，顺手清除正文中残留的 `remaining_parts` 或 `revision` 等内部调试字样。
+        2. 用 `read_memory_notebook` / `write_memory_notebook` / `move_memory_notebook` / `remove_memory_notebook` / `update_core_memory` 同步修改当前笔记以及所有关联的笔记（支持任意二级/三级子目录组织）、`BRIEFING.md` 与 `MEMORY.md`，顺手清除正文中残留的 `remaining_parts` 或 `revision` 等内部调试字样。
         """
     }
 
@@ -1437,15 +1771,15 @@ struct ClientMemoryContent: View {
                         .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
 
-                    // Breadcrumb path: Folder › Note
+                    // Breadcrumb path: Multi-level Folder › Note
                     HStack(spacing: 5) {
                         Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(colors.tabAccent(memory.kind))
-                        Text(folderBreadcrumbTitle(for: memory.kind))
+                        Text(MemoryVaultTree.breadcrumbText(for: memory))
                             .font(.system(size: 12, weight: .regular))
                             .foregroundStyle(colors.secondaryInk)
-                            .fixedSize(horizontal: true, vertical: false)
+                            .lineLimit(1)
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8.5, weight: .semibold))
                             .foregroundStyle(colors.secondaryInk.opacity(0.55))
@@ -2048,9 +2382,9 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .all: return "list.bullet.indent"
-        case .project: return "folder"
+        case .project: return "square.stack.3d.up"
         case .briefing: return "sun.max"
-        case .topic: return "doc.text"
+        case .topic: return "book.closed"
         case .person: return "person.2"
         case .journal: return "calendar"
         case .core: return "brain"
@@ -2137,10 +2471,15 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
     static func badge(for memory: ContextMemory) -> (title: String, symbol: String) {
         switch memory.kind {
         case "briefing": return ("晨间简报", "sun.max")
-        case "project": return ("项目活页", "folder")
+        case "project": return ("项目活页", "doc.text")
         case "journal": return ("每日日志", "calendar")
         case "person": return ("人物档案", "person")
         case "topic": return ("专题活页", "doc.text")
+        case "note":
+            if let seg = MemoryVaultTree.directorySegments(for: memory).first {
+                return (seg, "doc.text")
+            }
+            return ("知识活页", "doc.text")
         case "user": return ("关于你", "person.crop.circle")
         default: return ("核心记忆", "brain")
         }
@@ -2222,14 +2561,19 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         }.map(\.element)
     }
 
-    static func folderSymbol(for id: String) -> String {
-        switch id {
-        case "project": return "folder"
+    static func folderSymbol(for id: String, depth: Int = 0) -> String {
+        if depth > 0 {
+            return "folder"
+        }
+        let rootKey = id.split(separator: "/").first.map { String($0).lowercased() } ?? id.lowercased()
+        switch rootKey {
+        case "project", "projects": return "square.stack.3d.up"
         case "briefing": return "sun.max"
-        case "topic": return "doc.text"
-        case "person": return "person.2"
-        case "journal": return "calendar"
-        default: return "brain"
+        case "topic", "topics": return "book.closed"
+        case "person", "people": return "person.2"
+        case "journal", "journals": return "calendar"
+        case "core": return "brain"
+        default: return "folder"
         }
     }
 }
@@ -2842,18 +3186,29 @@ enum DreamMemoryLinkResolver {
         let active = memories.filter { $0.status != "forgotten" }
         let lowerRel = rel.lowercased()
 
-        // 1. Exact path match
-        if let exact = active.first(where: { $0.path?.lowercased() == lowerRel }) {
+        // 1. Exact or normalized multi-level path match
+        let lowerWithMd = lowerRel.hasSuffix(".md") ? lowerRel : (lowerRel + ".md")
+        if let exact = active.first(where: {
+            guard let p = $0.path?.lowercased() else { return false }
+            return p == lowerRel || p == lowerWithMd
+        }) {
             return exact
         }
-        if lowerRel == "briefing.md", let b = active.first(where: { $0.kind == "briefing" }) {
+        if lowerRel == "briefing.md" || lowerRel == "briefing", let b = active.first(where: { $0.kind == "briefing" }) {
             return b
         }
-        if lowerRel == "user.md", let u = active.first(where: { $0.kind == "user" }) {
+        if lowerRel == "user.md" || lowerRel == "user", let u = active.first(where: { $0.kind == "user" }) {
             return u
         }
-        if lowerRel == "memory.md", let m = active.first(where: { $0.kind == "memory" }) {
+        if lowerRel == "memory.md" || lowerRel == "memory", let m = active.first(where: { $0.kind == "memory" }) {
             return m
+        }
+        // 1b. Trailing multi-level sub-path match (e.g. [[AI访谈/双月OKR]] -> projects/AI访谈/双月OKR.md)
+        if let subPathMatch = active.first(where: {
+            guard let p = $0.path?.lowercased() else { return false }
+            return p.hasSuffix("/" + lowerRel) || p.hasSuffix("/" + lowerWithMd)
+        }) {
+            return subPathMatch
         }
 
         // 2. Match by category folder + stem or Chinese keywords

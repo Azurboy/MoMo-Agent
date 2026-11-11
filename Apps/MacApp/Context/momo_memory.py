@@ -35,7 +35,25 @@ NOTEBOOK_KINDS = {
     "journal": (None, "journal"),
     "person": (None, "people"),
     "topic": (None, "topics"),
+    "note": (None, None),
 }
+_STANDARD_ROOT_FOLDERS = {
+    "projects": "project",
+    "project": "project",
+    "journal": "journal",
+    "journals": "journal",
+    "people": "person",
+    "person": "person",
+    "topics": "topic",
+    "topic": "topic",
+}
+_CANONICAL_FOLDER_FOR_KIND = {
+    "project": "projects",
+    "journal": "journal",
+    "person": "people",
+    "topic": "topics",
+}
+_MAX_NOTEBOOK_DEPTH = 6
 _SLUG_RE = re.compile(r"[^\w\u4e00-\u9fff.-]+", re.UNICODE)
 _MATCH_FOLD = str.maketrans({
     **dict.fromkeys("\"`\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f", "'"),
@@ -54,8 +72,8 @@ MEMORY_SCHEMA = {
         "for a single change.\n\n"
         "TARGETS: 'user' = who the user is (name, role, preferences, communication style). "
         "'memory' = shared core index (active goals, key conventions, cross-session anchors). "
-        "Put detailed daily logs, person profiles, and topic deep-dives into the `notebook` tool "
-        "(`BRIEFING.md`, `journal/*.md`, `people/*.md`, `topics/*.md`) rather than overflowing `MEMORY.md`."
+        "Put detailed daily logs, project hierarchies, person profiles, and domain notes into the `notebook` tool "
+        "(supporting multi-level folders like `projects/<project>/<doc>.md`, `journal/YYYY-MM/YYYY-MM-DD.md`, `people/...`, or custom directories) rather than overflowing `MEMORY.md`."
     ),
     "parameters": {
         "type": "object",
@@ -103,13 +121,30 @@ MEMORY_SCHEMA = {
 }
 
 
-def sanitize_notebook_slug(raw: str) -> str:
-    cleaned = _SLUG_RE.sub("-", str(raw or "").strip()).strip("-.")
-    if cleaned.lower().endswith(".md"):
-        cleaned = cleaned[:-3].strip("-.")
-    if not cleaned or ".." in cleaned or "/" in cleaned or "\\" in cleaned or len(cleaned.encode("utf-8")) > 180:
-        raise ValueError("Invalid Markdown note slug")
+def _sanitize_path_segment(raw: str, *, strip_md: bool = False) -> str:
+    piece = str(raw or "").strip()
+    if strip_md and piece.lower().endswith(".md"):
+        piece = piece[:-3].strip()
+    if not piece or piece in {".", ".."} or ".." in piece or "\\" in piece or "\x00" in piece:
+        raise ValueError("Invalid Markdown path segment")
+    cleaned = _SLUG_RE.sub("-", piece).strip("-.")
+    if not cleaned or cleaned.startswith(".") or len(cleaned.encode("utf-8")) > 180:
+        raise ValueError("Invalid Markdown path segment")
     return cleaned
+
+
+def sanitize_notebook_slug(raw: str) -> str:
+    text = str(raw or "").strip().strip("/")
+    if not text or "\\" in text or ".." in text:
+        raise ValueError("Invalid Markdown note slug")
+    parts = [p for p in text.split("/") if p.strip()]
+    if not parts or len(parts) > _MAX_NOTEBOOK_DEPTH:
+        raise ValueError("Invalid Markdown note slug")
+    sanitized = [
+        _sanitize_path_segment(part, strip_md=(idx == len(parts) - 1))
+        for idx, part in enumerate(parts)
+    ]
+    return "/".join(sanitized)
 
 
 def _atomic_write_markdown(path: Path, text: str) -> None:
@@ -617,34 +652,76 @@ class MoMoMemory:
             pass
         return set()
 
-    def _mark_deleted_notebook(self, kind: str, slug: str) -> None:
-        if kind not in ("person", "topic", "project"):
+    def _mark_deleted_notebook(self, kind: str, slug: str, rel_path: str | None = None) -> None:
+        if kind in ("memory", "user", "briefing"):
             return
         deleted = self._load_deleted_notebooks()
-        deleted.add(f"{kind}:{slug}")
+        if kind in ("person", "topic", "project"):
+            deleted.add(f"{kind}:{slug}")
+        if rel_path:
+            deleted.add(f"path:{rel_path}")
         _atomic_write_markdown(
             self._deleted_notebooks_path(),
             json.dumps(sorted(deleted), ensure_ascii=False, indent=2) + "\n",
         )
 
+    def _is_deleted_notebook(self, kind: str, slug: str, rel_path: str, deleted: set[str] | None = None) -> bool:
+        store = self._load_deleted_notebooks() if deleted is None else deleted
+        return f"{kind}:{slug}" in store or f"path:{rel_path}" in store
+
+    def _prune_empty_parents(self, file_path: Path) -> None:
+        root = self.memories_dir.resolve()
+        try:
+            cur = file_path.parent.resolve()
+        except OSError:
+            return
+        while cur != root and root in cur.parents:
+            try:
+                cur.rmdir()
+            except OSError:
+                break
+            cur = cur.parent
+
+    @staticmethod
+    def _classify_rel_path(rel_posix: str) -> tuple[str, str]:
+        if rel_posix.upper() == "BRIEFING.MD":
+            return "briefing", "BRIEFING"
+        parts = rel_posix.split("/")
+        stem_rel = rel_posix[:-3] if rel_posix.lower().endswith(".md") else rel_posix
+        if len(parts) >= 2:
+            kind = _STANDARD_ROOT_FOLDERS.get(parts[0].lower(), "note")
+            if kind != "note":
+                slug = "/".join(parts[1:])
+                if slug.lower().endswith(".md"):
+                    slug = slug[:-3]
+                return kind, slug
+        return "note", stem_rel
+
     def _notebook_files(self) -> list[tuple[str, str, Path]]:
         root = self.memories_dir
+        if not root.is_dir():
+            return []
         deleted = self._load_deleted_notebooks()
         results: list[tuple[str, str, Path]] = []
-        briefing = root / "BRIEFING.md"
-        if briefing.is_file():
-            results.append(("briefing", "BRIEFING", briefing))
-        for kind, (_, folder) in NOTEBOOK_KINDS.items():
-            if not folder:
+        for md_file in sorted(root.rglob("*.md")):
+            if not md_file.is_file():
                 continue
-            subdir = root / folder
-            if not subdir.is_dir():
+            try:
+                rel_parts = md_file.relative_to(root).parts
+            except ValueError:
                 continue
-            for md_file in sorted(subdir.glob("*.md")):
-                if md_file.is_file() and not md_file.name.startswith("."):
-                    if f"{kind}:{md_file.stem}" in deleted:
-                        continue
-                    results.append((kind, md_file.stem, md_file))
+            if not rel_parts or any(part.startswith(".") for part in rel_parts):
+                continue
+            if len(rel_parts) == 1 and rel_parts[0].upper() in {"MEMORY.MD", "USER.MD"}:
+                continue
+            rel_posix = "/".join(rel_parts)
+            if len(rel_parts) == 1 and rel_parts[0].upper() == "BRIEFING.MD":
+                results.append(("briefing", "BRIEFING", md_file))
+                continue
+            kind, slug = self._classify_rel_path(rel_posix)
+            if self._is_deleted_notebook(kind, slug, rel_posix, deleted):
+                continue
+            results.append((kind, slug, md_file))
         return results
 
     @staticmethod
@@ -680,7 +757,7 @@ class MoMoMemory:
                     "status": "current",
                     "revision": int(digest[:15], 16),
                     "evidence": [],
-                    "path": str(path.relative_to(helper.memories_dir)),
+                    "path": path.relative_to(helper.memories_dir).as_posix(),
                 })
         return sorted(items, key=lambda item: item["id"])
 
@@ -701,7 +778,7 @@ class MoMoMemory:
 
     def forget(self, identity: str):
         if not isinstance(identity, str) or not re.fullmatch(
-            r"(?:hermes|momo)-(memory|user|briefing|project|journal|person|topic)-[0-9a-f]{64}", identity
+            r"(?:hermes|momo)-(memory|user|briefing|project|journal|person|topic|note)-[0-9a-f]{64}", identity
         ):
             raise Conflict("This is an old memory view; refresh memory before editing")
         norm_id = "hermes-" + identity.split("-", 1)[1]
@@ -722,54 +799,159 @@ class MoMoMemory:
                             continue
                         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                         if f"hermes-{kind}-{digest}" == norm_id:
+                            rel_posix = path.relative_to(self.memories_dir).as_posix()
                             path.unlink(missing_ok=True)
-                            self._mark_deleted_notebook(kind, slug)
+                            self._prune_empty_parents(path)
+                            self._mark_deleted_notebook(kind, slug, rel_posix)
                             break
         return {"id": identity, "status": "forgotten"}
 
     @staticmethod
     def _normalize_notebook_category(category: str) -> str:
-        cat = str(category or "").strip().lower()
+        cat = str(category or "").strip().strip("/")
+        lower = cat.lower()
         return {
             "people": "person",
             "topics": "topic",
             "journals": "journal",
             "projects": "project",
-        }.get(cat, cat)
+            "notes": "note",
+        }.get(lower, lower if lower in NOTEBOOK_KINDS else cat)
 
-    def resolve_notebook_path(self, category: str, slug: str | None = None) -> tuple[str, Path]:
-        cat = self._normalize_notebook_category(category)
-        if cat not in NOTEBOOK_KINDS:
-            raise ValueError(f"Unsupported notebook category '{category}'; choose from briefing, project, journal, person, topic")
-        fixed_file, folder = NOTEBOOK_KINDS[cat]
-        if fixed_file:
-            return "BRIEFING", self.memories_dir / fixed_file
-        clean_slug = sanitize_notebook_slug(slug or "")
-        return clean_slug, self.memories_dir / folder / f"{clean_slug}.md"
+    def resolve_notebook_target(
+        self,
+        category: str | None = None,
+        slug: str | None = None,
+        *,
+        path: str | None = None,
+    ) -> tuple[str, str, str, Path]:
+        """Resolve `(kind, slug, rel_posix, full_path)` supporting multi-level folders & custom paths."""
+        raw_path = str(path or "").strip().strip("/")
+        raw_cat = str(category or "").strip().strip("/")
+        raw_slug = str(slug or "").strip().strip("/")
 
-    def list_notebook(self, category: str | None = None) -> list[dict]:
+        # Treat category itself as a relative .md path if caller passed e.g. category="projects/ai/okr.md" with no slug
+        if not raw_path and raw_cat.lower().endswith(".md") and not raw_slug:
+            raw_path = raw_cat
+            raw_cat = ""
+
+        if raw_path:
+            if "\\" in raw_path or ".." in raw_path:
+                raise ValueError("Invalid notebook path")
+            upper_single = raw_path.upper()
+            if upper_single in {"MEMORY.MD", "USER.MD", "MEMORY", "USER"}:
+                raise ValueError("Use the 'memory' / 'update_core_memory' tool to edit MEMORY.md or USER.md.")
+            if upper_single in {"BRIEFING.MD", "BRIEFING"}:
+                return "briefing", "BRIEFING", "BRIEFING.md", self.memories_dir / "BRIEFING.md"
+            raw_parts = [p for p in raw_path.split("/") if p.strip()]
+            if not raw_parts or len(raw_parts) > _MAX_NOTEBOOK_DEPTH:
+                raise ValueError(f"Notebook path must have 1..{_MAX_NOTEBOOK_DEPTH} segments")
+            clean_parts = [
+                _sanitize_path_segment(seg, strip_md=(i == len(raw_parts) - 1))
+                for i, seg in enumerate(raw_parts)
+            ]
+            if len(clean_parts) == 1 and clean_parts[0].upper() in {"MEMORY", "USER"}:
+                raise ValueError("Use the 'memory' / 'update_core_memory' tool to edit MEMORY.md or USER.md.")
+            if len(clean_parts) == 1 and clean_parts[0].upper() == "BRIEFING":
+                return "briefing", "BRIEFING", "BRIEFING.md", self.memories_dir / "BRIEFING.md"
+            if len(clean_parts) >= 2 and clean_parts[0].lower() in _STANDARD_ROOT_FOLDERS:
+                kind = _STANDARD_ROOT_FOLDERS[clean_parts[0].lower()]
+                clean_parts[0] = _CANONICAL_FOLDER_FOR_KIND[kind]
+                resolved_slug = "/".join(clean_parts[1:])
+            else:
+                kind = "note"
+                resolved_slug = "/".join(clean_parts)
+            rel_posix = "/".join(clean_parts) + ".md"
+            full = (self.memories_dir / rel_posix).resolve()
+            root_resolved = self.memories_dir.resolve()
+            if root_resolved not in full.parents:
+                raise ValueError("Invalid notebook path outside memories directory")
+            return kind, resolved_slug, rel_posix, self.memories_dir / rel_posix
+
+        norm_cat = self._normalize_notebook_category(raw_cat)
+        if norm_cat == "briefing" and not raw_slug:
+            return "briefing", "BRIEFING", "BRIEFING.md", self.memories_dir / "BRIEFING.md"
+        if norm_cat in ("memory", "user"):
+            raise ValueError("Use the 'memory' / 'update_core_memory' tool to edit MEMORY.md or USER.md.")
+
+        folder_parts: list[str] = []
+        if norm_cat in _CANONICAL_FOLDER_FOR_KIND:
+            folder_parts = [_CANONICAL_FOLDER_FOR_KIND[norm_cat]]
+        elif norm_cat in ("note", ""):
+            folder_parts = []
+        else:
+            if "\\" in raw_cat or ".." in raw_cat:
+                raise ValueError("Invalid notebook category folder")
+            raw_cat_parts = [p for p in raw_cat.split("/") if p.strip()]
+            folder_parts = [_sanitize_path_segment(seg, strip_md=False) for seg in raw_cat_parts]
+            if folder_parts and folder_parts[0].lower() in _STANDARD_ROOT_FOLDERS:
+                mapped_kind = _STANDARD_ROOT_FOLDERS[folder_parts[0].lower()]
+                folder_parts[0] = _CANONICAL_FOLDER_FOR_KIND[mapped_kind]
+
+        clean_slug = sanitize_notebook_slug(raw_slug)
+        slug_parts = clean_slug.split("/")
+        # Avoid accidental prefix duplication like category='project', slug='projects/ai/okr'
+        if folder_parts and len(slug_parts) > len(folder_parts) and [p.lower() for p in slug_parts[:len(folder_parts)]] == [p.lower() for p in folder_parts]:
+            slug_parts = slug_parts[len(folder_parts):]
+
+        combined = folder_parts + slug_parts
+        if not combined or len(combined) > _MAX_NOTEBOOK_DEPTH:
+            raise ValueError(f"Notebook path depth exceeds maximum ({_MAX_NOTEBOOK_DEPTH})")
+        if len(combined) == 1 and combined[0].upper() in {"MEMORY", "USER"}:
+            raise ValueError("Use the 'memory' / 'update_core_memory' tool to edit MEMORY.md or USER.md.")
+        if len(combined) == 1 and combined[0].upper() == "BRIEFING":
+            return "briefing", "BRIEFING", "BRIEFING.md", self.memories_dir / "BRIEFING.md"
+
+        if len(combined) >= 2 and combined[0].lower() in _STANDARD_ROOT_FOLDERS:
+            kind = _STANDARD_ROOT_FOLDERS[combined[0].lower()]
+            combined[0] = _CANONICAL_FOLDER_FOR_KIND[kind]
+            resolved_slug = "/".join(combined[1:])
+        else:
+            kind = "note"
+            resolved_slug = "/".join(combined)
+
+        rel_posix = "/".join(combined) + ".md"
+        full = (self.memories_dir / rel_posix).resolve()
+        root_resolved = self.memories_dir.resolve()
+        if root_resolved not in full.parents:
+            raise ValueError("Invalid notebook path outside memories directory")
+        return kind, resolved_slug, rel_posix, self.memories_dir / rel_posix
+
+    def resolve_notebook_path(self, category: str, slug: str | None = None, *, path: str | None = None) -> tuple[str, Path]:
+        _, resolved_slug, _, full_path = self.resolve_notebook_target(category, slug, path=path)
+        return resolved_slug, full_path
+
+    def list_notebook(self, category: str | None = None, *, path_prefix: str | None = None) -> list[dict]:
         filter_cat = None
+        prefix_filter = str(path_prefix or "").strip().strip("/").lower()
         if category:
-            c = str(category).strip().lower()
-            filter_cat = {"people": "person", "topics": "topic", "journals": "journal", "projects": "project"}.get(c, c)
+            raw_c = str(category).strip().strip("/")
+            norm_c = self._normalize_notebook_category(raw_c)
+            if norm_c in NOTEBOOK_KINDS:
+                filter_cat = norm_c
+            else:
+                prefix_filter = raw_c.lower()
         entries = []
-        for kind, slug, path in self._notebook_files():
+        for kind, slug, file_path in self._notebook_files():
+            rel_posix = file_path.relative_to(self.memories_dir).as_posix()
             if filter_cat and kind != filter_cat:
                 continue
+            if prefix_filter and not (rel_posix.lower() == prefix_filter or rel_posix.lower().startswith(prefix_filter + "/")):
+                continue
             try:
-                text = path.read_text(encoding="utf-8").strip()
-                stat = path.stat()
+                text = file_path.read_text(encoding="utf-8").strip()
+                stat = file_path.stat()
             except OSError:
                 continue
             if not text:
                 continue
             first_nonempty = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
             has_h1 = bool(re.match(r"^#\s+\S", first_nonempty))
-            first_line = first_nonempty.lstrip("# ").strip() if first_nonempty else slug
+            first_line = first_nonempty.lstrip("# ").strip() if first_nonempty else Path(rel_posix).stem
             entries.append({
                 "category": kind,
                 "slug": slug,
-                "path": str(path.relative_to(self.memories_dir)),
+                "path": rel_posix,
                 "title": first_line[:120],
                 "has_h1": has_h1,
                 "characters": len(text),
@@ -777,34 +959,35 @@ class MoMoMemory:
             })
         return entries
 
-    def read_notebook(self, category: str, slug: str | None = None) -> dict:
-        clean_slug, path = self.resolve_notebook_path(category, slug)
-        if not path.is_file():
-            return {"success": False, "error": f"Note not found: {category}/{clean_slug}.md"}
-        text = path.read_text(encoding="utf-8").strip()
+    def read_notebook(self, category: str | None = None, slug: str | None = None, *, path: str | None = None) -> dict:
+        kind, clean_slug, rel_posix, full_path = self.resolve_notebook_target(category, slug, path=path)
+        if not full_path.is_file():
+            return {"success": False, "error": f"Note not found: {rel_posix}"}
+        text = full_path.read_text(encoding="utf-8").strip()
         return {
             "success": True,
-            "category": category,
+            "category": kind,
             "slug": clean_slug,
-            "path": str(path.relative_to(self.memories_dir)),
+            "path": rel_posix,
             "content": text,
             "characters": len(text),
         }
 
     def write_notebook(
         self,
-        category: str,
-        content: str,
+        category: str | None = None,
+        content: str = "",
         slug: str | None = None,
         title: str | None = None,
         mode: str = "replace",
+        *,
+        path: str | None = None,
     ) -> dict:
-        cat = self._normalize_notebook_category(category)
-        clean_slug, path = self.resolve_notebook_path(cat, slug or title)
-        if f"{cat}:{clean_slug}" in self._load_deleted_notebooks():
+        kind, clean_slug, rel_posix, full_path = self.resolve_notebook_target(category, slug or (None if path else title), path=path)
+        if self._is_deleted_notebook(kind, clean_slug, rel_posix):
             return {
                 "success": False,
-                "error": f"Notebook {cat}/{clean_slug} was deleted by user; do not recreate it.",
+                "error": f"Notebook {rel_posix} was deleted by user; do not recreate it.",
             }
         body = str(content or "").strip()
         if not body:
@@ -813,35 +996,84 @@ class MoMoMemory:
             return {"success": False, "error": "Markdown note exceeds 32,000 characters; keep notes concise and focused."}
         if (body.startswith("{") and body.endswith("}")) or (body.startswith("[") and body.endswith("]")):
             return {"success": False, "error": "Notebook notes must be pure Markdown (.md), never raw JSON."}
-        if mode == "append" and path.is_file():
-            existing = path.read_text(encoding="utf-8").strip()
+        if mode == "append" and full_path.is_file():
+            existing = full_path.read_text(encoding="utf-8").strip()
             if existing:
                 body = existing + "\n\n" + body
         if not re.match(r"^#\s+\S", body.lstrip()):
             derived_title = (title or "").strip()
             if not derived_title:
                 first_h2 = next((ln.lstrip("# ").strip() for ln in body.splitlines() if ln.strip().startswith("#")), "")
-                derived_title = re.sub(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2}(?:[–—-]\d{1,2}:\d{2})?)?\s*[·•—–:：\-]?\s*", "", first_h2).strip() or clean_slug
+                derived_title = re.sub(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2}(?:[–—-]\d{1,2}:\d{2})?)?\s*[·•—–:：\-]?\s*", "", first_h2).strip() or Path(rel_posix).stem
             body = f"# {derived_title}\n\n{body}"
-        _atomic_write_markdown(path, body + "\n")
+        _atomic_write_markdown(full_path, body + "\n")
         return {
             "success": True,
-            "category": cat,
+            "category": kind,
             "slug": clean_slug,
-            "path": str(path.relative_to(self.memories_dir)),
+            "path": rel_posix,
             "characters": len(body),
             "updated_at": round(time.time(), 2),
         }
 
-    def remove_notebook(self, category: str, slug: str | None = None, *, user_initiated: bool = False) -> dict:
-        cat = self._normalize_notebook_category(category)
-        clean_slug, path = self.resolve_notebook_path(cat, slug)
-        if not path.is_file():
-            return {"success": False, "error": f"Note not found: {cat}/{clean_slug}.md"}
-        path.unlink(missing_ok=True)
+    def remove_notebook(
+        self,
+        category: str | None = None,
+        slug: str | None = None,
+        *,
+        path: str | None = None,
+        user_initiated: bool = False,
+    ) -> dict:
+        kind, clean_slug, rel_posix, full_path = self.resolve_notebook_target(category, slug, path=path)
+        if not full_path.is_file():
+            return {"success": False, "error": f"Note not found: {rel_posix}"}
+        full_path.unlink(missing_ok=True)
+        self._prune_empty_parents(full_path)
         if user_initiated:
-            self._mark_deleted_notebook(cat, clean_slug)
-        return {"success": True, "category": cat, "slug": clean_slug, "removed": True}
+            self._mark_deleted_notebook(kind, clean_slug, rel_posix)
+        return {"success": True, "category": kind, "slug": clean_slug, "path": rel_posix, "removed": True}
+
+    def move_notebook(
+        self,
+        category: str | None = None,
+        slug: str | None = None,
+        *,
+        path: str | None = None,
+        to_path: str | None = None,
+        to_category: str | None = None,
+        to_slug: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        src_kind, src_slug, src_rel, src_full = self.resolve_notebook_target(category, slug, path=path)
+        if src_kind == "briefing":
+            return {"success": False, "error": "BRIEFING.md must remain at the root of memories/."}
+        if not src_full.is_file():
+            return {"success": False, "error": f"Source note not found: {src_rel}"}
+        dst_kind, dst_slug, dst_rel, dst_full = self.resolve_notebook_target(
+            to_category,
+            to_slug or (Path(src_rel).stem if to_category and not to_path else None),
+            path=to_path,
+        )
+        if dst_kind == "briefing":
+            return {"success": False, "error": "Cannot move a note onto BRIEFING.md; use write with category='briefing'."}
+        if self._is_deleted_notebook(dst_kind, dst_slug, dst_rel):
+            return {"success": False, "error": f"Destination {dst_rel} was deleted by user; do not recreate it."}
+        if src_full.resolve() == dst_full.resolve():
+            return {"success": True, "from_path": src_rel, "path": dst_rel, "category": dst_kind, "slug": dst_slug, "moved": False}
+        if dst_full.exists() and not overwrite:
+            return {"success": False, "error": f"Destination already exists: {dst_rel}. Merge content with write+remove or set overwrite=true."}
+        raw = src_full.read_text(encoding="utf-8")
+        _atomic_write_markdown(dst_full, raw)
+        src_full.unlink(missing_ok=True)
+        self._prune_empty_parents(src_full)
+        return {
+            "success": True,
+            "from_path": src_rel,
+            "path": dst_rel,
+            "category": dst_kind,
+            "slug": dst_slug,
+            "moved": True,
+        }
 
 
 HermesMemory = MoMoMemory

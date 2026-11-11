@@ -12,17 +12,18 @@ from context_store import Conflict, canonical, digest
 CHAT_IDLE_SECONDS = 60
 DREAM_INTERVAL = 1800
 MAINTENANCE_INTERVAL = 43200
-CURATION_POLICY_VERSION = "v3-autonomous-gardening"
+CURATION_POLICY_VERSION = "v4-free-hierarchy"
 MAX_BYTES = 32_000
 MAX_PARTS = 48
-RECEIPT = '''最后只返回 JSON：{"memory_review":{"outcome":"updated 或 no_change","reason":"本批保存、合并、清理或纠正了什么（含记忆、Markdown 活页笔记重组/删除或说话人修正），或为何无需改动"}}。
+RECEIPT = '''最后只返回 JSON：{"memory_review":{"outcome":"updated 或 no_change","reason":"本批保存、合并、清理、目录分层重整或纠正了什么（含记忆、Markdown 活页笔记重组/移动/删除或说话人修正），或为何无需改动"}}。
 updated 必须以原生 memory、notebook 或 relabel_speakers 工具成功回执为依据，文字承诺不算写入。工具失败时修正后重试；仍失败则说明失败，不得报告 no_change。'''
-POLICY = '''这是 MoMo Agent 的闲时记忆与生活上下文自治整理（Dream / Autonomous Memory Curation），不是用户的新任务。所有持久产出物均为纯 Markdown（`.md`）：核心摘要保存在 `USER.md` / `MEMORY.md`（通过 `memory` 工具），深层生活脉络保存在 `memories/` 下的纯 Markdown 活页笔记本（通过 `notebook` 工具读写与清理 `BRIEFING.md`、`projects/*.md`、`journal/*.md`、`people/*.md`、`topics/*.md`，严禁往笔记里写 JSON）。
+POLICY = '''这是 MoMo Agent 的闲时记忆与生活上下文自治整理（Dream / Autonomous Memory Curation），不是用户的新任务。所有持久产出物均为纯 Markdown（`.md`）：核心摘要保存在 `USER.md` / `MEMORY.md`（通过 `memory` 工具），深层生活与工作知识库保存在 `memories/` 下的 Obsidian 式纯 Markdown 知识库（通过 `notebook` 工具自由读写、移动与清理 `BRIEFING.md` 及任意多级目录路径 `path`，如 `projects/<项目名>/overview.md`、`projects/<项目名>/双月OKR.md`、`journal/2026-11/2026-11-10.md`、`people/核心团队/小林.md` 或你按领域自建的多级文件夹，严禁往笔记里写 JSON）。
 USER.md 保存用户明确表达的稳定偏好、身份与核心原则；MEMORY.md 保存高优先级个人背景、当前活跃主线、有效承诺及指向深层笔记的索引。
-【核心自治原则：严禁只追加不清理，由你自主决定如何重整、合并与断舍离】
-记忆库绝不是只进不出的垃圾桶或按时间堆砌的流水账。你拥有完整的记忆库园丁自治权，每次整理都必须主动判断“什么该留、什么该合、什么该改写瘦身、什么该直接删”：
-- **主动合并碎片与删除冗余（Merge & Remove）**：若发现多个 `topics/*.md` 主题重叠、或只是某个 `projects/<slug>.md` 下的一次性细枝末节（如单次讨论的小特性、零散外部线索），主动将其有价值的结论并入主项目活页或专题活页，随后调用 `notebook(action='remove', ...)` **直接删除被合并的冗余/碎片文件**，并更新其他笔记对该文件的引用；
-- **以重写替代追加（Rewrite > Append）**：更新 `projects/*.md`、`topics/*.md`、`people/*.md` 时优先使用 `mode='replace'` 按当前最新认知重整结构（现状与有效结论、关键背景、待决卡点），主动剔除已被推翻的旧方案、已解决的琐碎过程拉扯和过时细节，绝不在文末无限追加时间戳段落；
+【核心自治原则：自由组织多级目录 + 严禁只追加不清理，由你自主决定如何分层、重整、合并与断舍离】
+记忆库绝不是死板的一级平铺列表，也不是只进不出的流水账。你拥有完整的 Obsidian 知识库园丁自治权：
+- **自主设计二级 / 多级目录结构（Free Hierarchical Organization）**：不要把几十篇笔记全塞在平铺的一级目录里！当某个在研项目有 ≥2 篇关联文档（如项目总览、OKR、技术架构、排障复盘），或人物/专题/日志数量增多时，主动用 `path`（如 `projects/AI访谈/架构与并发.md`、`people/团队协作/佳辰.md`、`journal/2026-11/2026-11-10.md` 或自建清晰的中文/英文多级目录）进行分层组织，并用 `notebook(action='move', path=..., to_path=...)` 将散落在一级目录的相关笔记归整进对应子目录（同时避免为单篇孤立短文套多层无意义空壳目录）；
+- **主动合并碎片与删除冗余（Merge & Remove）**：若发现多个专题重叠、或只是某项目下的一次性细枝末节，主动将其有价值的结论并入对应活页，随后调用 `notebook(action='remove', path=...)` **直接删除被合并的冗余/碎片文件**，并更新其他笔记对该文件的引用路径；
+- **以重写替代追加（Rewrite > Append）**：更新项目、专题、人物活页时优先使用 `mode='replace'` 按当前最新认知重整结构（现状与有效结论、关键背景、待决卡点），主动剔除已被推翻的旧方案、已解决的琐碎过程拉扯和过时细节，绝不在文末无限追加时间戳段落；
 - **果断清理无价值噪音（Prune Stale & Trivial）**：一次性闲聊、无后续价值的纯排查过程、只有空壳无实质协作信息的人物页、以及 `MEMORY.md` 中已完成或过期的旧条目，由你自主用 `notebook(action='remove')` 或 `memory(action='remove'/'patch')` 清理；
 - **强制规范 `# 一级标题`**：每篇 `.md` 活页首行必须是清晰具体的 `# 标题`（如 `# 日记法与访谈模式发布`），绝不能只写 `## 二级标题` 导致目录显示无标题。
 【排版与可读性铁律】所有记忆与笔记直接面向用户阅读，必须像一位懂你的私人幕僚写的清晰手记：
@@ -240,15 +241,27 @@ def chat_batch(store, data):
     return {"messages": parts, "cursor": end, "remaining": False} if parts else None
 
 
+def _iter_vault_markdown_files(mem_dir: Path) -> list[Path]:
+    if not mem_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for md_file in sorted(mem_dir.rglob("*.md")):
+        if not md_file.is_file():
+            continue
+        try:
+            parts = md_file.relative_to(mem_dir).parts
+        except ValueError:
+            continue
+        if parts and not any(p.startswith(".") for p in parts):
+            out.append(md_file)
+    return out
+
+
 def signature(store, home):
     mem_dir = Path(home) / "memories"
-    files = [mem_dir / name for name in ("MEMORY.md", "USER.md", "BRIEFING.md")]
-    for sub in ("journal", "people", "projects", "topics"):
-        subdir = mem_dir / sub
-        if subdir.is_dir():
-            files.extend(sorted(subdir.glob("*.md")))
+    files = _iter_vault_markdown_files(mem_dir)
     return digest(canonical([CURATION_POLICY_VERSION, state(store, "chat_cursor", [0, 0]), store.revision,
-                            [p.read_text(encoding="utf-8", errors="ignore") if p.exists() else "" for p in files]]))
+                            [f"{p.relative_to(mem_dir).as_posix()}\n{p.read_text(encoding='utf-8', errors='ignore')}" for p in files]]))
 
 
 def enqueue(store, kind, payload):
@@ -295,9 +308,9 @@ def next_review(store, data, now):
     if last and now - last["at"] < DREAM_INTERVAL:
         return None
     notebook_count = sum(
-        len(list((hermes_dir / "memories" / sub).glob("*.md")))
-        for sub in ("journal", "people", "projects", "topics")
-        if (hermes_dir / "memories" / sub).is_dir()
+        1
+        for p in _iter_vault_markdown_files(hermes_dir / "memories")
+        if p.name.upper() not in {"MEMORY.MD", "USER.MD", "BRIEFING.MD"}
     )
     due_periodic_hygiene = bool(last and notebook_count >= 8 and (now - last["at"] >= MAINTENANCE_INTERVAL))
     if last.get("signature") == stamp and not due_periodic_hygiene:
@@ -322,11 +335,12 @@ DREAM_INSTRUCTION = """执行闲时深度 Dream（五阶段认知循环：后验
    - 一旦发现前序归属错误或新确认了真实说话人身份：
      a) 立即调用 `relabel_speakers` 修正录音标签（**若原标签已是具名人物或 `[我]`、仅其中某几段声纹串轨，必须用 `scope='selection'` 并精确传入被误标的 `span_ids`，严禁误伤该人物同场其他正常发言**；若原标签是整组匿名 `[说话人 N]` 确认系同一人，可用 `scope='cluster'`）；
      b) **溯源全量订正**：同步改写受影响的 `journal/*.md`、`projects/*.md`、`topics/*.md`、`people/<原误标人>.md`、`people/<真实说话人>.md` 与 `MEMORY.md`。
-2. 【阶段二：知识库自主断舍离、合并去重与结构重整（`notebook(action='list'/'read'/'write'/'remove')` + `memory`）】
-   - **绝不允许只追加不清理**！先用 `notebook(action='list')` 全盘审视所有现有笔记（重点检查 `topics/`、`people/`、`projects/`、`journal/` 与 `MEMORY.md`），由你自主判断并动手重整：
-     a) **合并碎片与重复专题**：若 `topics/` 下存在多个相近/细碎子笔记，或某些 `topics/*.md` 只是某个在研项目（如 `projects/ai-user-research.md` 或 `projects/external-leads-and-samples.md`）下的一次性讨论细节，主动将其有效结论提炼并入对应主笔记，随后调用 `notebook(action='remove', category='topic', slug=...)` **删除碎片文件**，并修正其他笔记里的旧引用路径；
-     b) **修复缺标题与臃肿流水账**：任何缺少 `# 一级标题`（首行直接是 `##`）或残留 `## 来源与边界` / `remaining_parts` / 裸 UUID 的笔记，立即用 `mode='replace'` 重写为带清晰 `# 标题` 的精炼手记，删掉过时的中间拉扯与已解决琐事；
-     c) **淘汰空壳与过期记忆**：清理无实质信息的空壳 `people/*.md`；在 `MEMORY.md` 中用 `memory(action='remove'/'patch')` 删除已完成事项、一次性琐事或已被项目活页完整承接的旧条目，让 `MEMORY.md` 始终保持精悍高信噪比。
+2. 【阶段二：知识库自主断舍离、多级目录重整与合并去重（`notebook(action='list'/'read'/'write'/'move'/'remove')` + `memory`）】
+   - **自由组织多级目录 + 绝不允许只追加不清理**！先用 `notebook(action='list')` 全盘审视所有现有笔记路径与字数，由你像整理个人 Obsidian 知识库一样自主判断并动手重整：
+     a) **多级目录归档（Directory Hierarchy）**：若某个大项目（如 AI 访谈 / 用研平台、MoMo Agent 等）积累了多篇子专题（总览、OKR、异步架构、排障等），或日志跨月、人物分属不同团队/外部合作方，主动规划清晰的二级/三级目录（如 `projects/AI访谈/overview.md`、`projects/AI访谈/双月OKR.md`、`projects/AI访谈/异步架构.md`、`people/核心团队/小林.md`、`journal/2026-11/2026-11-10.md`，或按领域自建目录），用 `notebook(action='move', path=..., to_path=...)` 移动归整并更新文内引用路径；单篇独立主题则保持简洁层级，不为 1 篇短文套多层空目录；
+     b) **合并碎片与重复专题**：若存在多个相近/细碎子笔记或一次性讨论细节，主动提炼有效结论并入主笔记，随后调用 `notebook(action='remove', path=...)` **删除碎片文件**；
+     c) **修复缺标题与臃肿流水账**：任何缺少 `# 一级标题`（首行直接是 `##`）或残留 `## 来源与边界` / `remaining_parts` / 裸 UUID 的笔记，立即用 `mode='replace'` 重写为带清晰 `# 标题` 的精炼手记，删掉过时的中间拉扯与已解决琐事；
+     d) **淘汰空壳与过期记忆**：清理无实质信息的空壳人物页；在 `MEMORY.md` 中用 `memory(action='remove'/'patch')` 删除已完成事项、一次性琐事或已被项目活页完整承接的旧条目，让 `MEMORY.md` 始终保持精悍高信噪比。
 3. 【阶段三：全天时空拼图与计划对账（`notebook(category='journal')`）】
    - 调用 `phone_context` 读取到访地点（`visits`）、日程（`calendar`）、待办（`reminders`）与作息（`health`），结合当天录音与聊天（`session_search`），将碎片对话按逻辑日用 `mode='replace'` 整合写入 `notebook(action='write', category='journal', slug='YYYY-MM-DD', ...)`。
    - 包含：`# YYYY-MM-DD · <当日主线标题>`、`## 时空与事件脉络`（带 `[HH:MM 原音](momoagent://source/...)` 锚点）、`## 思考火花与决策演变`、`## 承诺与待办对账`（对照日历/提醒事项与口头实际进展）。
@@ -382,7 +396,7 @@ def format_briefing_chat_message(markdown: str) -> str:
             encoded = "/".join(quote(part, safe="") for part in rel.split("/"))
             return f"[📔 {rel}](momoagent://memory/{encoded})"
         return re.sub(
-            r"`((?:projects|topics|people|journal)/[^`\s]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`",
+            r"`((?:[\w\u4e00-\u9fff.-]+/)+[\w\u4e00-\u9fff.-]+\.md|BRIEFING\.md|MEMORY\.md|USER\.md)`",
             _repl,
             line,
         )

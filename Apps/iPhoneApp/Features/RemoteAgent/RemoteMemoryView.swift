@@ -12,33 +12,28 @@ struct RemoteMemoryView: View {
 
     private var allMemories: [ContextMemory] { sync.memories.filter { $0.status != "forgotten" } }
 
-    private var directoryFolders: [DreamMemorySection] {
-        DreamMemoryCategory.directoryFolders(from: allMemories)
+    private var vaultTree: MemoryVaultTree {
+        MemoryVaultTree.build(from: allMemories)
     }
 
     private var trimmedQuery: String {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var sections: [DreamMemorySection] {
-        let q = trimmedQuery
-        guard !q.isEmpty else { return directoryFolders }
-        return directoryFolders.compactMap { folder in
-            let matches = folder.items.filter { item in
-                let digest = MemoryCardDigest.cached(for: item)
-                return digest.title.localizedStandardContains(q)
-                    || item.text.localizedStandardContains(q)
-                    || digest.badge.title.localizedStandardContains(q)
-            }
-            return matches.isEmpty
-                ? nil
-                : DreamMemorySection(id: folder.id, title: folder.title, subtitle: folder.subtitle, items: matches)
-        }
+    private var visibleTree: MemoryVaultTree {
+        vaultTree.filtered(matching: trimmedQuery)
+    }
+
+    private var showsSingleFlatCoreOnly: Bool {
+        visibleTree.rootItems.isEmpty
+            && visibleTree.rootFolders.count == 1
+            && visibleTree.rootFolders[0].id == "core"
+            && visibleTree.rootFolders[0].subfolders.isEmpty
     }
 
     private var allFoldersExpanded: Bool {
-        let current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
-        return !directoryFolders.isEmpty && directoryFolders.allSatisfy { current.contains($0.id) }
+        let current = expandedFolderIDs ?? vaultTree.defaultExpandedFolderIDs
+        return !vaultTree.allFolderIDs.isEmpty && vaultTree.allFolderIDs.isSubset(of: current)
     }
 
     private func toggleAllFolders() {
@@ -46,7 +41,7 @@ struct RemoteMemoryView: View {
             if allFoldersExpanded {
                 expandedFolderIDs = []
             } else {
-                expandedFolderIDs = DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
+                expandedFolderIDs = vaultTree.allFolderIDs
             }
         }
     }
@@ -55,12 +50,12 @@ struct RemoteMemoryView: View {
         if !trimmedQuery.isEmpty {
             return true
         }
-        let current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
+        let current = expandedFolderIDs ?? vaultTree.defaultExpandedFolderIDs
         return current.contains(folderID)
     }
 
     private func toggleFolder(_ folderID: String) {
-        var current = expandedFolderIDs ?? DreamMemoryCategory.defaultExpandedFolderIDs(for: directoryFolders)
+        var current = expandedFolderIDs ?? vaultTree.defaultExpandedFolderIDs
         if current.contains(folderID) {
             current.remove(folderID)
         } else {
@@ -103,7 +98,7 @@ struct RemoteMemoryView: View {
                     .padding(.vertical, 4)
             }
 
-            if sections.isEmpty {
+            if visibleTree.isEmpty {
                 ScrollView {
                     VStack(spacing: 16) {
                         ContentUnavailableView {
@@ -129,39 +124,75 @@ struct RemoteMemoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(sections) { section in
-                            let showHeader = sections.count > 1 || section.id != "core"
-                            let expanded = !showHeader || isFolderExpanded(section.id)
+                        if !visibleTree.rootItems.isEmpty {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(visibleTree.rootItems.enumerated()), id: \.element.id) { idx, memory in
+                                    if idx > 0 {
+                                        Divider()
+                                            .overlay(colors.line.opacity(0.55))
+                                            .padding(.leading, 34)
+                                    }
+                                    directoryNoteRow(memory, colors: colors)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            .background(colors.paper, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .strokeBorder(colors.line.opacity(0.8), lineWidth: 0.7)
+                            }
+                        }
+
+                        ForEach(visibleTree.rootFolders) { rootFolder in
+                            let showHeader = !showsSingleFlatCoreOnly
+                            let expanded = !showHeader || isFolderExpanded(rootFolder.id)
+                            let childRows = expanded ? flattenedSubtreeRows(under: rootFolder, baseDepth: showHeader ? 1 : 0) : []
 
                             VStack(alignment: .leading, spacing: 0) {
                                 if showHeader {
-                                    MemoryDirectoryFolderHeader(
-                                        section: section,
+                                    VaultFolderHeaderRow(
+                                        node: rootFolder,
                                         isExpanded: expanded,
-                                        onToggle: { toggleFolder(section.id) }
+                                        onToggle: { toggleFolder(rootFolder.id) }
                                     )
                                 }
 
                                 if expanded {
                                     VStack(alignment: .leading, spacing: 0) {
-                                        ForEach(Array(section.items.enumerated()), id: \.element.id) { idx, memory in
-                                            if idx > 0 {
-                                                Divider()
-                                                    .overlay(colors.line.opacity(0.55))
-                                                    .padding(.leading, 34)
+                                        ForEach(Array(childRows.enumerated()), id: \.element.id) { idx, row in
+                                            switch row {
+                                            case let .subfolder(subNode, expandedSub, indentLevel):
+                                                if idx > 0 {
+                                                    Divider()
+                                                        .overlay(colors.line.opacity(0.45))
+                                                        .padding(.leading, CGFloat(indentLevel) * 14 + 12)
+                                                }
+                                                VaultFolderHeaderRow(
+                                                    node: subNode,
+                                                    isExpanded: expandedSub,
+                                                    onToggle: { toggleFolder(subNode.id) }
+                                                )
+                                                .padding(.leading, CGFloat(indentLevel) * 14)
+                                                .overlay(alignment: .leading) {
+                                                    treeGuideLines(levels: indentLevel, colors: colors)
+                                                }
+
+                                            case let .note(memory, indentLevel, isFirstInGroup):
+                                                if idx > 0 && !isFirstInGroup {
+                                                    Divider()
+                                                        .overlay(colors.line.opacity(0.55))
+                                                        .padding(.leading, CGFloat(indentLevel) * 14 + 34)
+                                                } else if idx > 0 {
+                                                    Divider()
+                                                        .overlay(colors.line.opacity(0.45))
+                                                        .padding(.leading, CGFloat(indentLevel) * 14 + 12)
+                                                }
+                                                directoryNoteRow(memory, colors: colors)
+                                                    .padding(.leading, CGFloat(indentLevel) * 14)
+                                                    .overlay(alignment: .leading) {
+                                                        treeGuideLines(levels: indentLevel, colors: colors)
+                                                    }
                                             }
-                                            directoryNoteRow(memory, colors: colors)
-                                        }
-                                    }
-                                    .padding(.leading, showHeader ? 12 : 0)
-                                    .overlay(alignment: .leading) {
-                                        if showHeader {
-                                            Rectangle()
-                                                .fill(colors.line.opacity(0.75))
-                                                .frame(width: 1)
-                                                .padding(.leading, 16)
-                                                .padding(.vertical, 4)
-                                                .accessibilityHidden(true)
                                         }
                                     }
                                 }
@@ -197,7 +228,7 @@ struct RemoteMemoryView: View {
             prompt: "搜索笔记、项目、人物…"
         )
         .toolbar {
-            if directoryFolders.count > 1 && trimmedQuery.isEmpty {
+            if !showsSingleFlatCoreOnly && !vaultTree.allFolderIDs.isEmpty && trimmedQuery.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(allFoldersExpanded ? "全部折叠" : "全部展开",
                            systemImage: allFoldersExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
@@ -295,9 +326,102 @@ struct RemoteMemoryView: View {
         .accessibilityIdentifier("remote.memorySyncStatus")
     }
 
+    private enum SubtreeRow: Identifiable {
+        case subfolder(MemoryVaultFolderNode, Bool, Int)
+        case note(ContextMemory, Int, Bool)
+
+        var id: String {
+            switch self {
+            case let .subfolder(node, _, _): return "folder:\(node.id)"
+            case let .note(memory, _, _): return memory.id
+            }
+        }
+    }
+
+    private func flattenedSubtreeRows(under folder: MemoryVaultFolderNode, baseDepth: Int) -> [SubtreeRow] {
+        var result: [SubtreeRow] = []
+
+        func walk(_ node: MemoryVaultFolderNode, indentLevel: Int) {
+            for sub in node.subfolders {
+                let subExpanded = isFolderExpanded(sub.id)
+                result.append(.subfolder(sub, subExpanded, indentLevel))
+                if subExpanded {
+                    walk(sub, indentLevel: indentLevel + 1)
+                }
+            }
+            for (idx, item) in node.directItems.enumerated() {
+                result.append(.note(item, indentLevel, idx == 0 && !node.subfolders.isEmpty))
+            }
+        }
+
+        walk(folder, indentLevel: baseDepth)
+        return result
+    }
+
+    @ViewBuilder
+    private func treeGuideLines(levels: Int, colors: MemoryNotebookPalette) -> some View {
+        if levels > 0 {
+            ZStack(alignment: .leading) {
+                ForEach(0..<levels, id: \.self) { level in
+                    Rectangle()
+                        .fill(colors.line.opacity(0.75))
+                        .frame(width: 1)
+                        .padding(.leading, 16 + CGFloat(level) * 14)
+                }
+            }
+            .accessibilityHidden(true)
+        }
+    }
+
     private var sourceStatus: String {
         if sync.pendingSources > 0 { return String(localized: "\(sync.pendingSources) 份待送达") }
         return sync.lastSourcesSent == nil ? String(localized: "尚未同步") : String(localized: "已同步")
+    }
+}
+
+private struct VaultFolderHeaderRow: View {
+    let node: MemoryVaultFolderNode
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let colors = MemoryNotebookPalette(scheme: scheme)
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(colors.secondaryInk)
+                    .frame(width: 13)
+                    .accessibilityHidden(true)
+
+                Image(systemName: DreamMemoryCategory.folderSymbol(for: node.id, depth: node.depth))
+                    .font(.system(size: node.depth == 0 ? 13 : 12.5, weight: .medium))
+                    .foregroundStyle(colors.tabAccent(node.accentKind))
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+
+                Text(node.name)
+                    .font(.system(size: node.depth == 0 ? 14 : 13.5, weight: node.depth == 0 ? .semibold : .medium))
+                    .foregroundStyle(colors.ink)
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+
+                Text("\(node.totalItemCount)")
+                    .font(.system(size: 11.5, weight: .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(colors.secondaryInk)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, node.depth == 0 ? 9 : 8)
+            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(node.name)，\(node.totalItemCount) 篇")
+        .accessibilityHint(isExpanded ? "点击折叠文件夹" : "点击展开文件夹")
+        .accessibilityIdentifier("remote.memoryFolder.\(node.id)")
     }
 }
 
@@ -324,17 +448,6 @@ private struct RemoteMemoryDetail: View {
 
     private var memory: ContextMemory? {
         activeMemories.first { $0.id == memoryID }
-    }
-
-    private func folderBreadcrumbTitle(for kind: String) -> String {
-        switch kind {
-        case "project": return "在研项目"
-        case "briefing": return "晨间简报"
-        case "topic": return "专题活页"
-        case "person": return "人物档案"
-        case "journal": return "每日日志"
-        default: return "核心记忆"
-        }
     }
 
     private func openLinked(_ nextID: String) {
@@ -437,9 +550,11 @@ private struct RemoteMemoryDetail: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 if let memory {
-                    Text(folderBreadcrumbTitle(for: memory.kind))
+                    Text(MemoryVaultTree.breadcrumbText(for: memory))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(colors.secondaryInk)
+                        .lineLimit(1)
+                        .truncationMode(.head)
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
