@@ -160,6 +160,9 @@ final class DesktopModel {
         lifeIllustrations = LifeIllustrationStore(directory: dataDirectory.appendingPathComponent("life-illustrations-cache"))
         tailnet = EmbeddedTailnet(directory: dataDirectory.appendingPathComponent("tailscale"), device: "mac")
         setupStep = SetupStep(rawValue: UserDefaults.standard.string(forKey: "setup." + dataDirectory.path) ?? "welcome") ?? .welcome
+        if let initialSelection = argument("--selection") {
+            selection = initialSelection
+        }
         loadDayBoundaryConfiguration()
     }
 
@@ -211,6 +214,13 @@ final class DesktopModel {
         if connection != nil {
             Task { [weak self] in
                 await self?.loadContext(silent: true)
+            }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--open-settings") {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(500))
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             }
         }
     }
@@ -583,8 +593,14 @@ final class DesktopModel {
         process.currentDirectoryURL = repository
         let log = dataDirectory.appendingPathComponent("runtime/desktop-" + URL(fileURLWithPath: script).deletingPathExtension().lastPathComponent + ".log")
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: log.path),
+           let size = attrs[.size] as? UInt64, size > 2_097_152 {
+            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        } else if !FileManager.default.fileExists(atPath: log.path) {
+            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         let handle = try FileHandle(forWritingTo: log)
+        try? handle.seekToEnd()
         process.standardOutput = handle; process.standardError = handle
         try process.run(); try handle.close()
         if let recorded = try? JSONEncoder().encode(RecordedProcess(pid: process.processIdentifier, repository: repository.resolvingSymlinksInPath().path)) {

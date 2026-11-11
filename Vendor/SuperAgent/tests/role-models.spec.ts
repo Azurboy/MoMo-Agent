@@ -4,7 +4,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { agentEvents, installModelSelection, type Agent, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { initializeRoleModel } from '../src/app/role-models.ts'
+import { initializeRoleModel, syncRoleModel } from '../src/app/role-models.ts'
 const contexts: Context[] = []
 afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose())); vi.restoreAllMocks() })
 async function fixture() {
@@ -62,4 +62,22 @@ it('inherits the host when unset and fails unavailable routes before recording a
   resolve.mockRejectedValueOnce(new Error('unknown provider'))
   await expect(initializeRoleModel(ctx, agent, { provider: 'unknown', model: 'x' })).rejects.toThrow('unknown provider')
   expect(agent.session.snapshotEvents().some(event => event.type === 'model/selection')).toBe(false)
+})
+it('switches a resumed persistent Session onto a newly configured provider via syncRoleModel or MOMO_DATA_DIR', async () => {
+  const { ctx, agent, request, record } = await fixture()
+  record({ provider: 'openai-codex', model: 'gpt-6.1-sol' })
+  await syncRoleModel(ctx, agent, { provider: 'antigravity', model: 'gemini-4-carbon-low' })
+  expect((await ctx.systemPrompt.assemble()).variables).toMatchObject({ provider: 'antigravity', model: 'gemini-4-carbon-low' })
+  expect(await request()).toEqual({ provider: 'antigravity', model: 'gemini-4-carbon-low' })
+  record({ provider: 'antigravity', model: 'gemini-4-carbon-low' })
+  const prevDir = process.env.MOMO_DATA_DIR
+  process.env.MOMO_DATA_DIR = '/tmp/momo-test-data'
+  try {
+    await initializeRoleModel(ctx, agent, { provider: 'anthropic', model: 'claude-sonnet-4-6' })
+    expect((await ctx.systemPrompt.assemble()).variables).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-4-6' })
+    expect(await request()).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-6' })
+  } finally {
+    if (prevDir === undefined) delete process.env.MOMO_DATA_DIR
+    else process.env.MOMO_DATA_DIR = prevDir
+  }
 })

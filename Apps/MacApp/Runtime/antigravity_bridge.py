@@ -514,6 +514,13 @@ def run_antigravity_completion(
             if isinstance(js, dict) and isinstance(js.get("schema"), dict):
                 effective_schema = js["schema"]
 
+    if len(prompt.encode("utf-8")) > 160_000:
+        head = prompt[:64_000]
+        tail = prompt[-64_000:]
+        prompt = f"{head}\n\n...[中间较早上下文已自动压缩以适配 CLI 参数上限]...\n\n{tail}"
+
+    sandbox_dir = _empty_sandbox_dir(data_dir)
+    schema_file: Path | None = None
     cmd = [
         cli,
         "-p",
@@ -526,18 +533,29 @@ def run_antigravity_completion(
         "json",
     ]
     if effective_schema is not None:
-        cmd.extend(["--json-schema", json.dumps(effective_schema, ensure_ascii=False)])
+        schema_str = json.dumps(effective_schema, ensure_ascii=False)
+        if len(schema_str.encode("utf-8")) > 8_192:
+            schema_file = sandbox_dir / f"schema-{uuid.uuid4().hex}.json"
+            schema_file.write_text(schema_str, encoding="utf-8")
+            cmd.extend(["--json-schema", str(schema_file)])
+        else:
+            cmd.extend(["--json-schema", schema_str])
 
-    proc = subprocess.run(
-        cmd,
-        cwd=str(_empty_sandbox_dir(data_dir)),
-        env=_agy_env(),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(sandbox_dir),
+            env=_agy_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    finally:
+        if schema_file is not None:
+            with contextlib.suppress(OSError):
+                schema_file.unlink()
     if proc.returncode != 0:
         detail = ANSI_ESCAPE_RE.sub("", (proc.stderr or proc.stdout or "").strip())
         raise RuntimeError(detail[:400] or f"agy exited with status {proc.returncode}")

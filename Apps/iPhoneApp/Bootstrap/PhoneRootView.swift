@@ -26,6 +26,15 @@ struct PhoneRootView: View {
         .onChange(of: showingSettings) { _, _ in updateChatVisibility() }
         .onChange(of: scenePhase) { _, _ in updateChatVisibility() }
         .task {
+            #if DEBUG
+            if let initial = ProcessInfo.processInfo.environment["MOMO_UI_TEST_INITIAL_TAB"] {
+                switch initial {
+                case "transcripts", "timeline": selectedTab = .transcripts
+                case "memory", "memories": selectedTab = .memory
+                default: selectedTab = .chat
+                }
+            }
+            #endif
             if runtime.remoteAgent.notifications.route.pending != nil { selectedTab = .chat; showingSettings = false }
             updateChatVisibility()
             if scenePhase == .active { await runtime.foreground() } else { await runtime.start() }

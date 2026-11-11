@@ -14,7 +14,8 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
-import { initializeRoleModel } from './role-models.ts'
+import { initializeRoleModel, syncRoleModel } from './role-models.ts'
+import type { RoleModel } from '../policy.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
@@ -190,6 +191,31 @@ export class Sessions {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
+  private effectiveRoleModel(role: 'orchestrator' | 'worker'): RoleModel | null {
+    const settings = this.host.store.settings()
+    const configured = role === 'orchestrator' ? settings.eval.model : settings.executor.model
+    const momoProvider = process.env.MOMO_LLM_PROVIDER?.trim()
+    const momoModel = process.env.MOMO_LLM_MODEL?.trim()
+    if (momoProvider && momoModel) {
+      if (configured && configured.provider === momoProvider && configured.model === momoModel) return configured
+      return { provider: momoProvider, model: momoModel }
+    }
+    return configured
+  }
+  /** Updates live loaded sessions for `role` when `eval.model` or `executor.model` changes in Settings. */
+  async syncRoleModel(role: 'orchestrator' | 'worker', model: RoleModel | null): Promise<void> {
+    if (!model) return
+    if (role === 'orchestrator') {
+      const master = this.ctx.agents.get(this.host.masterId as SessionId)
+      if (master) await syncRoleModel(this.ctx, master, model)
+      return
+    }
+    for (const [agent, binding] of this.bindings.entries()) {
+      if (agent.id !== this.host.masterId && !binding.subagent) {
+        await syncRoleModel(this.ctx, agent, model)
+      }
+    }
+  }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
     const ctx = this.ctx
@@ -202,8 +228,7 @@ export class Sessions {
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
-    const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    await initializeRoleModel(ctx, result.agent, this.effectiveRoleModel(role))
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
@@ -219,6 +244,13 @@ export class Sessions {
     accepted?: () => void): Promise<void> {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
+    if (process.env.MOMO_DATA_DIR?.trim() && mode !== 'steer' && typeof mode === 'string') {
+      const role = sessionId === this.host.masterId ? 'orchestrator' : this.ticketOf(result.agent) ? 'worker' : undefined
+      if (role) await syncRoleModel(this.ctx, result.agent, this.effectiveRoleModel(role))
+    } else if (process.env.MOMO_DATA_DIR?.trim() && mode === 'steer') {
+      const role = sessionId === this.host.masterId ? 'orchestrator' : this.ticketOf(result.agent) ? 'worker' : undefined
+      if (role) await syncRoleModel(this.ctx, result.agent, this.effectiveRoleModel(role))
+    }
     await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
   }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */

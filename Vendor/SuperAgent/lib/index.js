@@ -7633,18 +7633,41 @@ async function resolveRoleModel(ctx, model) {
 		...value.reasoningEffort ? { reasoningEffort: value.reasoningEffort } : {}
 	};
 }
-/** Seed a role's configured model onto a brand-new session before its first request, leaving later manual or durable selections intact. */
-async function initializeRoleModel(ctx, agent, model) {
-	if (!model) return;
-	if (agent.session.requestHeader() || agent.session.snapshotEvents().some((event) => event.type === "model/selection")) return;
-	const selected = await resolveRoleModel(ctx, model);
-	agent.session.append("model/selection", selected);
-	let initial = true;
+function sameSelection(left, right) {
+	return left !== void 0 && left.provider === right.provider && left.model === right.model && (left.reasoningEffort ?? void 0) === (right.reasoningEffort ?? void 0);
+}
+function currentSessionSelection(agent) {
+	const events = agent.session.snapshotEvents();
+	for (let i = events.length - 1; i >= 0; i--) {
+		const event = events[i];
+		if (event.type === "model/selection" && event.data && typeof event.data === "object") {
+			const sel = event.data;
+			if (sel.provider && sel.model) return sel;
+		}
+		if (event.type === "request/header" && event.data && typeof event.data === "object") {
+			const cfg = event.data.header?.config;
+			if (cfg?.provider && cfg?.model) return cfg;
+		}
+	}
+	const header = agent.session.requestHeader()?.config;
+	return header?.provider && header?.model ? header : void 0;
+}
+const activeOverrides = /* @__PURE__ */ new WeakMap();
+function installSelectionOverride(ctx, agent, initialSelection) {
+	const existing = activeOverrides.get(agent);
+	if (existing) {
+		existing.update(initialSelection);
+		return;
+	}
+	let pending = initialSelection;
 	let assembled;
+	activeOverrides.set(agent, { update(selection) {
+		pending = selection;
+	} });
 	agent.ctx.effect(() => {
 		const disposers = [
 			agent.ctx.on("system-prompt/assemble", async (_assembly, _context, next) => {
-				const selection = initial ? selected : void 0;
+				const selection = pending;
 				const result = await next();
 				assembled = selection;
 				return selection ? {
@@ -7666,12 +7689,38 @@ async function initializeRoleModel(ctx, agent, model) {
 				};
 			}, { prepend: true }),
 			ctx.on("session/event", (session, event) => {
-				if (session === agent.session && (event.type === "request/header" || event.type === "model/selection")) initial = false;
+				if (session !== agent.session || !pending) return;
+				if (event.type === "model/selection") {
+					const nextSel = event.data;
+					if (nextSel && !sameSelection(pending, nextSel)) pending = void 0;
+				} else if (event.type === "request/header") {
+					const cfg = event.data?.header?.config;
+					if (!cfg || sameSelection(pending, cfg)) pending = void 0;
+				}
 			})
 		];
-		return () => disposers.forEach((dispose) => dispose());
+		return () => {
+			activeOverrides.delete(agent);
+			disposers.forEach((dispose) => dispose());
+		};
 	});
+}
+/** Actively align an existing or newly created session with its configured role model without mutating the global DSH default. */
+async function syncRoleModel(ctx, agent, model) {
+	if (!model) return;
+	const current = currentSessionSelection(agent);
+	if (current && current.provider === model.provider && current.model === model.model && (current.reasoningEffort ?? void 0) === (model.reasoningEffort ?? void 0)) return;
+	const selected = await resolveRoleModel(ctx, model);
+	if (sameSelection(current, selected)) return;
+	installSelectionOverride(ctx, agent, selected);
+	agent.session.append("model/selection", selected);
 	await ctx.sessionPersistence.flush();
+}
+/** Seed a role's configured model onto a brand-new session before its first request, or sync resumed sessions in MoMo desktop mode. */
+async function initializeRoleModel(ctx, agent, model) {
+	if (!model) return;
+	if (Boolean(agent.session.requestHeader() || agent.session.snapshotEvents().some((event) => event.type === "model/selection")) && !process.env.MOMO_DATA_DIR?.trim()) return;
+	await syncRoleModel(ctx, agent, model);
 }
 //#endregion
 //#region src/app/setup.ts
@@ -8014,6 +8063,8 @@ var Settings = class {
 			if (origin !== "tool") sessions.notify(...settingsNotice(block, changedPaths(old, settings)));
 			if (before !== after) engine.policyChanged(before, after, effects);
 		});
+		if (block === "eval" && JSON.stringify(settings.eval.model) !== JSON.stringify(old.eval.model)) await sessions.syncRoleModel?.("orchestrator", settings.eval.model);
+		else if (block === "executor" && JSON.stringify(settings.executor.model) !== JSON.stringify(old.executor.model)) await sessions.syncRoleModel?.("worker", settings.executor.model);
 		const blocked = settings.executor.blockedCommands;
 		if (blocked.join(" ") !== old.executor.blockedCommands.join(" ")) await this.host.setup.blockCommands(blocked);
 		const delivery = restarting ? "pending" : await sessions.delivery(`settings:${block}`);
@@ -9358,6 +9409,30 @@ var Sessions = class {
 			}
 		});
 	}
+	effectiveRoleModel(role) {
+		const settings = this.host.store.settings();
+		const configured = role === "orchestrator" ? settings.eval.model : settings.executor.model;
+		const momoProvider = process.env.MOMO_LLM_PROVIDER?.trim();
+		const momoModel = process.env.MOMO_LLM_MODEL?.trim();
+		if (momoProvider && momoModel) {
+			if (configured && configured.provider === momoProvider && configured.model === momoModel) return configured;
+			return {
+				provider: momoProvider,
+				model: momoModel
+			};
+		}
+		return configured;
+	}
+	/** Updates live loaded sessions for `role` when `eval.model` or `executor.model` changes in Settings. */
+	async syncRoleModel(role, model) {
+		if (!model) return;
+		if (role === "orchestrator") {
+			const master = this.ctx.agents.get(this.host.masterId);
+			if (master) await syncRoleModel(this.ctx, master, model);
+			return;
+		}
+		for (const [agent, binding] of this.bindings.entries()) if (agent.id !== this.host.masterId && !binding.subagent) await syncRoleModel(this.ctx, agent, model);
+	}
 	/** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
 	async ensure(id, cwd, title, role) {
 		const ctx = this.ctx;
@@ -9372,8 +9447,7 @@ var Sessions = class {
 			result = await ctx.sessionController.resolveAgent(id);
 		}
 		if ("error" in result) throw result.error;
-		const settings = this.host.store.settings();
-		await initializeRoleModel(ctx, result.agent, role === "orchestrator" ? settings.eval.model : settings.executor.model);
+		await initializeRoleModel(ctx, result.agent, this.effectiveRoleModel(role));
 		await this.decorate(result.agent);
 		ctx.permissionPresets.set(result.agent.session, "danger-full-access");
 		await ctx.sessionController.rename({
@@ -9391,6 +9465,13 @@ var Sessions = class {
 	async prompt(sessionId, requestId, text, mode, authorize, accepted) {
 		const result = await this.ctx.sessionController.resolveAgent(sessionId);
 		if ("error" in result) throw result.error;
+		if (process.env.MOMO_DATA_DIR?.trim() && mode !== "steer" && typeof mode === "string") {
+			const role = sessionId === this.host.masterId ? "orchestrator" : this.ticketOf(result.agent) ? "worker" : void 0;
+			if (role) await syncRoleModel(this.ctx, result.agent, this.effectiveRoleModel(role));
+		} else if (process.env.MOMO_DATA_DIR?.trim() && mode === "steer") {
+			const role = sessionId === this.host.masterId ? "orchestrator" : this.ticketOf(result.agent) ? "worker" : void 0;
+			if (role) await syncRoleModel(this.ctx, result.agent, this.effectiveRoleModel(role));
+		}
 		await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted);
 	}
 	/** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */

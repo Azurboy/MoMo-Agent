@@ -368,11 +368,15 @@ def prepared_dsh_binary(data: Path) -> Path:
     runner = superagent_runner_dir(data)
     marker = runner / "prepared.json"
     binary = runner / "node_modules/.bin/dsh"
-    if not marker.is_file() or not binary.exists():
+    installed_bundle = runner / "node_modules/dsh-superagent/lib/index.js"
+    if not marker.is_file() or not binary.exists() or not installed_bundle.is_file():
         raise ValueError("SuperAgent runtime is not prepared; run `momo_agent.py prepare` first")
     record = json.loads(marker.read_text(encoding="utf-8"))
-    if _superagent_identity(record) != _superagent_identity(superagent_fingerprint()):
+    fingerprint = superagent_fingerprint()
+    if _superagent_identity(record) != _superagent_identity(fingerprint):
         raise ValueError("SuperAgent bundle changed; re-run `momo_agent.py prepare`")
+    if hashlib.sha256(installed_bundle.read_bytes()).hexdigest() != fingerprint["bundle_sha256"]:
+        raise ValueError("Installed SuperAgent bundle is stale; re-run `momo_agent.py prepare`")
     return binary
 
 

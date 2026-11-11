@@ -396,6 +396,7 @@ class SuperAgentGateway:
         self._cached_decisions: list[dict] = []
         self._cached_state: dict = {}
         self._unsubscribed_legacy_threads: set[str] = set()
+        self._ticket_auto_retries: dict[str, tuple[int, str]] = {}
         self._source_meta_cache: dict[str, tuple[str | None, float | None]] = {}
         self._active_api_runs: set[str] = set()
         self._stopping = False
@@ -764,7 +765,10 @@ class SuperAgentGateway:
         env.update(instance["llm_env"])
         env["DSH_HOME"] = str(instance["dsh_home"])
         env["MOMO_DATA_DIR"] = str(self.data)
+        env["MOMO_LLM_PROVIDER"] = str(self.dsh_provider)
+        env["MOMO_LLM_MODEL"] = str(self.model_name)
         env["MOMO_COMPUTER_BRIDGE"] = f"http://127.0.0.1:{self.connection['port']}"
+        self._ticket_auto_retries.clear()
         env["DSH_SUPERAGENT_MOMO_CLI"] = str(instance["state_dir"] / "momo-cli")
         env["DSH_SUPERAGENT_MOMO_WORKSPACE"] = str(workspace_dir)
         log_path = self.data / "superagent/dsh.log"
@@ -871,6 +875,7 @@ class SuperAgentGateway:
                         raise RuntimeError(f"DSH runtime reported error state: {fetched[0].get('health', {}).get('runtime')}")
                     self._dsh_consecutive_failures = 0
                     self._apply_dsh_projections(*fetched)
+                    await asyncio.to_thread(self._recover_interrupted_tickets, fetched[0], fetched[1])
                     await asyncio.to_thread(self._unsubscribe_ended_transcript_threads, fetched[1])
                     self.publish_live_state()
                 except Exception as exc:
@@ -921,6 +926,38 @@ class SuperAgentGateway:
                 if code in code_labels:
                     parts.append(code_labels[code])
         return "；".join(parts) if parts else None
+
+    def _recover_interrupted_tickets(self, state: dict, tickets: list[dict]) -> None:
+        """Auto-retry open tickets paused in transient `blocked` state (without human attention) once per dsh boot."""
+        if not self.dsh_ready or (isinstance(state, dict) and state.get("paused")):
+            return
+        for t in tickets:
+            if not isinstance(t, dict) or t.get("ended"):
+                continue
+            if str(t.get("state") or "") != "open" or str(t.get("action") or "") != "blocked":
+                continue
+            if t.get("attention"):
+                continue
+            actions = t.get("actions")
+            if not (isinstance(actions, dict) and actions.get("retry") is True):
+                continue
+            tid = str(t.get("id") or "").strip()
+            if not tid:
+                continue
+            prev_count, _ = self._ticket_auto_retries.get(tid, (0, ""))
+            if prev_count >= 1:
+                continue
+            updated_at = str(t.get("updatedAt") or "")
+            self._ticket_auto_retries[tid] = (prev_count + 1, updated_at)
+            with suppress(Exception):
+                dsh_api_request(
+                    self.dsh_port,
+                    "POST",
+                    f"/orchestrator/api/tickets/{quote(tid, safe='')}/retry",
+                    {},
+                    timeout=4.0,
+                )
+                log.info("Auto-retrying interrupted blocked ticket %s", tid)
 
     def _unsubscribe_ended_transcript_threads(self, tickets: list[dict]) -> None:
         """Drop ended tickets' subscriptions to transcript threads so subsequent recording chunks never force-reopen ended tickets."""
@@ -985,7 +1022,7 @@ class SuperAgentGateway:
         self._cached_decisions = decisions
 
         decisions_by_trigger: dict[str, dict] = {}
-        for dec in decisions:
+        for dec in reversed(decisions):
             if not isinstance(dec, dict):
                 continue
             raw_trigs = dec.get("triggerIds")
@@ -998,6 +1035,17 @@ class SuperAgentGateway:
         tickets_by_id = {t["id"]: t for t in tickets if isinstance(t, dict) and t.get("id")}
 
         now = time.time()
+        health = state.get("health") if isinstance(state, dict) and isinstance(state.get("health"), dict) else {}
+        assess_h = health.get("assessment") if isinstance(health.get("assessment"), dict) else {}
+        relay_h = health.get("relay") if isinstance(health.get("relay"), dict) else {}
+        orch_idle = (
+            isinstance(state, dict)
+            and not state.get("paused")
+            and assess_h.get("state") == "ready"
+            and assess_h.get("detail") == "Nothing waiting"
+            and relay_h.get("state") == "ready"
+            and relay_h.get("detail") == "Nothing waiting"
+        )
         active_rows = self.bridge.db.execute(
             "SELECT * FROM chat_runs WHERE status IN ('queued', 'started', 'waiting_for_input')"
         ).fetchall()
@@ -1036,9 +1084,65 @@ class SuperAgentGateway:
                 elif t_action == "failed" or ended_outcome == "failed" or t_state == "failed":
                     new_status = "failed"
                     err = "执行未完成，请核对已有结果。"
+                elif t_action == "blocked" and not ticket.get("attention"):
+                    prev_count, prev_updated = self._ticket_auto_retries.get(str(ticket_id), (0, ""))
+                    if prev_count >= 1 and str(ticket.get("updatedAt") or "") != prev_updated:
+                        new_status = "failed"
+                        wait_reason = None
+                        err = "执行受阻未完成，请核对已有结果或重试。"
                 elif ended_outcome in ("dropped",) or t_state in ("dropped",):
                     new_status = "completed"
                     wait_reason = None
+            elif row["status"] in ("queued", "started") and not ticket_id and trig_id:
+                has_reply = self.store.db.execute(
+                    "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1",
+                    (row["run_id"],),
+                ).fetchone()
+                trig_row = self.bridge.db.execute(
+                    "SELECT * FROM triggers WHERE id=?",
+                    (trig_id,),
+                ).fetchone()
+                is_unavailable = bool(dec and dec.get("kind") == "unavailable")
+                polled_at = float(trig_row["polled_at"]) if (trig_row and trig_row["polled_at"] is not None) else None
+                if has_reply and orch_idle and polled_at is not None and (now - polled_at) >= 10.0:
+                    new_status = "completed"
+                    wait_reason = None
+                elif trig_row is not None and polled_at is not None and orch_idle and (
+                    (is_unavailable and (now - polled_at) >= 45.0)
+                    or ((now - polled_at) >= 120.0 and (now - float(row["updated_at"])) >= 120.0)
+                ):
+                    gen = int(row["execution_generation"] or 1)
+                    if gen < 2:
+                        base_trig = str(trig_id).split("-r")[0]
+                        retry_trig_id = f"{base_trig}-r{gen}"
+                        with self.bridge.db:
+                            self.bridge.db.execute(
+                                """UPDATE chat_runs
+                                   SET trigger_id=?, status='queued', execution_generation=?, error=NULL, updated_at=?
+                                   WHERE run_id=?""",
+                                (retry_trig_id, gen + 1, now, row["run_id"]),
+                            )
+                        self.bridge.enqueue_trigger(
+                            trigger_id=retry_trig_id,
+                            kind=trig_row["kind"],
+                            thread_id=trig_row["thread_id"],
+                            message_id=f"{trig_row['message_id']}-r{gen}",
+                            actor_id=trig_row["actor_id"],
+                            actor_name=trig_row["actor_name"] or "User",
+                            addressed=bool(trig_row["addressed"]),
+                            human=bool(trig_row["human"]),
+                            observed=bool(trig_row["observed"]),
+                            text=trig_row["text"],
+                            source_id=trig_row["source_id"],
+                            title=trig_row["title"],
+                            run_id=row["run_id"],
+                        )
+                        self._trigger_wakeup.set()
+                        log.info("Auto-retrying interrupted chat run %s with %s", row["run_id"], retry_trig_id)
+                        continue
+                    new_status = "failed"
+                    wait_reason = None
+                    err = "模型切换或连接中断导致任务未完成，请重新发送。"
             if (new_status, ticket_id, wait_reason, err) != (row["status"], row["ticket_id"], row["wait_reason"], row["error"]):
                 with self.bridge.db:
                     self.bridge.db.execute(
@@ -4341,7 +4445,11 @@ def run_superagent_gateway(data: Path, connection: dict, *, python_executable: P
     from context_server import ContextService
 
     resolve_superagent_llm(data)
-    prepared_dsh_binary(data)
+    try:
+        prepared_dsh_binary(data)
+    except ValueError:
+        prepare_superagent(data, base_env)
+        prepared_dsh_binary(data)
 
     context = ContextService(data, connection)
     gateway = SuperAgentGateway(

@@ -64,7 +64,7 @@ export interface SettingsHost {
   readonly context: Context
   readonly lifetime: AbortSignal
   /** Session manager through which the main Session is notified of saved settings. */
-  readonly sessions: Pick<Sessions, 'notify' | 'delivery'>
+  readonly sessions: Pick<Sessions, 'notify' | 'delivery'> & Partial<Pick<Sessions, 'syncRoleModel'>>
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
@@ -184,6 +184,11 @@ export class Settings {
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })
+    if (block === 'eval' && JSON.stringify(settings.eval.model) !== JSON.stringify(old.eval.model)) {
+      await sessions.syncRoleModel?.('orchestrator', settings.eval.model)
+    } else if (block === 'executor' && JSON.stringify(settings.executor.model) !== JSON.stringify(old.executor.model)) {
+      await sessions.syncRoleModel?.('worker', settings.executor.model)
+    }
     // Rewrite worker command shims immediately when `blockedCommands` changes.
     const blocked = settings.executor.blockedCommands
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
