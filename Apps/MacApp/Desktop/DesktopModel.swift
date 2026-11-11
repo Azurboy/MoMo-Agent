@@ -50,6 +50,7 @@ final class DesktopModel {
     var setupStep = SetupStep.welcome
     var selection = "chat"
     var managingConnection = false
+    var managingModel = false
     var isPairingDevice = false
     var isPrepared: Bool { connection != nil }
     var hasBundledRuntime: Bool { FileManager.default.fileExists(atPath: repository.appendingPathComponent("runtime-manifest.json").path) }
@@ -471,6 +472,8 @@ final class DesktopModel {
                 applyModelAccount(try await modelCommand("verify", provider: modelProvider), updateSelection: false)
                 guard !modelConnectionCancelled else { return }
             }
+            try? FileManager.default.removeItem(at: dataDirectory.appendingPathComponent("runtime/provider-notice.json"))
+            taskStore?.clearProviderNotice()
             if agentProcess?.isRunning == true || status?.agentOnline == true {
                 stopAgent()
                 for _ in 0..<25 where agentProcess?.isRunning == true || status?.agentOnline == true {
@@ -497,7 +500,14 @@ final class DesktopModel {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["model":modelName,"messages":[["role":"user","content":"Reply OK."]],"max_tokens":16])
         let (data, response) = try await controlSession.data(for: request, delegate: ControlNoRedirects.shared)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if [401, 403].contains(statusCode) {
+            throw DesktopError.message(String(localized: "自定义 API 密钥不可用，请检查密钥后重试。"))
+        }
+        if [402, 429].contains(statusCode) {
+            throw DesktopError.message(String(localized: "当前 API 服务额度不足或正处于限流状态，请检查账户额度或更换服务。"))
+        }
+        guard statusCode == 200,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = object["choices"] as? [[String: Any]], !choices.isEmpty else {
             throw DesktopError.message(String(localized: "模型连接验证失败，请检查地址、模型名称和密钥。"))

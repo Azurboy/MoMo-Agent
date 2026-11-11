@@ -99,6 +99,27 @@ class WorkRouting:
                 'auth': '模型登录已失效，请在 Mac 重新登录。',
                 'billing': '模型服务额度不足，请检查模型账号。',
             }.get(reason, '执行未完成，请核对已有结果。')
+            if reason in ('billing', 'auth', 'rate_limit', 'overloaded') and hasattr(self, 'data'):
+                seen = getattr(self, '_seen_hermes_provider_runs', None)
+                if seen is not None and row['request_id'] not in seen:
+                    seen.add(row['request_id'])
+                    if float(work.get('created_at') or 0) >= float(getattr(self, '_booted_at', 0)) - 5.0:
+                        import json as _json
+                        from contextlib import suppress as _suppress
+                        from provider_notice import build_provider_notice, record_provider_issue
+                        prov_hint = ''
+                        with _suppress(Exception):
+                            cfg = _json.loads((self.data / 'hermes/config.yaml').read_text(encoding='utf-8'))
+                            prov_hint = str((cfg.get('model') or {}).get('provider') or '')
+                        mapped_err = {
+                            'billing': 'insufficient_quota',
+                            'auth': 'authentication_error',
+                            'rate_limit': 'rate_limit_exceeded',
+                            'overloaded': 'overloaded_error',
+                        }[reason]
+                        notice = record_provider_issue(self.data, mapped_err, provider=prov_hint)
+                        if notice is not None:
+                            detail = notice['short_error']
             value = {**value, 'error': detail}
         saved = self.store.db.execute('SELECT intent FROM inputs WHERE run_id=?',(row['request_id'],)).fetchone()
         delivery = None

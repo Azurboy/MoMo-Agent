@@ -87,6 +87,25 @@ public final class RemoteTaskStore {
     public private(set) var sharedRuns: [AgentRun] = []
     public private(set) var sharedRunReplies: [String: RemoteReply] = [:]
     public private(set) var backgroundWork: [ConversationWork] = []
+    public private(set) var providerNotice: ProviderServiceNotice?
+    private var dismissedProviderNoticeIDs: [String] = UserDefaults.standard.stringArray(forKey: "MoMoDismissedProviderNoticeIDs") ?? []
+    public var activeProviderNotice: ProviderServiceNotice? {
+        guard let notice = providerNotice, !dismissedProviderNoticeIDs.contains(notice.id) else { return nil }
+        return notice
+    }
+    public func dismissProviderNotice(_ id: String? = nil) {
+        guard let targetID = id ?? providerNotice?.id else { return }
+        if !dismissedProviderNoticeIDs.contains(targetID) {
+            dismissedProviderNoticeIDs.append(targetID)
+            if dismissedProviderNoticeIDs.count > 32 {
+                dismissedProviderNoticeIDs = Array(dismissedProviderNoticeIDs.suffix(32))
+            }
+            UserDefaults.standard.set(dismissedProviderNoticeIDs, forKey: "MoMoDismissedProviderNoticeIDs")
+        }
+    }
+    public func clearProviderNotice() {
+        providerNotice = nil
+    }
     public private(set) var messageCursor = 0
     public private(set) var steeringTarget: AgentRun?
     private var controlsInFlight: Set<String> = []
@@ -570,8 +589,10 @@ public final class RemoteTaskStore {
                 if !page.hasMore { break }
             }
             var runs: [AgentRun] = []; var cursor = 0; var states: [String: String] = [:]
+            var latestNotice: ProviderServiceNotice?
             while !Task.isCancelled {
                 let snapshot = try await request { try await client.conversationRunSnapshot(after: cursor) }
+                if cursor == 0 { latestNotice = snapshot.providerNotice }
                 runs += snapshot.data; backgroundWork = snapshot.backgroundWork ?? []
                 states.merge(snapshot.messageStates ?? [:]) { _, latest in latest }
                 if snapshot.hasMore != true { break }
@@ -582,6 +603,7 @@ public final class RemoteTaskStore {
             let previous = messages, previousRuns = sharedRuns, previousReplies = sharedRunReplies
             for index in messages.indices { if let state = states[messages[index].id] { messages[index].deliveryState = state } }
             sharedRuns = runs
+            if providerNotice != latestNotice { providerNotice = latestNotice }
             pruneSharedRunReplies()
             do { try persist(tasks: tasks, draft: draft) } catch { messages = previous; sharedRuns = previousRuns; sharedRunReplies = previousReplies; return }
             failures[.synchronization] = nil
@@ -1032,8 +1054,9 @@ public final class RemoteTaskStore {
         }
     }
 
-    private func applyLiveWork(_ work: [ConversationWork], states: [String: String]) {
+    private func applyLiveWork(_ work: [ConversationWork], states: [String: String], notice: ProviderServiceNotice? = nil) {
         if backgroundWork != work { backgroundWork = work }
+        if providerNotice != notice { providerNotice = notice }
         for index in messages.indices {
             if let state = states[messages[index].id], messages[index].deliveryState != state { messages[index].deliveryState = state }
         }
@@ -1060,7 +1083,7 @@ public final class RemoteTaskStore {
             try mergeConversationMessages(value.messages.data)
             sharedRuns.removeAll { !$0.isTerminal }
             for run in value.runs { try applyLiveRun(run) }
-            applyLiveWork(value.backgroundWork, states: value.messageStates)
+            applyLiveWork(value.backgroundWork, states: value.messageStates, notice: value.providerNotice)
             // A new event namespace must not compare against old per-run sequence numbers.
             if eventCursor == nil {
                 for index in tasks.indices where tasks[index].isPending { tasks[index].reply = nil }
@@ -1105,7 +1128,7 @@ public final class RemoteTaskStore {
                 tasks = stripConfirmedAttachmentPayloads(tasks)
             case "work.updated":
                 guard let work = value.backgroundWork, let states = value.messageStates else { throw StoreError.invalidResponse }
-                applyLiveWork(work, states: states)
+                applyLiveWork(work, states: states, notice: value.providerNotice)
             case "run.event":
                 guard let event = value.runEvent, event.seq == cursor else { throw StoreError.invalidResponse }
                 if let task = tasks.first(where: { $0.run?.runID == event.runID }) {

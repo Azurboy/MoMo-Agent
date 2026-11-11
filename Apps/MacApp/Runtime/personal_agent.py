@@ -16,6 +16,7 @@ from aiohttp import web
 from conversation_store import ProductStore, collect_deliverable_attachments
 from personal_work import WorkRouting, conflict
 from personal_computer import ComputerGate
+from provider_notice import read_provider_notice
 from push_notifications import PushOutbox, load_provider
 
 log = logging.getLogger('momo.personal_agent')
@@ -37,6 +38,8 @@ class PersonalAgent(WorkRouting, ComputerGate):
     enabled = True
     def __init__(self, data, connection, adapter, app):
         self.data = Path(data)
+        self._booted_at = time.time()
+        self._seen_hermes_provider_runs = set()
         self.adapter = adapter
         self.connection = connection
         self.store = ProductStore(Path(data) / 'runtime/conversation.sqlite', connection)
@@ -862,6 +865,7 @@ class PersonalAgent(WorkRouting, ComputerGate):
                     settled[cache_key] = dict(value)
                 runs.append(value)
         return dict(data=runs, background_work=self.background_work() if _include_work else [], message_states=self.store.message_states() if _include_work else {},
+            provider_notice=read_provider_notice(self.data) if _include_work else None,
             next_cursor=rows[min(limit,len(rows)) - 1]['seq'] if rows else after, has_more=len(rows)>limit)
 
     def live_state(self):
@@ -871,13 +875,13 @@ class PersonalAgent(WorkRouting, ComputerGate):
             page = self.run_page(cursor, _include_work=False); runs += page['data']
             if not page['has_more']: break
             cursor = page['next_cursor']
-        return dict(runs=runs, background_work=self.background_work(), message_states=self.store.message_states())
+        return dict(runs=runs, background_work=self.background_work(), message_states=self.store.message_states(), provider_notice=read_provider_notice(self.data))
 
     def publish_live_state(self):
         state = self.live_state()
         for run in state['runs']:
             self.store.events.changed('run:' + run['run_id'], 'run.updated', {'run': run})
-        self.store.events.changed('work', 'work.updated', {'background_work': state['background_work'], 'message_states':state['message_states']})
+        self.store.events.changed('work', 'work.updated', {'background_work': state['background_work'], 'message_states':state['message_states'], 'provider_notice': state['provider_notice']})
         return state
 
     def live_snapshot(self):

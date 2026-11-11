@@ -201,13 +201,63 @@ public struct ConversationWorkDetail: Codable, Sendable, Equatable, Identifiable
     }
 }
 
+public struct ProviderServiceNotice: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let kind: String
+    public let provider: String
+    public let providerLabel: String
+    public let title: String
+    public let message: String
+    public var shortError: String? = nil
+    public let createdAt: Double
+    public var updatedAt: Double? = nil
+
+    public init(
+        id: String,
+        kind: String,
+        provider: String,
+        providerLabel: String,
+        title: String,
+        message: String,
+        shortError: String? = nil,
+        createdAt: Double,
+        updatedAt: Double? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.provider = provider
+        self.providerLabel = providerLabel
+        self.title = title
+        self.message = message
+        self.shortError = shortError
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, provider, title, message
+        case providerLabel = "provider_label"
+        case shortError = "short_error"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
 public struct ConversationRuns: Decodable, Sendable {
     public let data: [AgentRun]
     public let backgroundWork: [ConversationWork]?
     public let nextCursor: Int?
     public let hasMore: Bool?
     public var messageStates: [String: String]? = nil
-    enum CodingKeys: String, CodingKey { case data, backgroundWork = "background_work", nextCursor = "next_cursor", hasMore = "has_more", messageStates = "message_states" }
+    public var providerNotice: ProviderServiceNotice? = nil
+    enum CodingKeys: String, CodingKey {
+        case data
+        case backgroundWork = "background_work"
+        case nextCursor = "next_cursor"
+        case hasMore = "has_more"
+        case messageStates = "message_states"
+        case providerNotice = "provider_notice"
+    }
 }
 
 public struct AgentControl: Codable, Sendable, Equatable, Identifiable {

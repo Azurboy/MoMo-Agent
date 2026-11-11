@@ -26,6 +26,7 @@ from antigravity_bridge import (
     run_antigravity_completion,
 )
 from momo_agent import SOURCE, atomic_private, child_environment, read_connection
+from provider_notice import classify_provider_issue, clear_provider_notice
 
 PROVIDERS = {"codex": "openai-codex", "claude": "anthropic", "antigravity": "antigravity"}
 
@@ -180,6 +181,9 @@ def probe(provider: str, model: str, credentials: dict) -> None:
                 timeout=45,
             )
         except Exception as err:
+            notice = classify_provider_issue(err, provider="antigravity")
+            if notice is not None:
+                raise ModelSetupError(notice["short_error"]) from err
             raise ModelSetupError("Antigravity 连接验证失败，请检查订阅登录状态或更换模型。") from err
         choice = (completion.get("choices") or [{}])[0]
         reply_text = str((choice.get("message") or {}).get("content") or "").strip()
@@ -205,6 +209,9 @@ def probe(provider: str, model: str, credentials: dict) -> None:
                     elif event.type == "response.completed":
                         completed = event.response.status == "completed"
                     elif event.type in {"response.failed", "error"}:
+                        notice = classify_provider_issue(getattr(event, "error", None) or getattr(event, "response", None), provider="codex")
+                        if notice is not None:
+                            raise ModelSetupError(notice["short_error"])
                         raise ModelSetupError("Codex 连接验证失败，请检查订阅状态或更换模型。")
                 if not text.strip() or not completed:
                     raise ModelSetupError("Codex 没有完成连接验证，请重试。")
@@ -265,6 +272,7 @@ def verify_and_save(data: Path, provider: str, model: str) -> dict:
     # Subscription routing comes from Hermes, never from a previous custom API URL.
     config["model"] = {"provider": PROVIDERS[provider], "default": model}
     atomic_private(file, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    clear_provider_notice(data)
     return {"provider": provider, "connected": True, "models": [model], "loginAvailable": True}
 
 
@@ -312,6 +320,8 @@ def main() -> int:
             message = "登录端口被占用，请改用验证码登录。"
         elif isinstance(error, ModelSetupError):
             message = str(error)
+        elif (classified := classify_provider_issue(error, provider=args.provider, status_code=status)) is not None:
+            message = classified["short_error"]
         elif status in {401, 403}:
             message = "登录已失效或订阅不可用，请重新登录。"
         elif status == 429:

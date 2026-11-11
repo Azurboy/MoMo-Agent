@@ -37,6 +37,12 @@ if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
 from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
+from provider_notice import (
+    classify_provider_issue,
+    clear_provider_notice,
+    read_provider_notice,
+    record_provider_issue,
+)
 from superagent_computer import SuperAgentComputer
 from push_notifications import PushOutbox, load_provider
 from runtime_engine import PROACTIVE_MODES, read_engine_config, write_engine_config
@@ -397,6 +403,9 @@ class SuperAgentGateway:
         self._cached_state: dict = {}
         self._unsubscribed_legacy_threads: set[str] = set()
         self._ticket_auto_retries: dict[str, tuple[int, str]] = {}
+        self._dsh_log_offset: int = 0
+        self._dsh_seeded_failure_baseline: bool = False
+        self._seen_dsh_failure_keys: set[str] = set()
         self._source_meta_cache: dict[str, tuple[str | None, float | None]] = {}
         self._active_api_runs: set[str] = set()
         self._stopping = False
@@ -499,10 +508,32 @@ class SuperAgentGateway:
                 timeout=180.0,
             )
         except Exception as err:
+            notice = self._record_provider_issue(err, provider="antigravity")
+            if notice is not None:
+                with suppress(Exception):
+                    self.publish_live_state()
+                kind = notice["kind"]
+                http_status = 401 if kind == "auth" else 429
+                err_type = (
+                    "authentication_error"
+                    if kind == "auth"
+                    else ("insufficient_quota" if kind == "quota" else "rate_limit_error")
+                )
+                err_code = (
+                    "invalid_api_key"
+                    if kind == "auth"
+                    else ("insufficient_quota" if kind == "quota" else "rate_limit_exceeded")
+                )
+                return web.json_response(
+                    {"error": {"message": str(err)[:400], "type": err_type, "code": err_code}},
+                    status=http_status,
+                )
             return web.json_response(
                 {"error": {"message": str(err)[:400], "type": "server_error"}},
                 status=502,
             )
+
+        self._clear_provider_notice_if_recovered("antigravity")
 
         if not stream_requested:
             return web.json_response(completion)
@@ -769,10 +800,13 @@ class SuperAgentGateway:
         env["MOMO_LLM_MODEL"] = str(self.model_name)
         env["MOMO_COMPUTER_BRIDGE"] = f"http://127.0.0.1:{self.connection['port']}"
         self._ticket_auto_retries.clear()
+        self._dsh_seeded_failure_baseline = False
         env["DSH_SUPERAGENT_MOMO_CLI"] = str(instance["state_dir"] / "momo-cli")
         env["DSH_SUPERAGENT_MOMO_WORKSPACE"] = str(workspace_dir)
         log_path = self.data / "superagent/dsh.log"
         log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with suppress(OSError):
+            self._dsh_log_offset = log_path.stat().st_size if log_path.is_file() else 0
         log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             proc = subprocess.Popen(
@@ -1016,10 +1050,133 @@ class SuperAgentGateway:
         )
         return state, tickets, decisions
 
+    def current_provider_notice(self) -> dict | None:
+        return read_provider_notice(self.data)
+
+    def _active_provider_hint(self) -> str:
+        if self.dsh_provider and self.dsh_provider != "openai":
+            return self.dsh_provider
+        with suppress(Exception):
+            cfg = json.loads((self.data / "hermes/config.yaml").read_text(encoding="utf-8"))
+            model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+            if isinstance(model_cfg, dict) and model_cfg.get("provider"):
+                return str(model_cfg["provider"])
+        return self.dsh_provider or ""
+
+    def _record_provider_issue(
+        self,
+        raw_error: object,
+        *,
+        provider: str = "",
+        status_code: int | None = None,
+    ) -> dict | None:
+        return record_provider_issue(
+            self.data,
+            raw_error,
+            provider=provider or self._active_provider_hint(),
+            status_code=status_code,
+        )
+
+    def _clear_provider_notice_if_recovered(self, provider: str = "") -> None:
+        if clear_provider_notice(self.data, provider=provider or self._active_provider_hint()):
+            with suppress(Exception):
+                self.publish_live_state()
+
+    @staticmethod
+    def _extract_ticket_failure_text(ticket: dict) -> str:
+        parts: list[str] = []
+        assignments = ticket.get("assignments")
+        if isinstance(assignments, list) and assignments:
+            last = assignments[-1]
+            if isinstance(last, dict):
+                rep = last.get("report")
+                if isinstance(rep, dict) and isinstance(rep.get("summary"), str):
+                    parts.append(rep["summary"])
+                elif isinstance(last.get("error"), str):
+                    parts.append(last["error"])
+        for field in ("summary", "error"):
+            val = ticket.get(field)
+            if isinstance(val, str) and val.strip():
+                parts.append(val.strip())
+        return "\n".join(parts)
+
+    def _scan_dsh_log_for_provider_issues(self) -> None:
+        log_path = self.data / "superagent/dsh.log"
+        if not log_path.is_file():
+            return
+        try:
+            size = log_path.stat().st_size
+            if size < self._dsh_log_offset:
+                self._dsh_log_offset = 0
+            if size == self._dsh_log_offset:
+                return
+            read_from = max(self._dsh_log_offset, size - 65536)
+            with log_path.open("rb") as handle:
+                handle.seek(read_from)
+                chunk = handle.read(size - read_from).decode("utf-8", errors="replace")
+            self._dsh_log_offset = size
+        except OSError:
+            return
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Only inspect lines that look like LLM/HTTP/provider errors, never generic prompt echoes.
+            if not re.search(
+                r"\b(401|402|403|429|529|insufficient_quota|usage_limit|quota|credit balance|overloaded_error|authentication_error|invalid_api_key|budget_exceeded|rate_limit|resource_exhausted)\b",
+                stripped,
+                re.IGNORECASE,
+            ):
+                continue
+            if self._record_provider_issue(stripped):
+                break
+
+    def _inspect_dsh_provider_health(self, state: dict, tickets: list[dict], decisions: list[dict]) -> None:
+        self._scan_dsh_log_for_provider_issues()
+        health = state.get("health") if isinstance(state, dict) and isinstance(state.get("health"), dict) else {}
+        models_h = health.get("models") if isinstance(health.get("models"), dict) else {}
+        if models_h.get("state") == "error" and models_h.get("detail"):
+            self._record_provider_issue(str(models_h["detail"]))
+
+        first_pass = not self._dsh_seeded_failure_baseline
+        for t in tickets:
+            if not isinstance(t, dict) or not t.get("id"):
+                continue
+            ended_info = t.get("ended")
+            ended_outcome = str(ended_info.get("outcome") or "") if isinstance(ended_info, dict) else str(ended_info or "")
+            t_state = str(t.get("state") or t.get("outcome") or "")
+            t_action = str(t.get("action") or "")
+            if t_action == "failed" or ended_outcome == "failed" or t_state == "failed":
+                key = f"ticket:{t['id']}:{t.get('updatedAt') or ended_outcome}"
+                if key in self._seen_dsh_failure_keys:
+                    continue
+                self._seen_dsh_failure_keys.add(key)
+                if not first_pass:
+                    failure_text = self._extract_ticket_failure_text(t)
+                    if failure_text:
+                        self._record_provider_issue(failure_text)
+
+        for dec in decisions:
+            if not isinstance(dec, dict) or dec.get("kind") != "unavailable":
+                continue
+            dec_id = str(dec.get("id") or "")
+            if not dec_id or dec_id in self._seen_dsh_failure_keys:
+                continue
+            self._seen_dsh_failure_keys.add(dec_id)
+            if not first_pass:
+                reason_text = self._format_dsh_reason(dec.get("reason")) or json.dumps(dec.get("reason") or "", ensure_ascii=False)
+                if reason_text:
+                    self._record_provider_issue(reason_text)
+
+        if len(self._seen_dsh_failure_keys) > 400:
+            self._seen_dsh_failure_keys = set(list(self._seen_dsh_failure_keys)[-200:])
+        self._dsh_seeded_failure_baseline = True
+
     def _apply_dsh_projections(self, state: dict, tickets: list[dict], decisions: list[dict]) -> None:
         self._cached_state = state
         self._cached_tickets = tickets
         self._cached_decisions = decisions
+        self._inspect_dsh_provider_health(state, tickets, decisions)
 
         decisions_by_trigger: dict[str, dict] = {}
         for dec in reversed(decisions):
@@ -1083,13 +1240,22 @@ class SuperAgentGateway:
                     wait_reason = None
                 elif t_action == "failed" or ended_outcome == "failed" or t_state == "failed":
                     new_status = "failed"
-                    err = "执行未完成，请核对已有结果。"
+                    ticket_notice = self._record_provider_issue(self._extract_ticket_failure_text(ticket))
+                    recent_notice = ticket_notice or self.current_provider_notice()
+                    if recent_notice and (now - float(recent_notice.get("updated_at", 0))) <= 180.0:
+                        err = recent_notice["short_error"]
+                    else:
+                        err = "执行未完成，请核对已有结果。"
                 elif t_action == "blocked" and not ticket.get("attention"):
                     prev_count, prev_updated = self._ticket_auto_retries.get(str(ticket_id), (0, ""))
                     if prev_count >= 1 and str(ticket.get("updatedAt") or "") != prev_updated:
                         new_status = "failed"
                         wait_reason = None
-                        err = "执行受阻未完成，请核对已有结果或重试。"
+                        recent_notice = self.current_provider_notice()
+                        if recent_notice and (now - float(recent_notice.get("updated_at", 0))) <= 180.0:
+                            err = recent_notice["short_error"]
+                        else:
+                            err = "执行受阻未完成，请核对已有结果或重试。"
                 elif ended_outcome in ("dropped",) or t_state in ("dropped",):
                     new_status = "completed"
                     wait_reason = None
@@ -1142,7 +1308,11 @@ class SuperAgentGateway:
                         continue
                     new_status = "failed"
                     wait_reason = None
-                    err = "模型切换或连接中断导致任务未完成，请重新发送。"
+                    recent_notice = self.current_provider_notice()
+                    if recent_notice and (now - float(recent_notice.get("updated_at", 0))) <= 180.0:
+                        err = recent_notice["short_error"]
+                    else:
+                        err = "模型切换或连接中断导致任务未完成，请重新发送。"
             if (new_status, ticket_id, wait_reason, err) != (row["status"], row["ticket_id"], row["wait_reason"], row["error"]):
                 with self.bridge.db:
                     self.bridge.db.execute(
@@ -1747,13 +1917,19 @@ class SuperAgentGateway:
                     "UPDATE api_runs SET status='completed', output_text=?, updated_at=? WHERE run_id=?",
                     (text, time.time(), run_id),
                 )
+            self._clear_provider_notice_if_recovered()
         except Exception as exc:
             log.warning("Direct /v1/runs execution failed (%s): %s", run_id, exc)
+            notice = self._record_provider_issue(exc)
+            err_code = notice["short_error"] if notice else "execution_failed"
             with self.bridge.db:
                 self.bridge.db.execute(
-                    "UPDATE api_runs SET status='failed', error_text='execution_failed', updated_at=? WHERE run_id=?",
-                    (time.time(), run_id),
+                    "UPDATE api_runs SET status='failed', error_text=?, updated_at=? WHERE run_id=?",
+                    (err_code, time.time(), run_id),
                 )
+            if notice is not None:
+                with suppress(Exception):
+                    self.publish_live_state()
         finally:
             self._active_api_runs.discard(run_id)
 
@@ -3459,6 +3635,7 @@ class SuperAgentGateway:
             "data": runs,
             "background_work": self.background_work() if include_work else [],
             "message_states": self.store.message_states() if include_work else {},
+            "provider_notice": self.current_provider_notice() if include_work else None,
             "next_cursor": int(rows[min(limit, len(rows)) - 1]["seq"]) if rows else after,
             "has_more": len(rows) > limit,
         }
@@ -3476,6 +3653,7 @@ class SuperAgentGateway:
             "runs": runs,
             "background_work": self.background_work(),
             "message_states": self.store.message_states(),
+            "provider_notice": self.current_provider_notice(),
         }
 
     def publish_live_state(self) -> dict:
@@ -3485,7 +3663,11 @@ class SuperAgentGateway:
         self.store.events.changed(
             "work",
             "work.updated",
-            {"background_work": state["background_work"], "message_states": state["message_states"]},
+            {
+                "background_work": state["background_work"],
+                "message_states": state["message_states"],
+                "provider_notice": state["provider_notice"],
+            },
         )
         return state
 
@@ -4336,6 +4518,7 @@ class SuperAgentGateway:
         if existing:
             return web.json_response({"status": "sent", "duplicate": True, "message_id": existing["message_id"]})
 
+        self._clear_provider_notice_if_recovered()
         now = time.time()
         # Locate linked chat run by ticket_id, exact trigger messageId, or oldest active chat run on chat:* channel.
         linked_run = None

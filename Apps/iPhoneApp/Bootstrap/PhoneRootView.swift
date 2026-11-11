@@ -22,6 +22,20 @@ struct PhoneRootView: View {
         .onChange(of: runtime.remoteAgent.notifications.navigationRevision) { _, _ in
             showingSettings = false; selectedTab = .chat
         }
+        .alert(
+            runtime.remoteAgent.store?.activeProviderNotice?.title ?? "",
+            isPresented: Binding(
+                get: { runtime.remoteAgent.store?.activeProviderNotice != nil },
+                set: { if !$0 { runtime.remoteAgent.store?.dismissProviderNotice() } }
+            ),
+            presenting: runtime.remoteAgent.store?.activeProviderNotice
+        ) { notice in
+            Button("知道了", role: .cancel) {
+                runtime.remoteAgent.store?.dismissProviderNotice(notice.id)
+            }
+        } message: { notice in
+            Text(verbatim: notice.message)
+        }
         .onChange(of: selectedTab) { _, _ in updateChatVisibility() }
         .onChange(of: showingSettings) { _, _ in updateChatVisibility() }
         .onChange(of: scenePhase) { _, _ in updateChatVisibility() }

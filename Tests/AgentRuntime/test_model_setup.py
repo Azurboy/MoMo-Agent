@@ -308,6 +308,96 @@ class ModelSetupTests(unittest.TestCase):
         self.assertEqual(config['model'], {'provider': 'antigravity', 'default': 'gemini-4-carbon-high'})
         self.assertTrue(result['connected'])
 
+    def test_provider_notice_classifies_quota_auth_and_rate_limit_without_secret_leakage(self):
+        import provider_notice as pn
+
+        secret_url = 'https://secret-gateway.internal/v1?key=sk-secret-999'
+
+        # 1. Antigravity quota exhaustion
+        agy_quota = pn.classify_provider_issue(
+            f'Antigravity CLI failed: RESOURCE_EXHAUSTED: You have exhausted your capacity on this model ({secret_url})',
+            provider='antigravity',
+        )
+        self.assertIsNotNone(agy_quota)
+        self.assertEqual(agy_quota['kind'], 'quota')
+        self.assertEqual(agy_quota['provider'], 'antigravity')
+        self.assertIn('Antigravity 当前额度已用完', agy_quota['title'])
+        self.assertNotIn('sk-secret-999', json.dumps(agy_quota, ensure_ascii=False))
+        self.assertNotIn('secret-gateway', json.dumps(agy_quota, ensure_ascii=False))
+
+        # 2. Codex usage / quota limit
+        codex_quota = pn.classify_provider_issue(
+            'Error code: 429 - {"error": {"code": "usage_limit_reached", "message": "You have hit your usage limit"}}',
+            provider='codex',
+        )
+        self.assertIsNotNone(codex_quota)
+        self.assertEqual(codex_quota['kind'], 'quota')
+        self.assertEqual(codex_quota['provider'], 'openai-codex')
+        self.assertIn('Codex 当前额度已用完', codex_quota['title'])
+
+        # 3. Claude credit balance / auth expiration
+        claude_quota = pn.classify_provider_issue(
+            'AnthropicError: Your credit balance is too low to access the Anthropic API.',
+            provider='anthropic',
+        )
+        self.assertEqual(claude_quota['kind'], 'quota')
+        self.assertIn('Claude 当前额度已用完', claude_quota['title'])
+
+        claude_auth = pn.classify_provider_issue(
+            SimpleNamespace(status_code=401, message='OAuth token has expired sk-ant-oat01-secret'),
+            provider='claude',
+        )
+        self.assertEqual(claude_auth['kind'], 'auth')
+        self.assertIn('Claude 需要重新登录', claude_auth['title'])
+        self.assertNotIn('sk-ant-oat01-secret', json.dumps(claude_auth, ensure_ascii=False))
+
+        # 4. Short-term rate limit vs non-provider local errors
+        rate_busy = pn.classify_provider_issue(
+            SimpleNamespace(status_code=429, message='Too Many Requests'),
+            provider='custom',
+        )
+        self.assertEqual(rate_busy['kind'], 'rate_limit')
+        self.assertIn('请求较忙', rate_busy['title'])
+
+        for local_err in (
+            'PermissionError: [Errno 13] Permission denied: /tmp/local.txt',
+            'Connection refused: 127.0.0.1:8779',
+            'gateway_restarted',
+            'The prepare command failed: git status 128',
+        ):
+            self.assertIsNone(pn.classify_provider_issue(local_err, provider='codex'))
+
+    def test_provider_notice_coalesces_retries_and_clears_on_verified_model_save(self):
+        import provider_notice as pn
+
+        first = pn.record_provider_issue(
+            self.data,
+            'insufficient_quota: exceeded your current quota',
+            provider='codex',
+            now=1000.0,
+        )
+        second = pn.record_provider_issue(
+            self.data,
+            'insufficient_quota: retry #2 failed',
+            provider='codex',
+            now=1025.0,
+        )
+        self.assertEqual(first['id'], second['id'])
+        self.assertEqual(pn.read_provider_notice(self.data, now=1030.0)['id'], first['id'])
+
+        later = pn.record_provider_issue(
+            self.data,
+            'insufficient_quota: new turn 10 minutes later',
+            provider='codex',
+            now=1700.0,
+        )
+        self.assertNotEqual(first['id'], later['id'])
+
+        with patch.object(setup, 'resolve_credentials', return_value={'provider': 'antigravity', 'api_key': 'antigravity-cli'}), \
+                patch.object(setup, 'probe'):
+            setup.verify_and_save(self.data, 'antigravity', 'gemini-4-carbon-low')
+        self.assertIsNone(pn.read_provider_notice(self.data, now=1705.0))
+
 
 if __name__ == '__main__':
     unittest.main()

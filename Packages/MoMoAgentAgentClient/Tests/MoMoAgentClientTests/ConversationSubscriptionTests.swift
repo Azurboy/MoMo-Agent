@@ -392,6 +392,49 @@ import XCTest
         store.foreground(); defer { store.background() }
         try await eventually { store.connectionState == .retrying }
     }
+
+    func testProviderNoticeArrivesOverLiveStreamAndHonorsDismissal() async throws {
+        let (wire, store, _, _) = try fixture()
+        store.foreground(); defer { store.background() }
+        try await eventually { await wire.subscriptions.count == 1 }
+        XCTAssertNil(store.activeProviderNotice)
+
+        let noticeID = "pnotice-" + UUID().uuidString.lowercased()
+        await wire.pushProviderNotice([
+            "id": noticeID,
+            "kind": "quota",
+            "provider": "antigravity",
+            "provider_label": "Antigravity",
+            "title": "Antigravity 当前额度已用完",
+            "message": "可在设置中切换到其他模型服务继续使用。",
+            "short_error": "Antigravity 当前额度已用完。",
+            "created_at": 1762070400.0,
+        ])
+        try await eventually { store.activeProviderNotice?.id == noticeID }
+        XCTAssertEqual(store.activeProviderNotice?.title, "Antigravity 当前额度已用完")
+
+        store.dismissProviderNotice(noticeID)
+        XCTAssertNil(store.activeProviderNotice)
+        XCTAssertEqual(store.providerNotice?.id, noticeID)
+
+        // Same notice ID pushed again on retry does not re-pop the alert.
+        await wire.pushProviderNotice([
+            "id": noticeID,
+            "kind": "quota",
+            "provider": "antigravity",
+            "provider_label": "Antigravity",
+            "title": "Antigravity 当前额度已用完",
+            "message": "可在设置中切换到其他模型服务继续使用。",
+            "created_at": 1762070400.0,
+            "updated_at": 1762070405.0,
+        ])
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertNil(store.activeProviderNotice)
+
+        // Server clearing notice clears providerNotice completely.
+        await wire.pushProviderNotice(nil)
+        try await eventually { store.providerNotice == nil }
+    }
 }
 
 private actor LiveWire: AgentTransport {
@@ -429,6 +472,11 @@ private actor LiveWire: AgentTransport {
         emit("run.updated", ["run": run])
     }
     func pushRunEvent(_ event: [String: Any]) { emit("run.event", ["run_event": event]) }
+    func pushProviderNotice(_ notice: [String: Any]?) {
+        var payload: [String: Any] = ["background_work": [], "message_states": [:]]
+        payload["provider_notice"] = notice ?? NSNull()
+        emit("work.updated", payload)
+    }
     init(_ connection: AgentConnection) { self.connection = connection }
     func commitDuringSnapshot() { betweenSnapshot = true }
     func rejectSubscription(_ code: Int?) { rejection = code }

@@ -271,16 +271,21 @@ class CodexIllustrationGenerator:
         llm = self.resolve()
         if llm['dsh_provider'] == 'antigravity':
             from antigravity_bridge import run_antigravity_completion
+            from provider_notice import record_provider_issue
 
-            completion = run_antigravity_completion(
-                model=llm['model_id'],
-                messages=[
-                    {'role': 'system', 'content': SCENE_POLICY},
-                    {'role': 'user', 'content': evidence},
-                ],
-                data_dir=self.data,
-                timeout=120.0,
-            )
+            try:
+                completion = run_antigravity_completion(
+                    model=llm['model_id'],
+                    messages=[
+                        {'role': 'system', 'content': SCENE_POLICY},
+                        {'role': 'user', 'content': evidence},
+                    ],
+                    data_dir=self.data,
+                    timeout=120.0,
+                )
+            except Exception as err:
+                record_provider_issue(self.data, err, provider='antigravity')
+                raise
             msg = ((completion.get('choices') or [{}])[0]).get('message') or {}
             result = str(msg.get('content') or '').strip()
             if not result or len(result.encode()) > 24_000:
@@ -378,7 +383,10 @@ class CodexIllustrationGenerator:
                         out_png = cp
                         break
             if not out_png.is_file():
-                if '429' in (proc.stdout or '') or 'quota' in (proc.stdout or '').lower():
+                combined_err = (proc.stdout or '') + '\n' + (proc.stderr or '')
+                if '429' in combined_err or 'quota' in combined_err.lower() or 'exhausted' in combined_err.lower():
+                    from provider_notice import record_provider_issue
+                    record_provider_issue(self.data, combined_err, provider='antigravity')
                     raise ImageRejected('Nano Banana image service temporarily rate-limited')
                 raise RuntimeError('Antigravity Nano Banana returned no PNG file')
             raw_bytes = out_png.read_bytes()
@@ -413,6 +421,8 @@ class CodexIllustrationGenerator:
                         elif event.type in ('response.failed', 'response.incomplete', 'error') and result is None:
                             raise RuntimeError('Image stream did not complete')
         except APIStatusError as error:
+            from provider_notice import record_provider_issue
+            record_provider_issue(self.data, error, provider=llm['dsh_provider'], status_code=error.status_code)
             if error.status_code == 429:
                 raise ImageRejected('Image service temporarily rejected admission') from None
             raise

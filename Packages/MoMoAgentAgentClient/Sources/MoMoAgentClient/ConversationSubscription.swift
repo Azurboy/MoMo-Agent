@@ -7,9 +7,11 @@ struct ConversationSnapshot: Decodable, Sendable {
     let runs: [AgentRun]
     let backgroundWork: [ConversationWork]
     let messageStates: [String: String]
+    let providerNotice: ProviderServiceNotice?
     enum CodingKeys: String, CodingKey {
         case cursor, messages, runs
         case conversationID = "conversation_id", backgroundWork = "background_work", messageStates = "message_states"
+        case providerNotice = "provider_notice"
     }
 }
 
@@ -22,10 +24,12 @@ struct ConversationEvent: Decodable, Sendable {
     let runEvent: AgentRunEvent?
     let backgroundWork: [ConversationWork]?
     let messageStates: [String: String]?
+    let providerNotice: ProviderServiceNotice?
     enum CodingKeys: String, CodingKey {
         case cursor, kind, message, run
         case conversationID = "conversation_id", runEvent = "run_event"
         case backgroundWork = "background_work", messageStates = "message_states"
+        case providerNotice = "provider_notice"
     }
 }
 

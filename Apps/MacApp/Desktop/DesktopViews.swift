@@ -11,6 +11,7 @@ struct DesktopRoot: View {
     @State private var recordingCitation: RecordingCitation?
     @State private var previewingMemoryNote: ContextMemory?
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         HStack(spacing: 0) {
@@ -94,6 +95,25 @@ struct DesktopRoot: View {
                 allMemories: model.vaultSnapshot.activeMemories,
                 onOpenFullNotebook: { model.selection = "memory" }
             )
+        }
+        .alert(
+            model.taskStore?.activeProviderNotice?.title ?? "",
+            isPresented: Binding(
+                get: { model.taskStore?.activeProviderNotice != nil },
+                set: { if !$0 { model.taskStore?.dismissProviderNotice() } }
+            ),
+            presenting: model.taskStore?.activeProviderNotice
+        ) { notice in
+            Button("更换模型服务") {
+                model.taskStore?.dismissProviderNotice(notice.id)
+                model.managingModel = true
+                openSettings()
+            }
+            Button("知道了", role: .cancel) {
+                model.taskStore?.dismissProviderNotice(notice.id)
+            }
+        } message: { notice in
+            Text(verbatim: notice.message)
         }
     }
 
@@ -527,8 +547,15 @@ struct DesktopSettings: View {
         .environment(\.desktopSettingsDensity, true)
         .toolbarBackground(.hidden, for: .windowToolbar)
         .tint(MoMoPalette.ink).foregroundStyle(MoMoPalette.ink)
+        .onAppear {
+            if model.managingModel { page = .model; model.managingModel = false }
+            else if model.managingConnection { page = .pairing; model.managingConnection = false }
+        }
         .onChange(of: model.managingConnection) { _, show in
             if show { page = .pairing; model.managingConnection = false }
+        }
+        .onChange(of: model.managingModel) { _, show in
+            if show { page = .model; model.managingModel = false }
         }
     }
 
@@ -564,6 +591,27 @@ struct DesktopSettings: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 Text("模型").font(.system(size: 22, weight: .medium)).accessibilityAddTraits(.isHeader)
+                if let notice = model.taskStore?.providerNotice {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "info.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 1)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(verbatim: notice.title)
+                                .font(.system(size: 13, weight: .medium))
+                            Text(verbatim: notice.message)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(14)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityIdentifier("settings.providerNotice")
+                }
                 DesktopSettingsGroup("接入方式") {
                     ModelConnectionFields(model: model).padding(.vertical, 6)
                 }
