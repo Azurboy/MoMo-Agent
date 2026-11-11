@@ -41,7 +41,6 @@ private struct MarkdownBlockView: View {
     let isLast: Bool
     let accessibilityID: String
     let handwriting: Bool
-    @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .body) private var indent = 14.0
     @ScaledMetric(relativeTo: .body) private var paragraphSpacing = 5.0
     @ScaledMetric(relativeTo: .body) private var listSpacing = 3.0
@@ -51,28 +50,39 @@ private struct MarkdownBlockView: View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             if block.listDepth > 0 {
                 Text(block.listMarker ?? "")
-                    .phoneText(.body).monospacedDigit()
-                    .foregroundStyle(handwriting ? MemoryNotebookPalette(scheme: scheme).secondaryInk : MoMoPalette.muted)
+                    .font(.system(size: listMarkerSize, weight: .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(MoMoPalette.muted)
                     .frame(minWidth: indent, alignment: .trailing)
             }
             Text(block.text)
                 .modifier(MarkdownReadingTypography(style: textStyle, handwriting: handwriting))
-                .lineSpacing(handwriting ? 1.5 : (block.headingLevel == nil ? 5 : 2))
+                .lineSpacing(handwriting ? 4.0 : (block.headingLevel == nil ? 5 : 2))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(block.headingLevel == nil ? [] : .isHeader)
                 .accessibilityIdentifier(accessibilityID)
         }
         .padding(.leading, Double(max(0, block.listDepth - 1)) * indent)
-        .padding(.leading, block.isQuote ? 10 : 0)
+        .padding(.leading, block.isQuote ? 12 : 0)
         .overlay(alignment: .leading) {
             if block.isQuote {
-                Rectangle().fill(handwriting ? MemoryNotebookPalette(scheme: scheme).margin.opacity(0.5) : .secondary.opacity(0.4)).frame(width: 2)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(MoMoPalette.line)
+                    .frame(width: 2.5)
                     .accessibilityHidden(true)
             }
         }
-        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 2 : 0)
-        .padding(.bottom, isLast ? 0 : (block.headingLevel != nil ? headingSpacing : (block.listDepth > 0 ? listSpacing : paragraphSpacing)))
+        .padding(.top, block.headingLevel != nil && !isFirst ? headingSpacing + 6 : 0)
+        .padding(.bottom, isLast ? 0 : (block.headingLevel != nil ? headingSpacing + 1 : (block.listDepth > 0 ? listSpacing + 1 : paragraphSpacing + 1)))
+    }
+
+    private var listMarkerSize: CGFloat {
+        #if os(macOS)
+        return handwriting ? 13.5 : PhoneTextStyle.body.size
+        #else
+        return handwriting ? 14.5 : PhoneTextStyle.body.size
+        #endif
     }
 
     private var textStyle: PhoneTextStyle {
@@ -89,27 +99,44 @@ private struct MarkdownBlockView: View {
 private struct MarkdownReadingTypography: ViewModifier {
     let style: PhoneTextStyle
     let handwriting: Bool
-    @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
         if handwriting {
             if style == .code {
-                content.phoneText(.code).foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
+                content.phoneText(.code).foregroundStyle(MoMoPalette.ink)
             } else {
-                content.momoHandwriting(size: size, weight: style.weight, relativeTo: style.relativeStyle)
-                    .foregroundStyle(MemoryNotebookPalette(scheme: scheme).ink)
+                content
+                    .font(.system(size: size, weight: editorialWeight))
+                    .foregroundStyle(MoMoPalette.ink)
             }
         } else {
             content.phoneText(style)
         }
     }
 
-    private var size: CGFloat {
+    private var editorialWeight: Font.Weight {
         switch style {
-        case .heading: 14.5
-        case .subheading: 13
-        case .section: 12.5
-        default: 12
+        case .heading, .subheading: return .semibold
+        case .section: return .medium
+        default: return .regular
         }
+    }
+
+    private var size: CGFloat {
+        #if os(macOS)
+        switch style {
+        case .heading: return 16
+        case .subheading: return 14.5
+        case .section: return 13.5
+        default: return 13.5
+        }
+        #else
+        switch style {
+        case .heading: return 17
+        case .subheading: return 15.5
+        case .section: return 14.5
+        default: return 14.5
+        }
+        #endif
     }
 }

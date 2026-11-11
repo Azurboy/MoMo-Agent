@@ -76,20 +76,25 @@ struct RemoteMemoryView: View {
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
         VStack(alignment: .leading, spacing: 0) {
-            if !allMemories.isEmpty {
+            if activeCategory != .all || visibleCategories.count > 2 {
                 categoryFilterStrip
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
-                    .padding(.bottom, 6)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 4)
             }
             if sync.hasLegacyChanges {
                 Text("旧版待同步修改已保留，请核对当前记忆后重新修改。")
-                    .phoneText(.metadata).foregroundStyle(colors.secondaryInk)
+                    .phoneText(.metadata)
+                    .foregroundStyle(colors.secondaryInk)
                     .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
             }
             if let failure = sync.failure {
-                Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                Text(failure)
+                    .phoneText(.metadata)
+                    .foregroundStyle(MoMoPalette.failure)
                     .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
             }
 
             if sections.isEmpty {
@@ -99,77 +104,68 @@ struct RemoteMemoryView: View {
                             Label(allMemories.isEmpty ? "还没有记忆" : "暂无笔记", systemImage: "text.book.closed")
                         } description: {
                             Text(sync.isSyncing ? "正在读取记忆…" : "轻触右上角即可整理或同步。")
-                        }.accessibilityIdentifier("remote.memoryEmpty")
+                        }
+                        .accessibilityIdentifier("remote.memoryEmpty")
                         syncStatusFooter
                     }
                     .padding(16)
                 }
             } else if activeCategory.isNotebookReaderCategory, let memory = activeReaderMemory {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let prev = readerBackStack.last {
-                        Button {
-                            _ = readerBackStack.popLast()
-                            selectedCategory = prev.category
-                            selectedMemoryID = prev.memoryID
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                Text(prev.category == .all ? "返回目录" : "返回上一页")
-                                    .font(.system(size: 11.5, weight: .medium))
-                            }
-                            .foregroundStyle(colors.ink)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(colors.paper, in: Capsule())
-                            .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 14)
+                let backAction: (() -> Void)? = readerBackStack.last.map { prev in
+                    {
+                        _ = readerBackStack.popLast()
+                        selectedCategory = prev.category
+                        selectedMemoryID = prev.memoryID
                     }
-                    if currentReaderItems.count > 1 {
-                        MemoryBinderPageSwitcher(
-                            items: currentReaderItems,
-                            selectedID: memory.id,
-                            onSelect: { selectedMemoryID = $0.id }
-                        )
-                        .padding(.horizontal, 14)
-                    }
+                }
+                let backText: String? = readerBackStack.last.map { $0.category == .all ? "目录" : "返回" }
 
-                    TabView(
-                        selection: Binding(
-                            get: { memory.id },
-                            set: { newID in
-                                selectedMemoryID = newID
-                                if let switched = currentReaderItems.first(where: { $0.id == newID }) {
-                                    let targetCat = DreamMemoryCategory.category(for: switched)
-                                    if targetCat != activeCategory {
-                                        selectedCategory = targetCat
+                TabView(
+                    selection: Binding(
+                        get: { memory.id },
+                        set: { newID in
+                            selectedMemoryID = newID
+                            if let switched = currentReaderItems.first(where: { $0.id == newID }) {
+                                let targetCat = DreamMemoryCategory.category(for: switched)
+                                if targetCat != activeCategory {
+                                    selectedCategory = targetCat
+                                }
+                            }
+                        }
+                    )
+                ) {
+                    ForEach(currentReaderItems) { item in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 14) {
+                                ClientMemoryContent(
+                                    memory: item,
+                                    siblingItems: currentReaderItems,
+                                    onSelectSibling: { next in
+                                        selectedMemoryID = next.id
+                                        let targetCat = DreamMemoryCategory.category(for: next)
+                                        if targetCat != activeCategory {
+                                            selectedCategory = targetCat
+                                        }
+                                    },
+                                    backLabel: backText,
+                                    onBack: backAction,
+                                    onDelete: { forgetting = item }
+                                )
+                                .contextMenu {
+                                    Button(item.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
+                                        forgetting = item
                                     }
                                 }
+                                syncStatusFooter
                             }
-                        )
-                    ) {
-                        ForEach(currentReaderItems) { item in
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    ClientMemoryContent(memory: item, onDelete: { forgetting = item })
-                                        .contextMenu {
-                                            Button(item.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
-                                                forgetting = item
-                                            }
-                                        }
-                                    syncStatusFooter
-                                }
-                                .padding(.horizontal, 14)
-                                .padding(.top, 4)
-                                .padding(.bottom, 20)
-                            }
-                            .tag(item.id)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                            .padding(.bottom, 24)
                         }
+                        .tag(item.id)
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
                 }
+                .tabViewStyle(.page(indexDisplayMode: .never))
                 .environment(\.openURL, OpenURLAction { url in
                     if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories) {
                         readerBackStack.append((category: activeCategory, memoryID: memory.id))
@@ -181,11 +177,13 @@ struct RemoteMemoryView: View {
                 })
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(sections) { section in
-                            let expanded = activeCategory != .all || isFolderExpanded(section.id)
-                            VStack(alignment: .leading, spacing: 6) {
-                                if activeCategory == .all && (sections.count > 1 || section.id != "core") {
+                            let showHeader = activeCategory == .all && (sections.count > 1 || section.id != "core")
+                            let expanded = !showHeader || isFolderExpanded(section.id)
+
+                            VStack(alignment: .leading, spacing: 0) {
+                                if showHeader {
                                     MemoryDirectoryFolderHeader(
                                         section: section,
                                         isExpanded: expanded,
@@ -193,24 +191,35 @@ struct RemoteMemoryView: View {
                                     )
                                 }
                                 if expanded {
-                                    ForEach(section.items) { memory in
+                                    if showHeader {
+                                        Divider().overlay(colors.line)
+                                    }
+                                    ForEach(Array(section.items.enumerated()), id: \.element.id) { idx, memory in
+                                        if idx > 0 {
+                                            Divider()
+                                                .overlay(colors.line)
+                                                .padding(.leading, 30)
+                                        }
                                         directoryItemView(memory, colors: colors)
                                     }
                                 }
                             }
-                        }
-                        if allMemories.count == 1, let single = allMemories.first, single.kind == "memory" {
-                            ClientMemoryContent(memory: single, onDelete: { forgetting = single })
+                            .background(colors.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(colors.line, lineWidth: 1)
+                            }
                         }
                         syncStatusFooter
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                 }
                 .simultaneousGesture(
-                    DragGesture(minimumDistance: 48, coordinateSpace: .local)
+                    DragGesture(minimumDistance: 56, coordinateSpace: .local)
                         .onEnded { value in
-                            guard abs(value.translation.width) > abs(value.translation.height) * 1.6 else { return }
+                            guard visibleCategories.count > 2,
+                                  abs(value.translation.width) > abs(value.translation.height) * 1.6 else { return }
                             stepCategory(by: value.translation.width < 0 ? 1 : -1)
                         }
                 )
@@ -218,7 +227,8 @@ struct RemoteMemoryView: View {
         }
         .background(colors.desk.ignoresSafeArea())
         .tint(colors.ink)
-        .navigationTitle("记忆").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("记忆")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(colors.desk, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
@@ -239,7 +249,8 @@ struct RemoteMemoryView: View {
                     .disabled(sync.isSyncing || sync.isDreamRequesting || sync.memoryReview?.running == true)
                     .accessibilityIdentifier("remote.triggerDream")
                     Button("同步录音与记忆", systemImage: "arrow.clockwise") { Task { await sync.refresh() } }
-                        .disabled(sync.isSyncing).accessibilityIdentifier("remote.syncMemory")
+                        .disabled(sync.isSyncing)
+                        .accessibilityIdentifier("remote.syncMemory")
                 }
             }
         }
@@ -262,8 +273,8 @@ struct RemoteMemoryView: View {
         let digest = MemoryCardDigest.cached(for: memory)
         let isParentExpanded = !collapsedParentIDs.contains(memory.id)
 
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
                 NavigationLink {
                     RemoteMemoryDetail(sync: sync, memoryID: memory.id)
                 } label: {
@@ -288,22 +299,18 @@ struct RemoteMemoryView: View {
                         }
                     } label: {
                         HStack(spacing: 3) {
-                            Image(systemName: isParentExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 9, weight: .bold))
                             Text("\(childMemories.count)")
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .monospacedDigit()
+                            Image(systemName: isParentExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9.5, weight: .bold))
                         }
                         .foregroundStyle(colors.secondaryInk)
-                        .padding(.horizontal, 7)
-                        .frame(minHeight: 36)
-                        .background(colors.paper, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(colors.secondaryInk.opacity(0.14), lineWidth: 0.5)
-                        }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(isParentExpanded ? "收起关联活页" : "展开关联活页")
+                    .accessibilityLabel(isParentExpanded ? "收起关联页面" : "展开关联页面")
                 }
 
                 if memory.kind == "person" {
@@ -311,14 +318,10 @@ struct RemoteMemoryView: View {
                         forgetting = memory
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(colors.margin)
-                            .frame(width: 36, height: 36)
-                            .background(colors.paper, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(colors.margin.opacity(0.22), lineWidth: 0.5)
-                            }
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(colors.secondaryInk)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("删除\(digest.title)")
@@ -327,38 +330,25 @@ struct RemoteMemoryView: View {
             }
 
             if !childMemories.isEmpty && isParentExpanded {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(childMemories.enumerated()), id: \.element.id) { idx, child in
-                        NavigationLink {
-                            RemoteMemoryDetail(sync: sync, memoryID: child.id)
-                        } label: {
-                            MemoryDirectoryChildRowLabel(
-                                child: child,
-                                isLast: idx == childMemories.count - 1
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button(child.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
-                                forgetting = child
-                            }
+                ForEach(Array(childMemories.enumerated()), id: \.element.id) { idx, child in
+                    Divider()
+                        .overlay(colors.line.opacity(0.75))
+                        .padding(.leading, 30)
+                    NavigationLink {
+                        RemoteMemoryDetail(sync: sync, memoryID: child.id)
+                    } label: {
+                        MemoryDirectoryChildRowLabel(
+                            child: child,
+                            isLast: idx == childMemories.count - 1
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button(child.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
+                            forgetting = child
                         }
                     }
                 }
-                .padding(.leading, 14)
-            } else if childMemories.isEmpty && ["topic", "briefing"].contains(memory.kind) && !digest.sectionPills.isEmpty {
-                HStack(spacing: 5) {
-                    Text("└─")
-                        .font(.system(size: 10.5, weight: .regular, design: .monospaced))
-                        .foregroundStyle(colors.secondaryInk.opacity(0.6))
-                    Text(digest.sectionPills.joined(separator: " · "))
-                        .font(.system(size: 11))
-                        .foregroundStyle(colors.secondaryInk)
-                        .lineLimit(1)
-                }
-                .padding(.leading, 14)
-                .padding(.vertical, 1)
-                .accessibilityHidden(true)
             }
         }
     }
@@ -376,7 +366,7 @@ struct RemoteMemoryView: View {
 
     private var categoryFilterStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .bottom, spacing: 5) {
+            HStack(spacing: 4) {
                 ForEach(visibleCategories) { category in
                     let isSelected = activeCategory == category
                     Button {
@@ -433,11 +423,16 @@ private struct RemoteMemoryDetail: View {
     @State private var forgetInFlight = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
-    private var memory: ContextMemory? { sync.memories.first { $0.id == memoryID && $0.status != "forgotten" } }
+
+    private var memory: ContextMemory? {
+        sync.memories.first { $0.id == memoryID && $0.status != "forgotten" }
+    }
+
     private var previousMemory: ContextMemory? {
         guard let prevID = navigationStack.last else { return nil }
         return sync.memories.first { $0.id == prevID && $0.status != "forgotten" }
     }
+
     private var siblingMemories: [ContextMemory] {
         guard let memory else { return [] }
         let active = sync.memories.filter { $0.status != "forgotten" }
@@ -458,44 +453,15 @@ private struct RemoteMemoryDetail: View {
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 8) {
+        let backAction: (() -> Void)? = previousMemory.map { prev in
+            {
+                _ = navigationStack.popLast()
+                memoryID = prev.id
+            }
+        }
+
+        Group {
             if let memory {
-                if let prev = previousMemory {
-                    Button {
-                        _ = navigationStack.popLast()
-                        memoryID = prev.id
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 10.5, weight: .semibold))
-                            Text("返回「\(MemoryCardDigest.cached(for: prev).title)」")
-                                .font(.system(size: 11.5, weight: .medium))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(colors.ink)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(colors.paper, in: Capsule())
-                        .overlay { Capsule().strokeBorder(colors.secondaryInk.opacity(0.16), lineWidth: 0.5) }
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
-                }
-
-                if ["project", "briefing", "topic", "person", "journal"].contains(memory.kind) && siblingMemories.count > 1 {
-                    MemoryBinderPageSwitcher(
-                        items: siblingMemories,
-                        selectedID: memory.id,
-                        onSelect: {
-                            navigationStack.removeAll()
-                            memoryID = $0.id
-                        }
-                    )
-                    .padding(.horizontal, 14)
-                    .padding(.top, previousMemory == nil ? 8 : 0)
-                }
-
                 if siblingMemories.count > 1 {
                     TabView(
                         selection: Binding(
@@ -509,12 +475,24 @@ private struct RemoteMemoryDetail: View {
                         ForEach(siblingMemories) { item in
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 14) {
-                                    ClientMemoryContent(memory: item, onDelete: { confirmingForget = true })
+                                    ClientMemoryContent(
+                                        memory: item,
+                                        siblingItems: siblingMemories,
+                                        onSelectSibling: {
+                                            navigationStack.removeAll()
+                                            memoryID = $0.id
+                                        },
+                                        backLabel: "返回",
+                                        onBack: backAction,
+                                        onDelete: { confirmingForget = true }
+                                    )
                                     if let failure = sync.failure {
-                                        Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                                        Text(failure)
+                                            .phoneText(.metadata)
+                                            .foregroundStyle(MoMoPalette.failure)
                                     }
                                 }
-                                .padding(14)
+                                .padding(16)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .tag(item.id)
@@ -524,12 +502,19 @@ private struct RemoteMemoryDetail: View {
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
-                            ClientMemoryContent(memory: memory, onDelete: { confirmingForget = true })
+                            ClientMemoryContent(
+                                memory: memory,
+                                backLabel: "返回",
+                                onBack: backAction,
+                                onDelete: { confirmingForget = true }
+                            )
                             if let failure = sync.failure {
-                                Text(failure).phoneText(.metadata).foregroundStyle(MoMoPalette.failure)
+                                Text(failure)
+                                    .phoneText(.metadata)
+                                    .foregroundStyle(MoMoPalette.failure)
                             }
                         }
-                        .padding(14)
+                        .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -556,7 +541,8 @@ private struct RemoteMemoryDetail: View {
                         Button("忘记这条记忆", role: .destructive) { confirmingForget = true }
                             .accessibilityIdentifier("remote.forgetMemory")
                     } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
-                    .accessibilityLabel("记忆操作").accessibilityIdentifier("remote.memoryActions")
+                    .accessibilityLabel("记忆操作")
+                    .accessibilityIdentifier("remote.memoryActions")
                     .disabled(forgetInFlight)
                 }
             }
