@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MoMoAgentClient
 
@@ -15,7 +16,6 @@ struct DesktopMemory: View {
     @State private var searching = false
     @State private var searchQuery = ""
     @State private var readingSource: ContextSource?
-    @State private var dreamRequesting = false
     @Environment(\.colorScheme) private var scheme
 
     private var vault: MemoryVaultSnapshot {
@@ -109,7 +109,7 @@ struct DesktopMemory: View {
         }
     }
 
-    private func buildFlatEntries(folders: [DreamMemorySection], activeID: String?) -> [VaultSidebarEntry] {
+    fileprivate func buildFlatEntries(folders: [DreamMemorySection], activeID: String?) -> [VaultSidebarEntry] {
         let childrenByParent = vault.childrenByParentID
         let metaByID = vault.rowMetaByID
         var entries: [VaultSidebarEntry] = []
@@ -178,7 +178,7 @@ struct DesktopMemory: View {
 
             HStack(spacing: 0) {
                 if wide || active == nil {
-                    vaultExplorerSidebar(folders: folders, activeID: active?.id, colors: colors)
+                    vaultExplorerSidebar(folders: folders, activeID: active?.id)
                         .frame(width: sidebarWidth, height: totalHeight)
                         .background(MoMoPalette.canvas)
                 }
@@ -195,7 +195,6 @@ struct DesktopMemory: View {
                         active: active,
                         folders: folders,
                         wide: wide,
-                        paneWidth: paneWidth,
                         colors: colors
                     )
                     .frame(width: paneWidth, height: totalHeight)
@@ -205,9 +204,10 @@ struct DesktopMemory: View {
         .background(MoMoPalette.paper)
         .task(id: isActive) {
             guard isActive else { return }
-            await model.loadContextIfStale(maxAge: 12)
+            await model.loadContextIfStale(maxAge: 6)
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                let retryDelay: Int = (model.memories.isEmpty && model.memoryError != nil) ? 2 : 8
+                do { try await Task.sleep(for: .seconds(retryDelay)) } catch { return }
                 await model.loadContext(silent: true)
             }
         }
@@ -291,36 +291,10 @@ struct DesktopMemory: View {
                     toggleAllFolders()
                 }
             }
-
-            VaultIconButton(
-                symbol: "sparkles",
-                isActive: dreamRequesting || model.memoryReviewStatus?.running == true,
-                help: "立即执行 Dream 闲时深度整理",
-                accessibilityLabel: "立即 Dream 整理",
-                accessibilityID: "settings.memory.dream",
-                disabled: model.contextLoading || dreamRequesting || model.memoryReviewStatus?.running == true
-            ) {
-                dreamRequesting = true
-                Task {
-                    defer { dreamRequesting = false }
-                    try? await model.triggerDream()
-                }
-            }
-
-            VaultIconButton(
-                symbol: "arrow.clockwise",
-                isActive: false,
-                help: "刷新记忆库",
-                accessibilityLabel: "刷新",
-                accessibilityID: "settings.memory.refresh",
-                disabled: model.contextLoading
-            ) {
-                Task { await model.loadContext() }
-            }
         }
     }
 
-    private func vaultExplorerSidebar(folders: [DreamMemorySection], activeID: String?, colors: MemoryNotebookPalette) -> some View {
+    private func vaultExplorerSidebar(folders: [DreamMemorySection], activeID: String?) -> some View {
         VStack(spacing: 8) {
             explorerToolbar
                 .padding(.horizontal, 14)
@@ -371,100 +345,57 @@ struct DesktopMemory: View {
                 .padding(.horizontal, 14)
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    if model.contextLoading && vault.activeMemories.isEmpty {
-                        ProgressView("正在读取记忆")
-                            .padding(32)
-                            .frame(maxWidth: .infinity)
-                    } else if folders.isEmpty {
-                        ContentUnavailableView(
-                            vault.activeMemories.isEmpty ? "还没有记忆" : "没有匹配的笔记",
-                            systemImage: vault.activeMemories.isEmpty ? "folder" : "magnifyingglass",
-                            description: Text(vault.activeMemories.isEmpty ? "点击右上角即可整理或刷新。" : "换个关键词试试。")
-                        )
-                        .padding(.top, 32)
-                    } else {
-                        let entries = buildFlatEntries(folders: folders, activeID: activeID)
-                        LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(entries) { entry in
-                                switch entry {
-                                case let .folder(sectionID, title, itemCount, isExpanded):
-                                    DesktopVaultFolderRow(
-                                        sectionID: sectionID,
-                                        title: title,
-                                        itemCount: itemCount,
-                                        isExpanded: isExpanded,
-                                        accent: colors.tabAccent(sectionID),
-                                        onToggle: { toggleFolder(sectionID) }
-                                    )
-                                    .equatable()
-                                    .padding(.top, 3)
-
-                                case let .note(memory, title, symbol, shortJournalDate, childCount, isExpanded, isSelected, underFolder):
-                                    DesktopOutlineRow(
-                                        memoryID: memory.id,
-                                        kind: memory.kind,
-                                        title: title,
-                                        symbol: symbol,
-                                        shortJournalDate: shortJournalDate,
-                                        rawMarkdown: memory.text,
-                                        isSelected: isSelected,
-                                        childCount: childCount,
-                                        isExpanded: isExpanded,
-                                        underFolder: underFolder,
-                                        accent: colors.tabAccent(memory.kind),
-                                        onActivate: {
-                                            let wasSelected = activeID == memory.id
-                                            readerBackStack.removeAll()
-                                            readerForwardStack.removeAll()
-                                            selectedMemoryID = memory.id
-                                            if childCount > 0 {
-                                                if wasSelected && isExpanded {
-                                                    expandedParentIDs.remove(memory.id)
-                                                } else if !isExpanded {
-                                                    expandedParentIDs.insert(memory.id)
-                                                }
-                                            }
-                                        },
-                                        onOpenPopup: { inspecting = memory },
-                                        onDelete: { deletingMemory = memory }
-                                    )
-                                    .equatable()
-                                    .id(memory.id)
-
-                                case let .childNote(parentID, child, title, symbol, isSelected, underFolder):
-                                    DesktopOutlineChildRow(
-                                        rowKey: "\(parentID)::\(child.id)",
-                                        childID: child.id,
-                                        kind: child.kind,
-                                        title: title,
-                                        symbol: symbol,
-                                        rawMarkdown: child.text,
-                                        isSelected: isSelected,
-                                        underFolder: underFolder,
-                                        accent: colors.tabAccent(child.kind),
-                                        onSelect: {
-                                            readerBackStack.removeAll()
-                                            readerForwardStack.removeAll()
-                                            selectedMemoryID = child.id
-                                        },
-                                        onOpenPopup: { inspecting = child },
-                                        onDelete: { deletingMemory = child }
-                                    )
-                                    .equatable()
-                                }
+            if model.contextLoading && vault.activeMemories.isEmpty {
+                ProgressView("正在读取记忆")
+                    .padding(32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            } else if folders.isEmpty {
+                ContentUnavailableView(
+                    vault.activeMemories.isEmpty ? "还没有记忆" : "没有匹配的笔记",
+                    systemImage: vault.activeMemories.isEmpty ? "folder" : "magnifyingglass",
+                    description: Text(vault.activeMemories.isEmpty ? "日常对话与录音沉淀后，MoMo 会在后台自动整理与归档。" : "换个关键词试试。")
+                )
+                .padding(.top, 32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            } else {
+                let entries = buildFlatEntries(folders: folders, activeID: activeID)
+                MacVaultSidebarListView(
+                    entries: entries,
+                    revealMemoryID: revealInExplorerID,
+                    onConsumedReveal: {
+                        if revealInExplorerID != nil {
+                            revealInExplorerID = nil
+                        }
+                    },
+                    onToggleFolder: { sectionID in
+                        toggleFolder(sectionID)
+                    },
+                    onActivateNote: { memory, childCount, isExpanded in
+                        let wasSelected = activeID == memory.id
+                        readerBackStack.removeAll()
+                        readerForwardStack.removeAll()
+                        selectedMemoryID = memory.id
+                        if childCount > 0 {
+                            if wasSelected && isExpanded {
+                                expandedParentIDs.remove(memory.id)
+                            } else if !isExpanded {
+                                expandedParentIDs.insert(memory.id)
                             }
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.bottom, 20)
+                    },
+                    onSelectChild: { child in
+                        readerBackStack.removeAll()
+                        readerForwardStack.removeAll()
+                        selectedMemoryID = child.id
+                    },
+                    onOpenPopup: { item in
+                        inspecting = item
+                    },
+                    onDelete: { item in
+                        deletingMemory = item
                     }
-                }
-                .onChange(of: revealInExplorerID) {
-                    guard let target = revealInExplorerID else { return }
-                    revealInExplorerID = nil
-                    proxy.scrollTo(target)
-                }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -475,7 +406,6 @@ struct DesktopMemory: View {
         active: ContextMemory?,
         folders: [DreamMemorySection],
         wide: Bool,
-        paneWidth: CGFloat,
         colors: MemoryNotebookPalette
     ) -> some View {
         if let memory = active {
@@ -483,7 +413,6 @@ struct DesktopMemory: View {
             let outgoing = vault.childrenByParentID[memory.id] ?? []
             let incoming = vault.backlinksByTargetID[memory.id] ?? []
             let sourceMap = model.transcriptSnapshot.sourceByIDRevision
-            let contentWidth = max(180, min(740, floor(paneWidth - 76)))
 
             let backAction: (() -> Void)? = {
                 if let prevID = readerBackStack.last {
@@ -507,75 +436,342 @@ struct DesktopMemory: View {
             } : nil
             let backText: String? = readerBackStack.isEmpty ? (!wide ? "目录" : nil) : "后退"
 
-            ScrollViewReader { scrollProxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Color.clear
-                            .frame(height: 0)
-                            .id("reader.top")
+            VStack(spacing: 0) {
+                DesktopNoteTopBar(
+                    memory: memory,
+                    siblingItems: siblings,
+                    backLabel: backText,
+                    onBack: backAction,
+                    canGoForward: !readerForwardStack.isEmpty,
+                    onForward: forwardAction,
+                    onSelectSibling: { next in
+                        readerBackStack.removeAll()
+                        readerForwardStack.removeAll()
+                        selectedMemoryID = next.id
+                        revealInExplorerID = next.id
+                    },
+                    onDelete: { deletingMemory = memory },
+                    onInstruct: model.taskStore != nil ? { prompt in
+                        try await Self.dispatchInstruction(prompt, model: model)
+                    } : nil,
+                    colors: colors
+                )
 
-                        ClientMemoryContent(
-                            memory: memory,
-                            allMemories: vault.activeMemories,
-                            siblingItems: siblings,
-                            precomputedOutgoing: outgoing,
-                            precomputedIncoming: incoming,
-                            onSelectSibling: { next in
-                                readerBackStack.removeAll()
-                                readerForwardStack.removeAll()
-                                selectedMemoryID = next.id
-                                revealInExplorerID = next.id
-                            },
-                            onSelectLinkedMemory: { target in
-                                navigateToNote(target.id, currentID: memory.id)
-                            },
-                            backLabel: backText,
-                            onBack: backAction,
-                            canGoForward: !readerForwardStack.isEmpty,
-                            onForward: forwardAction,
-                            onDelete: { deletingMemory = memory },
-                            borderless: true,
-                            sourceLookup: { ev in
-                                sourceMap["\(ev.sourceId)|\(ev.sourceRevision)"]
-                            },
-                            onOpenSource: { rec in
-                                readingSource = rec
-                            },
-                            onInstruct: model.taskStore != nil ? { prompt in
-                                try await Self.dispatchInstruction(prompt, model: model)
-                            } : nil
-                        )
-                        .environment(\.openURL, OpenURLAction { url in
-                            if let next = DreamMemoryLinkResolver.resolve(url: url, in: vault.activeMemories), next.id != memory.id {
-                                navigateToNote(next.id, currentID: memory.id)
-                                return .handled
+                Rectangle()
+                    .fill(MoMoPalette.line.opacity(0.65))
+                    .frame(height: 0.6)
+                    .accessibilityHidden(true)
+
+                MacNoteDocumentReader(
+                    memory: memory,
+                    outgoingMemories: outgoing,
+                    incomingMemories: incoming,
+                    onOpenLink: { url in
+                        if url.scheme?.lowercased() == "momoagent", url.host?.lowercased() == "evidence" {
+                            if let idx = Int(url.lastPathComponent),
+                               memory.evidence.indices.contains(idx) {
+                                let ev = memory.evidence[idx]
+                                if let src = sourceMap["\(ev.sourceId)|\(ev.sourceRevision)"] {
+                                    readingSource = src
+                                }
                             }
-                            return .systemAction
-                        })
-                        .frame(width: contentWidth, alignment: .leading)
-                        .padding(.vertical, 26)
+                            return
+                        }
+                        if url.scheme?.lowercased() == "momoagent", url.host?.lowercased() == "memory-id" {
+                            let targetID = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+                            if vault.byID[targetID] != nil, targetID != memory.id {
+                                navigateToNote(targetID, currentID: memory.id)
+                            }
+                            return
+                        }
+                        if let next = DreamMemoryLinkResolver.resolve(url: url, in: vault.activeMemories), next.id != memory.id {
+                            navigateToNote(next.id, currentID: memory.id)
+                            return
+                        }
+                        NSWorkspace.shared.open(url)
                     }
-                    .frame(width: paneWidth)
-                }
-                .onChange(of: memory.id) {
-                    scrollProxy.scrollTo("reader.top", anchor: .top)
-                }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(MoMoPalette.paper)
         } else {
-            ContentUnavailableView(
-                vault.activeMemories.isEmpty ? "记忆库为空" : "选择一篇笔记",
-                systemImage: "doc.text",
-                description: Text(vault.activeMemories.isEmpty ? "日常对话与录音经 Dream 整理后会归档在这里。" : "从左侧文件树选择项目、简报或人物笔记。")
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(MoMoPalette.paper)
+            ContentUnavailableView("选择一篇笔记", systemImage: "doc.text", description: Text("从左侧目录点击任一笔记或日志即可阅读。"))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(MoMoPalette.paper)
         }
     }
 }
 
-private enum VaultSidebarEntry: Identifiable {
-    case folder(sectionID: String, title: String, itemCount: Int, isExpanded: Bool)
+// MARK: - Pinned Top Breadcrumb & Action Bar (Outside ScrollView)
+
+private struct DesktopNoteTopBar: View {
+    let memory: ContextMemory
+    let siblingItems: [ContextMemory]
+    let backLabel: String?
+    let onBack: (() -> Void)?
+    let canGoForward: Bool
+    let onForward: (() -> Void)?
+    let onSelectSibling: (ContextMemory) -> Void
+    let onDelete: () -> Void
+    let onInstruct: ((String) async throws -> Void)?
+    let colors: MemoryNotebookPalette
+
+    @State private var copied = false
+    @State private var showingInstructionBar = false
+    @State private var instructionDraft = ""
+    @State private var submittingInstruction = false
+    @State private var instructionReceipt: String? = nil
+    @State private var instructionError: String? = nil
+
+    private func folderBreadcrumbTitle(for kind: String) -> String {
+        switch kind {
+        case "project": return "在研项目"
+        case "briefing": return "晨间简报"
+        case "topic": return "专题活页"
+        case "person": return "人物档案"
+        case "journal": return "每日日志"
+        default: return "核心记忆"
+        }
+    }
+
+    private func submitInstruction(using handler: @escaping (String) async throws -> Void) {
+        let trimmed = instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !submittingInstruction else { return }
+        let fullPrompt = MemoryCardDigest.buildInstructionPrompt(for: memory, instruction: trimmed)
+        submittingInstruction = true
+        instructionError = nil
+        Task {
+            defer { submittingInstruction = false }
+            do {
+                try await handler(fullPrompt)
+                instructionDraft = ""
+                showingInstructionBar = false
+                instructionReceipt = "已交给 MoMo 修正记忆与说话人（可在首页查看进度，完成后将自动同步）"
+            } catch {
+                instructionError = error.localizedDescription
+            }
+        }
+    }
+
+    var body: some View {
+        let digest = MemoryCardDigest.cached(for: memory)
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
+                if onBack != nil || onForward != nil {
+                    HStack(spacing: 2) {
+                        Button {
+                            onBack?()
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(onBack != nil ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(onBack == nil)
+                        .help(backLabel ?? "后退")
+                        .accessibilityLabel(backLabel ?? "返回")
+
+                        if onForward != nil {
+                            Button {
+                                onForward?()
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(canGoForward ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                    .frame(width: 26, height: 26)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!canGoForward)
+                            .help("前进")
+                            .accessibilityLabel("前进")
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+
+                HStack(spacing: 5) {
+                    Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(colors.tabAccent(memory.kind))
+                    Text(folderBreadcrumbTitle(for: memory.kind))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(colors.secondaryInk)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(colors.secondaryInk.opacity(0.55))
+                    Text(digest.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(colors.ink)
+                        .lineLimit(1)
+                }
+                .accessibilityHidden(true)
+
+                Spacer(minLength: 6)
+
+                if siblingItems.count > 1 {
+                    MemoryPageStepper(
+                        items: siblingItems,
+                        selectedID: memory.id,
+                        onSelect: onSelectSibling
+                    )
+                }
+
+                if onInstruct != nil {
+                    Button {
+                        showingInstructionBar.toggle()
+                        instructionError = nil
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("指令修改")
+                                .font(.system(size: 11.5, weight: .medium))
+                        }
+                        .foregroundStyle(showingInstructionBar ? colors.ink : colors.secondaryInk)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(
+                            showingInstructionBar ? colors.surface : colors.surface.opacity(0.75),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("通过自然语言指令让 MoMo 修改这篇记忆或纠正说话人")
+                    .accessibilityIdentifier("remote.memoryInstructToggle")
+                }
+
+                Menu {
+                    Button {
+                        MemoryCardDigest.copyToPasteboard(memory.text)
+                        copied = true
+                    } label: {
+                        Label(copied ? "已复制 Markdown" : "复制 Markdown", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        MemoryCardDigest.shareText(memory.text)
+                    } label: {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
+                    Divider()
+                    Button(role: .destructive, action: onDelete) {
+                        Label(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.secondaryInk)
+                        .frame(width: 26, height: 26)
+                        .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("更多操作")
+                .accessibilityLabel("更多操作")
+                .accessibilityIdentifier("remote.inlineMemoryMore")
+            }
+
+            if showingInstructionBar, let onInstruct {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(colors.tabAccent(memory.kind))
+                        TextField("告诉 MoMo 怎么改（如：这个 OKR 是 shengli 说的，帮我纠正说话人和相关记忆）…", text: $instructionDraft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .disabled(submittingInstruction)
+                            .onSubmit {
+                                submitInstruction(using: onInstruct)
+                            }
+                            .accessibilityIdentifier("remote.memoryInstructInput")
+
+                        if submittingInstruction {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Button {
+                                submitInstruction(using: onInstruct)
+                            } label: {
+                                Text("发送")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? colors.secondaryInk : MoMoPalette.canvas)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4.5)
+                                    .background(
+                                        instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                            ? colors.surface
+                                            : colors.ink,
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("remote.memoryInstructSend")
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(colors.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(colors.line, lineWidth: 0.7)
+                    }
+
+                    if let instructionError {
+                        Text(instructionError)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(MoMoPalette.failure)
+                    }
+                }
+            } else if let receipt = instructionReceipt {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(MoMoPalette.success)
+                    Text(receipt)
+                        .font(.system(size: 12))
+                        .foregroundStyle(colors.secondaryInk)
+                    Spacer()
+                    Button {
+                        instructionReceipt = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(colors.secondaryInk)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(colors.surface.opacity(0.55), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 9)
+        .onChange(of: memory.id) {
+            instructionError = nil
+            instructionReceipt = nil
+        }
+    }
+}
+
+// MARK: - Native AppKit 120fps Vault Sidebar List (NSTableView in NSScrollView)
+
+fileprivate enum VaultSidebarEntry: Identifiable, Equatable {
+    case folder(
+        sectionID: String,
+        title: String,
+        itemCount: Int,
+        isExpanded: Bool
+    )
     case note(
         memory: ContextMemory,
         title: String,
@@ -605,26 +801,1032 @@ private enum VaultSidebarEntry: Identifiable {
             return "child:\(parentID):\(child.id)"
         }
     }
-}
 
-private struct VaultHoverSurfaceModifier: ViewModifier {
-    let isSelected: Bool
-    var hoverOpacity: Double = 0.55
-    var cornerRadius: CGFloat = 6
-    @State private var hovered = false
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                isSelected
-                    ? MoMoPalette.surface
-                    : (hovered ? MoMoPalette.surface.opacity(hoverOpacity) : .clear),
-                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .onHover { hovered = $0 }
+    static func == (lhs: VaultSidebarEntry, rhs: VaultSidebarEntry) -> Bool {
+        switch (lhs, rhs) {
+        case let (.folder(s1, t1, c1, e1), .folder(s2, t2, c2, e2)):
+            return s1 == s2 && t1 == t2 && c1 == c2 && e1 == e2
+        case let (.note(m1, t1, sym1, d1, cc1, exp1, sel1, uf1), .note(m2, t2, sym2, d2, cc2, exp2, sel2, uf2)):
+            return m1.id == m2.id && m1.revision == m2.revision && t1 == t2 && sym1 == sym2
+                && d1 == d2 && cc1 == cc2 && exp1 == exp2 && sel1 == sel2 && uf1 == uf2
+        case let (.childNote(p1, c1, t1, sym1, sel1, uf1), .childNote(p2, c2, t2, sym2, sel2, uf2)):
+            return p1 == p2 && c1.id == c2.id && c1.revision == c2.revision
+                && t1 == t2 && sym1 == sym2 && sel1 == sel2 && uf1 == uf2
+        default:
+            return false
+        }
     }
 }
+
+private enum MacVaultPalette {
+    static func nsAccent(for kind: String) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let hex: UInt32
+            switch kind {
+            case "briefing": hex = dark ? 0x9C95DC : 0x6B63B5
+            case "project": hex = dark ? 0x7BA4CF : 0x4A78A8
+            case "journal": hex = dark ? 0x72B59D : 0x3F8A71
+            case "person": hex = dark ? 0xCFA082 : 0xA66E4E
+            case "topic": hex = dark ? 0x76AAB8 : 0x467F91
+            default: hex = dark ? 0x9A9A96 : 0x6E6E6A
+            }
+            return NSColor(
+                srgbRed: CGFloat((hex >> 16) & 0xFF) / 255.0,
+                green: CGFloat((hex >> 8) & 0xFF) / 255.0,
+                blue: CGFloat(hex & 0xFF) / 255.0,
+                alpha: 1.0
+            )
+        }
+    }
+
+    static var ink: NSColor { NSColor(named: "PhoneInk") ?? .labelColor }
+    static var muted: NSColor { NSColor(named: "PhoneMuted") ?? .secondaryLabelColor }
+    static var surface: NSColor { NSColor(named: "PhoneSurface") ?? .quaternaryLabelColor }
+    static var line: NSColor { NSColor(named: "PhoneLine") ?? .separatorColor }
+}
+
+private final class MacVaultRowCellView: NSTableCellView {
+    var entry: VaultSidebarEntry?
+    var isHovered: Bool = false {
+        didSet {
+            if oldValue != isHovered {
+                needsDisplay = true
+            }
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        setAccessibilityRole(.button)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(with entry: VaultSidebarEntry, hovered: Bool) {
+        self.entry = entry
+        self.isHovered = hovered
+        switch entry {
+        case let .folder(sectionID, title, itemCount, _):
+            setAccessibilityLabel("\(title)、\(itemCount)")
+            setAccessibilityIdentifier("remote.memoryFolder.\(sectionID)")
+        case let .note(memory, title, _, _, _, _, _, _):
+            setAccessibilityLabel(title)
+            setAccessibilityIdentifier("remote.memoryRow.\(memory.id)")
+        case let .childNote(parentID, child, title, _, _, _):
+            setAccessibilityLabel(title)
+            setAccessibilityIdentifier("remote.memoryChildRow.\(parentID).\(child.id)")
+        }
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let entry else { return }
+        let b = bounds
+        let outerInset: CGFloat = 8
+
+        switch entry {
+        case let .folder(sectionID, title, itemCount, isExpanded):
+            let pillRect = NSRect(x: outerInset, y: 2, width: max(10, b.width - outerInset * 2), height: max(10, b.height - 3))
+            if isHovered {
+                MacVaultPalette.surface.withAlphaComponent(0.55).setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
+            }
+
+            let chevronName = isExpanded ? "chevron.down" : "chevron.right"
+            drawSymbol(chevronName, pointSize: 9, weight: .semibold, color: MacVaultPalette.muted.withAlphaComponent(0.85), in: NSRect(x: pillRect.minX + 6, y: pillRect.minY, width: 11, height: pillRect.height))
+
+            let folderSym = DreamMemoryCategory.folderSymbol(for: sectionID)
+            drawSymbol(folderSym, pointSize: 11.5, weight: .medium, color: MacVaultPalette.nsAccent(for: sectionID), in: NSRect(x: pillRect.minX + 21, y: pillRect.minY, width: 15, height: pillRect.height))
+
+            let countStr = "\(itemCount)" as NSString
+            let countAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+                .foregroundColor: MacVaultPalette.muted
+            ]
+            let countSize = countStr.size(withAttributes: countAttrs)
+            let countX = pillRect.maxX - 7 - countSize.width
+            countStr.draw(at: NSPoint(x: countX, y: pillRect.midY - countSize.height * 0.5), withAttributes: countAttrs)
+
+            let titleX = pillRect.minX + 41
+            let titleWidth = max(10, countX - titleX - 6)
+            drawTruncatedText(title, font: .systemFont(ofSize: 12.5, weight: .semibold), color: MacVaultPalette.ink.withAlphaComponent(0.9), in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
+
+        case let .note(memory, title, symbol, shortJournalDate, childCount, isExpanded, isSelected, underFolder):
+            let indent: CGFloat = underFolder ? 14 : 0
+            if underFolder {
+                MacVaultPalette.line.withAlphaComponent(0.75).setFill()
+                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
+            }
+            let pillRect = NSRect(x: outerInset + indent, y: 0.5, width: max(10, b.width - outerInset * 2 - indent), height: max(10, b.height - 1))
+            if isSelected {
+                MacVaultPalette.surface.setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
+                MacVaultPalette.nsAccent(for: memory.kind).setFill()
+                let barRect = NSRect(x: pillRect.minX, y: pillRect.minY + 5, width: 2.5, height: max(4, pillRect.height - 10))
+                NSBezierPath(roundedRect: barRect, xRadius: 1.25, yRadius: 1.25).fill()
+            } else if isHovered {
+                MacVaultPalette.surface.withAlphaComponent(0.55).setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
+            }
+
+            if childCount > 0 {
+                drawSymbol(isExpanded ? "chevron.down" : "chevron.right", pointSize: 8.5, weight: .bold, color: MacVaultPalette.muted, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
+            } else {
+                let symColor = isSelected ? MacVaultPalette.nsAccent(for: memory.kind) : MacVaultPalette.muted.withAlphaComponent(0.85)
+                drawSymbol(symbol, pointSize: 11, weight: .regular, color: symColor, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
+            }
+
+            var rightEdge = pillRect.maxX - 8
+            if childCount > 0 {
+                let trail = "\(childCount)" as NSString
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+                    .foregroundColor: MacVaultPalette.muted
+                ]
+                let sz = trail.size(withAttributes: attrs)
+                rightEdge -= sz.width
+                trail.draw(at: NSPoint(x: rightEdge, y: pillRect.midY - sz.height * 0.5), withAttributes: attrs)
+                rightEdge -= 5
+            } else if let date = shortJournalDate {
+                let trail = date as NSString
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+                    .foregroundColor: MacVaultPalette.muted.withAlphaComponent(0.82)
+                ]
+                let sz = trail.size(withAttributes: attrs)
+                rightEdge -= sz.width
+                trail.draw(at: NSPoint(x: rightEdge, y: pillRect.midY - sz.height * 0.5), withAttributes: attrs)
+                rightEdge -= 5
+            }
+
+            let titleX = pillRect.minX + 25
+            let titleWidth = max(10, rightEdge - titleX)
+            let titleColor = isSelected ? MacVaultPalette.ink : MacVaultPalette.ink.withAlphaComponent(0.88)
+            drawTruncatedText(title, font: .systemFont(ofSize: 13, weight: isSelected ? .medium : .regular), color: titleColor, in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
+
+        case let .childNote(_, child, title, symbol, isSelected, underFolder):
+            let indent: CGFloat = underFolder ? 29 : 15
+            MacVaultPalette.line.withAlphaComponent(0.75).setFill()
+            if underFolder {
+                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
+                NSRect(x: outerInset + 23, y: 0, width: 1, height: b.height).fill()
+            } else {
+                NSRect(x: outerInset + 9, y: 0, width: 1, height: b.height).fill()
+            }
+            let pillRect = NSRect(x: outerInset + indent, y: 0.5, width: max(10, b.width - outerInset * 2 - indent), height: max(10, b.height - 1))
+            if isSelected {
+                MacVaultPalette.surface.setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
+                MacVaultPalette.nsAccent(for: child.kind).setFill()
+                let barRect = NSRect(x: pillRect.minX, y: pillRect.minY + 4, width: 2.5, height: max(4, pillRect.height - 8))
+                NSBezierPath(roundedRect: barRect, xRadius: 1.25, yRadius: 1.25).fill()
+            } else if isHovered {
+                MacVaultPalette.surface.withAlphaComponent(0.5).setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6).fill()
+            }
+
+            let symColor = isSelected ? MacVaultPalette.nsAccent(for: child.kind) : MacVaultPalette.muted.withAlphaComponent(0.75)
+            drawSymbol(symbol, pointSize: 10.5, weight: .regular, color: symColor, in: NSRect(x: pillRect.minX + 8, y: pillRect.minY, width: 12, height: pillRect.height))
+
+            let titleX = pillRect.minX + 25
+            let titleWidth = max(10, pillRect.maxX - 8 - titleX)
+            let titleColor = isSelected ? MacVaultPalette.ink : MacVaultPalette.muted
+            drawTruncatedText(title, font: .systemFont(ofSize: 12.5, weight: isSelected ? .medium : .regular), color: titleColor, in: NSRect(x: titleX, y: pillRect.minY, width: titleWidth, height: pillRect.height))
+        }
+    }
+
+    private func drawSymbol(_ name: String, pointSize: CGFloat, weight: NSFont.Weight, color: NSColor, in box: NSRect) {
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+            .applying(.init(paletteColors: [color]))
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return }
+        let sz = img.size
+        let rect = NSRect(
+            x: box.midX - sz.width * 0.5,
+            y: box.midY - sz.height * 0.5,
+            width: sz.width,
+            height: sz.height
+        )
+        img.draw(in: rect)
+    }
+
+    private func drawTruncatedText(_ string: String, font: NSFont, color: NSColor, in box: NSRect) {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: style
+        ]
+        let ns = string as NSString
+        let lineH = ceil(font.ascender - font.descender + font.leading)
+        let rect = NSRect(x: box.minX, y: floor(box.midY - lineH * 0.5), width: box.width, height: lineH + 2)
+        ns.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
+    }
+}
+
+private final class MacVaultNSTableView: NSTableView {
+    var contextMenuProvider: ((Int) -> NSMenu?)?
+    var onRowPrimaryClick: ((Int) -> Void)?
+    var hoveredRow: Int = -1
+    var isLiveScrollingNow: Bool = false
+    private var trackingAreaRef: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingAreaRef {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    func setHoveredRow(_ next: Int) {
+        guard hoveredRow != next else { return }
+        let old = hoveredRow
+        hoveredRow = next
+        if old >= 0, old < numberOfRows, let oldCell = view(atColumn: 0, row: old, makeIfNecessary: false) as? MacVaultRowCellView {
+            oldCell.isHovered = false
+        }
+        if next >= 0, next < numberOfRows, let newCell = view(atColumn: 0, row: next, makeIfNecessary: false) as? MacVaultRowCellView {
+            newCell.isHovered = true
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard !isLiveScrollingNow else { return }
+        let pt = convert(event.locationInWindow, from: nil)
+        setHoveredRow(row(at: pt))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setHoveredRow(-1)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        let clicked = row(at: pt)
+        if clicked >= 0, event.modifierFlags.intersection([.control]).isEmpty {
+            onRowPrimaryClick?(clicked)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let pt = convert(event.locationInWindow, from: nil)
+        let clicked = row(at: pt)
+        guard clicked >= 0 else { return nil }
+        return contextMenuProvider?(clicked)
+    }
+}
+
+private struct MacVaultSidebarListView: NSViewRepresentable {
+    let entries: [VaultSidebarEntry]
+    let revealMemoryID: String?
+    let onConsumedReveal: () -> Void
+    let onToggleFolder: (String) -> Void
+    let onActivateNote: (ContextMemory, Int, Bool) -> Void
+    let onSelectChild: (ContextMemory) -> Void
+    let onOpenPopup: (ContextMemory) -> Void
+    let onDelete: (ContextMemory) -> Void
+
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var entries: [VaultSidebarEntry] = []
+        var onToggleFolder: (String) -> Void
+        var onActivateNote: (ContextMemory, Int, Bool) -> Void
+        var onSelectChild: (ContextMemory) -> Void
+        var onOpenPopup: (ContextMemory) -> Void
+        var onDelete: (ContextMemory) -> Void
+        weak var tableView: MacVaultNSTableView?
+        private var scrollObservers: [NSObjectProtocol] = []
+
+        init(
+            onToggleFolder: @escaping (String) -> Void,
+            onActivateNote: @escaping (ContextMemory, Int, Bool) -> Void,
+            onSelectChild: @escaping (ContextMemory) -> Void,
+            onOpenPopup: @escaping (ContextMemory) -> Void,
+            onDelete: @escaping (ContextMemory) -> Void
+        ) {
+            self.onToggleFolder = onToggleFolder
+            self.onActivateNote = onActivateNote
+            self.onSelectChild = onSelectChild
+            self.onOpenPopup = onOpenPopup
+            self.onDelete = onDelete
+        }
+
+        deinit {
+            for obs in scrollObservers {
+                NotificationCenter.default.removeObserver(obs)
+            }
+        }
+
+        func bindScrollNotifications(scrollView: NSScrollView, tableView: MacVaultNSTableView) {
+            let nc = NotificationCenter.default
+            scrollObservers.append(
+                nc.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: scrollView, queue: .main) { [weak tableView] _ in
+                    MainActor.assumeIsolated {
+                        tableView?.isLiveScrollingNow = true
+                        tableView?.setHoveredRow(-1)
+                    }
+                }
+            )
+            scrollObservers.append(
+                nc.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: scrollView, queue: .main) { [weak tableView] _ in
+                    MainActor.assumeIsolated {
+                        tableView?.isLiveScrollingNow = false
+                    }
+                }
+            )
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            entries.count
+        }
+
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            guard entries.indices.contains(row) else { return 28 }
+            switch entries[row] {
+            case .folder: return 30
+            case .note: return 28
+            case .childNote: return 26
+            }
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard entries.indices.contains(row) else { return nil }
+            let id = NSUserInterfaceItemIdentifier("VaultRowCell")
+            let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? MacVaultRowCellView) ?? {
+                let c = MacVaultRowCellView(frame: .zero)
+                c.identifier = id
+                return c
+            }()
+            let hovered = (tableView as? MacVaultNSTableView)?.hoveredRow == row
+            cell.configure(with: entries[row], hovered: hovered)
+            return cell
+        }
+
+        func shouldSelectRow(_ row: Int) -> Bool {
+            false
+        }
+
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            false
+        }
+
+        func handlePrimaryClick(row: Int) {
+            guard entries.indices.contains(row) else { return }
+            switch entries[row] {
+            case let .folder(sectionID, _, _, _):
+                onToggleFolder(sectionID)
+            case let .note(memory, _, _, _, childCount, isExpanded, _, _):
+                onActivateNote(memory, childCount, isExpanded)
+            case let .childNote(_, child, _, _, _, _):
+                onSelectChild(child)
+            }
+        }
+
+        func buildContextMenu(for row: Int) -> NSMenu? {
+            guard entries.indices.contains(row) else { return nil }
+            let targetMemory: ContextMemory
+            switch entries[row] {
+            case .folder:
+                return nil
+            case let .note(memory, _, _, _, _, _, _, _):
+                targetMemory = memory
+            case let .childNote(_, child, _, _, _, _):
+                targetMemory = child
+            }
+            let menu = NSMenu()
+            let copyItem = NSMenuItem(title: "复制 Markdown", action: #selector(contextCopy(_:)), keyEquivalent: "")
+            copyItem.target = self
+            copyItem.representedObject = targetMemory
+            menu.addItem(copyItem)
+
+            let popupItem = NSMenuItem(title: "在独立窗口预览", action: #selector(contextOpenPopup(_:)), keyEquivalent: "")
+            popupItem.target = self
+            popupItem.representedObject = targetMemory
+            menu.addItem(popupItem)
+
+            menu.addItem(.separator())
+
+            let deleteTitle = targetMemory.kind == "person" ? "删除该人物" : "忘记这条记忆"
+            let deleteItem = NSMenuItem(title: deleteTitle, action: #selector(contextDelete(_:)), keyEquivalent: "")
+            deleteItem.target = self
+            deleteItem.representedObject = targetMemory
+            menu.addItem(deleteItem)
+            return menu
+        }
+
+        @objc private func contextCopy(_ sender: NSMenuItem) {
+            guard let mem = sender.representedObject as? ContextMemory else { return }
+            MemoryCardDigest.copyToPasteboard(mem.text)
+        }
+
+        @objc private func contextOpenPopup(_ sender: NSMenuItem) {
+            guard let mem = sender.representedObject as? ContextMemory else { return }
+            onOpenPopup(mem)
+        }
+
+        @objc private func contextDelete(_ sender: NSMenuItem) {
+            guard let mem = sender.representedObject as? ContextMemory else { return }
+            onDelete(mem)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onToggleFolder: onToggleFolder,
+            onActivateNote: onActivateNote,
+            onSelectChild: onSelectChild,
+            onOpenPopup: onOpenPopup,
+            onDelete: onDelete
+        )
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.borderType = .noBorder
+        scrollView.contentInsets = NSEdgeInsets(top: 2, left: 0, bottom: 18, right: 0)
+        scrollView.automaticallyAdjustsContentInsets = false
+
+        let tableView = MacVaultNSTableView()
+        tableView.style = .plain
+        tableView.headerView = nil
+        tableView.backgroundColor = .clear
+        tableView.intercellSpacing = NSSize(width: 0, height: 1)
+        tableView.selectionHighlightStyle = .none
+        tableView.allowsEmptySelection = true
+        tableView.focusRingType = .none
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("VaultMainColumn"))
+        col.resizingMask = .autoresizingMask
+        tableView.addTableColumn(col)
+
+        let coord = context.coordinator
+        coord.entries = entries
+        coord.tableView = tableView
+        tableView.dataSource = coord
+        tableView.delegate = coord
+        tableView.onRowPrimaryClick = { [weak coord] row in
+            coord?.handlePrimaryClick(row: row)
+        }
+        tableView.contextMenuProvider = { [weak coord] row in
+            coord?.buildContextMenu(for: row)
+        }
+
+        scrollView.documentView = tableView
+        coord.bindScrollNotifications(scrollView: scrollView, tableView: tableView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coord = context.coordinator
+        coord.onToggleFolder = onToggleFolder
+        coord.onActivateNote = onActivateNote
+        coord.onSelectChild = onSelectChild
+        coord.onOpenPopup = onOpenPopup
+        coord.onDelete = onDelete
+
+        guard let tableView = coord.tableView else { return }
+        if coord.entries != entries {
+            let oldEntries = coord.entries
+            coord.entries = entries
+            if oldEntries.count == entries.count,
+               zip(oldEntries, entries).allSatisfy({ $0.id == $1.id }) {
+                // Only selection/title changed in-place: update visible cells in O(visible) without touching scroll position!
+                let visibleRange = tableView.rows(in: tableView.visibleRect)
+                if visibleRange.length > 0 {
+                    for row in visibleRange.location..<NSMaxRange(visibleRange) where entries.indices.contains(row) {
+                        if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MacVaultRowCellView {
+                            cell.configure(with: entries[row], hovered: tableView.hoveredRow == row)
+                        }
+                    }
+                }
+            } else {
+                tableView.reloadData()
+            }
+        }
+
+        if let targetID = revealMemoryID {
+            if let idx = entries.firstIndex(where: { entry in
+                switch entry {
+                case .folder: return false
+                case .note(let m, _, _, _, _, _, _, _): return m.id == targetID
+                case .childNote(_, let c, _, _, _, _): return c.id == targetID
+                }
+            }) {
+                tableView.scrollRowToVisible(idx)
+            }
+            DispatchQueue.main.async {
+                onConsumedReveal()
+            }
+        }
+    }
+}
+
+// MARK: - Native AppKit 120fps Tiled Note Document Reader (NSTextView as NSScrollView.documentView)
+
+private enum MacFullNoteComposer {
+    final class ComposedNote: NSObject, @unchecked Sendable {
+        let key: String
+        let memoryID: String
+        let attributedString: NSAttributedString
+        let quoteCharRanges: [NSRange]
+        let ruleCharIndices: [Int]
+
+        init(
+            key: String,
+            memoryID: String,
+            attributedString: NSAttributedString,
+            quoteCharRanges: [NSRange],
+            ruleCharIndices: [Int]
+        ) {
+            self.key = key
+            self.memoryID = memoryID
+            self.attributedString = attributedString
+            self.quoteCharRanges = quoteCharRanges
+            self.ruleCharIndices = ruleCharIndices
+        }
+    }
+
+    private nonisolated(unsafe) static let cache: NSCache<NSString, ComposedNote> = {
+        let c = NSCache<NSString, ComposedNote>()
+        c.countLimit = 256
+        return c
+    }()
+
+    private static let linkColor = NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return dark
+            ? NSColor(srgbRed: 0.54, green: 0.73, blue: 0.93, alpha: 1.0)
+            : NSColor(srgbRed: 0.18, green: 0.39, blue: 0.62, alpha: 1.0)
+    }
+
+    static func compose(
+        memory: ContextMemory,
+        outgoing: [ContextMemory],
+        incoming: [ContextMemory]
+    ) -> ComposedNote {
+        var hasher = Hasher()
+        hasher.combine(memory.id)
+        hasher.combine(memory.revision)
+        hasher.combine(memory.text.utf8.count)
+        hasher.combine(outgoing.map(\.id))
+        hasher.combine(incoming.map(\.id))
+        let key = "\(memory.id)|\(memory.revision)|\(outgoing.count)|\(incoming.count)|\(hasher.finalize())"
+        let nsKey = key as NSString
+        if let hit = cache.object(forKey: nsKey) {
+            return hit
+        }
+
+        let digest = MemoryCardDigest.cached(for: memory)
+        let ink = MacVaultPalette.ink
+        let muted = MacVaultPalette.muted
+        let accent = MacVaultPalette.nsAccent(for: memory.kind)
+
+        let result = NSMutableAttributedString()
+        var shiftedQuotes: [NSRange] = []
+        var ruleIndices: [Int] = []
+
+        // 1. Document H1 Title
+        let titleStyle = NSMutableParagraphStyle()
+        titleStyle.lineSpacing = 4
+        titleStyle.paragraphSpacing = 8
+        result.append(NSAttributedString(
+            string: digest.title + "\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: ink,
+                .paragraphStyle: titleStyle
+            ]
+        ))
+
+        // 2. Obsidian Properties Metadata Strip
+        let metaStyle = NSMutableParagraphStyle()
+        metaStyle.lineSpacing = 3
+        metaStyle.paragraphSpacing = 22
+        let metaLine = NSMutableAttributedString()
+        metaLine.append(NSAttributedString(
+            string: digest.badge.title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: accent,
+                .paragraphStyle: metaStyle
+            ]
+        ))
+
+        var metaParts: [String] = []
+        if let date = digest.dateBadge {
+            metaParts.append(date)
+        }
+        if let rawPath = memory.path, !rawPath.isEmpty {
+            metaParts.append(rawPath)
+        }
+        let linkCount = max(outgoing.count, digest.linkedPaths.count)
+        if linkCount > 0 {
+            metaParts.append("\(linkCount) 个链接")
+        }
+        if !incoming.isEmpty {
+            metaParts.append("\(incoming.count) 处反向提及")
+        }
+        if !memory.evidence.isEmpty {
+            metaParts.append("\(memory.evidence.count) 段原音")
+        }
+        if !metaParts.isEmpty {
+            metaLine.append(NSAttributedString(
+                string: "   ·   " + metaParts.joined(separator: "   ·   "),
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular),
+                    .foregroundColor: muted,
+                    .paragraphStyle: metaStyle
+                ]
+            ))
+        }
+        metaLine.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: metaStyle]))
+        result.append(metaLine)
+        ruleIndices.append(max(0, result.length - 1))
+
+        // 3. Main Markdown Body
+        let bodyMarkdown = digest.isNotebookMarkdown ? digest.cleanedNotebookMarkdown : memory.text
+        let bodyRendered = MacMarkdownRenderer.render(
+            markdown: bodyMarkdown,
+            handwriting: true,
+            plainTextOnly: !digest.isNotebookMarkdown
+        )
+        let bodyOffset = result.length
+        result.append(bodyRendered.attributedString)
+        for qr in bodyRendered.quoteCharRanges {
+            shiftedQuotes.append(NSRange(location: qr.location + bodyOffset, length: qr.length))
+        }
+
+        // 4. Bidirectional Links & Evidence Footer
+        let hasFooter = !outgoing.isEmpty || !digest.linkedPaths.isEmpty || !incoming.isEmpty || !memory.evidence.isEmpty
+        if hasFooter {
+            let sepStyle = NSMutableParagraphStyle()
+            sepStyle.paragraphSpacingBefore = 18
+            sepStyle.paragraphSpacing = 14
+            result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: sepStyle]))
+            ruleIndices.append(max(0, result.length - 1))
+
+            let secHeaderStyle = NSMutableParagraphStyle()
+            secHeaderStyle.paragraphSpacingBefore = 10
+            secHeaderStyle.paragraphSpacing = 5
+
+            // Outgoing Links
+            if !outgoing.isEmpty {
+                result.append(NSAttributedString(
+                    string: "↗ 关联笔记  \(outgoing.count)\n",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                        .foregroundColor: muted,
+                        .paragraphStyle: secHeaderStyle
+                    ]
+                ))
+                let outStyle = NSMutableParagraphStyle()
+                outStyle.lineSpacing = 5
+                outStyle.paragraphSpacing = 10
+                let line = NSMutableAttributedString()
+                for (idx, item) in outgoing.enumerated() {
+                    if idx > 0 {
+                        line.append(NSAttributedString(
+                            string: "    ",
+                            attributes: [.font: NSFont.systemFont(ofSize: 12.5), .foregroundColor: muted, .paragraphStyle: outStyle]
+                        ))
+                    }
+                    let targetTitle = MemoryCardDigest.cached(for: item).title
+                    let encodedID = item.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? item.id
+                    var attrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
+                        .foregroundColor: linkColor,
+                        .paragraphStyle: outStyle
+                    ]
+                    if let url = URL(string: "momoagent://memory-id/\(encodedID)") {
+                        attrs[.link] = url
+                    }
+                    line.append(NSAttributedString(string: "[[\(targetTitle)]]", attributes: attrs))
+                }
+                line.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12.5), .paragraphStyle: outStyle]))
+                result.append(line)
+            } else if !digest.linkedPaths.isEmpty {
+                result.append(NSAttributedString(
+                    string: "↗ 关联笔记  \(digest.linkedPaths.count)\n",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                        .foregroundColor: muted,
+                        .paragraphStyle: secHeaderStyle
+                    ]
+                ))
+                let outStyle = NSMutableParagraphStyle()
+                outStyle.lineSpacing = 5
+                outStyle.paragraphSpacing = 10
+                let line = NSMutableAttributedString()
+                for (idx, relPath) in digest.linkedPaths.enumerated() {
+                    if idx > 0 {
+                        line.append(NSAttributedString(string: "    ", attributes: [.font: NSFont.systemFont(ofSize: 12.5), .paragraphStyle: outStyle]))
+                    }
+                    let friendly = MemoryCardDigest.humanizeNotebookPath(relPath)
+                    let encoded = relPath
+                        .split(separator: "/")
+                        .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                        .joined(separator: "/")
+                    var attrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
+                        .foregroundColor: linkColor,
+                        .paragraphStyle: outStyle
+                    ]
+                    if let url = URL(string: "momoagent://memory/\(encoded)") {
+                        attrs[.link] = url
+                    }
+                    line.append(NSAttributedString(string: "[[\(friendly)]]", attributes: attrs))
+                }
+                line.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12.5), .paragraphStyle: outStyle]))
+                result.append(line)
+            }
+
+            // Backlinks (Linked Mentions)
+            if !incoming.isEmpty {
+                result.append(NSAttributedString(
+                    string: "↩ 反向链接 · 被以下笔记提及  \(incoming.count)\n",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                        .foregroundColor: muted,
+                        .paragraphStyle: secHeaderStyle
+                    ]
+                ))
+                for backlink in incoming {
+                    let bDigest = MemoryCardDigest.cached(for: backlink)
+                    let encodedID = backlink.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? backlink.id
+                    let titleRowStyle = NSMutableParagraphStyle()
+                    titleRowStyle.paragraphSpacingBefore = 4
+                    titleRowStyle.paragraphSpacing = bDigest.highlights.isEmpty ? 6 : 2
+
+                    let itemStr = NSMutableAttributedString()
+                    var linkAttrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                        .foregroundColor: linkColor,
+                        .paragraphStyle: titleRowStyle
+                    ]
+                    if let url = URL(string: "momoagent://memory-id/\(encodedID)") {
+                        linkAttrs[.link] = url
+                    }
+                    itemStr.append(NSAttributedString(string: "[[\(bDigest.title)]]", attributes: linkAttrs))
+                    itemStr.append(NSAttributedString(
+                        string: "   \(bDigest.badge.title)\n",
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                            .foregroundColor: muted,
+                            .paragraphStyle: titleRowStyle
+                        ]
+                    ))
+                    result.append(itemStr)
+
+                    if let snippet = bDigest.highlights.first, !snippet.isEmpty {
+                        let snipStyle = NSMutableParagraphStyle()
+                        snipStyle.firstLineHeadIndent = 10
+                        snipStyle.headIndent = 10
+                        snipStyle.lineSpacing = 3
+                        snipStyle.paragraphSpacing = 8
+                        let clipped = snippet.count > 120 ? String(snippet.prefix(120)) + "…" : snippet
+                        result.append(NSAttributedString(
+                            string: clipped + "\n",
+                            attributes: [
+                                .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                                .foregroundColor: muted,
+                                .paragraphStyle: snipStyle
+                            ]
+                        ))
+                    }
+                }
+            }
+
+            // Evidence links
+            if !memory.evidence.isEmpty {
+                result.append(NSAttributedString(
+                    string: "⏱ 原音证据  \(memory.evidence.count)\n",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                        .foregroundColor: muted,
+                        .paragraphStyle: secHeaderStyle
+                    ]
+                ))
+                let evStyle = NSMutableParagraphStyle()
+                evStyle.lineSpacing = 4
+                evStyle.paragraphSpacing = 6
+                for (idx, ev) in memory.evidence.enumerated() {
+                    let quoteSnippet = ev.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let shortQuote = quoteSnippet.count > 80 ? String(quoteSnippet.prefix(80)) + "…" : quoteSnippet
+                    var attrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                        .foregroundColor: linkColor,
+                        .paragraphStyle: evStyle
+                    ]
+                    if let url = URL(string: "momoagent://evidence/\(idx)") {
+                        attrs[.link] = url
+                    }
+                    result.append(NSAttributedString(string: "• 「\(shortQuote)」  [查看原音]\n", attributes: attrs))
+                }
+            }
+        }
+
+        let composed = ComposedNote(
+            key: key,
+            memoryID: memory.id,
+            attributedString: result,
+            quoteCharRanges: shiftedQuotes,
+            ruleCharIndices: ruleIndices
+        )
+        cache.setObject(composed, forKey: nsKey)
+        return composed
+    }
+}
+
+private final class MacNoteDocumentTextView: NSTextView {
+    var currentComposedKey: String = ""
+    var currentMemoryID: String = ""
+    var quoteCharRanges: [NSRange] = []
+    var ruleCharIndices: [Int] = []
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let lm = layoutManager, let tc = textContainer, let ts = textStorage else { return }
+        let origin = textContainerOrigin
+        let totalLen = ts.length
+        let lineColor = MacVaultPalette.line
+
+        if !ruleCharIndices.isEmpty {
+            lineColor.withAlphaComponent(0.75).setFill()
+            for charIdx in ruleCharIndices where charIdx >= 0 && charIdx < totalLen {
+                let gIdx = lm.glyphIndexForCharacter(at: charIdx)
+                let lineRect = lm.lineFragmentRect(forGlyphAt: gIdx, effectiveRange: nil)
+                let y = origin.y + lineRect.maxY + 10
+                let ruleRect = NSRect(x: origin.x, y: y, width: tc.containerSize.width, height: 0.7)
+                if ruleRect.intersects(dirtyRect) {
+                    ruleRect.fill()
+                }
+            }
+        }
+
+        if !quoteCharRanges.isEmpty {
+            lineColor.setFill()
+            for charRange in quoteCharRanges where charRange.location >= 0 && NSMaxRange(charRange) <= totalLen {
+                let glyphRange = lm.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+                let rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+                guard rect.height > 1 else { continue }
+                let barRect = NSRect(
+                    x: origin.x + 0.5,
+                    y: origin.y + rect.minY + 1,
+                    width: 2.5,
+                    height: max(4, rect.height - 2)
+                )
+                if barRect.intersects(dirtyRect) {
+                    NSBezierPath(roundedRect: barRect, xRadius: 1.25, yRadius: 1.25).fill()
+                }
+            }
+        }
+    }
+}
+
+private final class MacNoteDocumentScrollView: NSScrollView {
+    override func layout() {
+        super.layout()
+        guard let tv = documentView as? MacNoteDocumentTextView else { return }
+        let vw = max(220, contentView.bounds.width)
+        let readableWidth = max(180, min(740, floor(vw - 88)))
+        let sideInset = max(28, floor((vw - readableWidth) * 0.5))
+        if abs(tv.textContainerInset.width - sideInset) >= 0.5 || abs(tv.textContainerInset.height - 26) >= 0.5 {
+            tv.textContainerInset = NSSize(width: sideInset, height: 26)
+        }
+        if abs(tv.frame.width - vw) >= 0.5 {
+            tv.setFrameSize(NSSize(width: vw, height: tv.frame.height))
+        }
+    }
+}
+
+private struct MacNoteDocumentReader: NSViewRepresentable {
+    let memory: ContextMemory
+    let outgoingMemories: [ContextMemory]
+    let incomingMemories: [ContextMemory]
+    let onOpenLink: (URL) -> Void
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var onOpenLink: (URL) -> Void
+        weak var textView: MacNoteDocumentTextView?
+
+        init(onOpenLink: @escaping (URL) -> Void) {
+            self.onOpenLink = onOpenLink
+        }
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            if let url = link as? URL {
+                onOpenLink(url)
+                return true
+            }
+            if let str = link as? String, let url = URL(string: str) {
+                onOpenLink(url)
+                return true
+            }
+            return false
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onOpenLink: onOpenLink)
+    }
+
+    func makeNSView(context: Context) -> MacNoteDocumentScrollView {
+        let scrollView = MacNoteDocumentScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.borderType = .noBorder
+
+        let textView = MacNoteDocumentTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.drawsBackground = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.usesFontPanel = false
+        textView.usesFindBar = true
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.linkTextAttributes = [.cursor: NSCursor.pointingHand]
+        textView.textContainerInset = NSSize(width: 44, height: 26)
+        textView.textContainer?.containerSize = NSSize(width: 552, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.layoutManager?.allowsNonContiguousLayout = true
+        textView.setAccessibilityIdentifier("remote.memoryText")
+        textView.delegate = context.coordinator
+
+        context.coordinator.textView = textView
+        scrollView.documentView = textView
+        apply(to: textView, in: scrollView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: MacNoteDocumentScrollView, context: Context) {
+        context.coordinator.onOpenLink = onOpenLink
+        guard let textView = context.coordinator.textView else { return }
+        apply(to: textView, in: scrollView)
+    }
+
+    private func apply(to textView: MacNoteDocumentTextView, in scrollView: MacNoteDocumentScrollView) {
+        let composed = MacFullNoteComposer.compose(
+            memory: memory,
+            outgoing: outgoingMemories,
+            incoming: incomingMemories
+        )
+        guard textView.currentComposedKey != composed.key else { return }
+        let noteChanged = textView.currentMemoryID != composed.memoryID
+        textView.currentComposedKey = composed.key
+        textView.currentMemoryID = composed.memoryID
+        textView.quoteCharRanges = composed.quoteCharRanges
+        textView.ruleCharIndices = composed.ruleCharIndices
+        if textView.selectedRange().length > 0 {
+            textView.setSelectedRange(NSRange(location: 0, length: 0))
+        }
+        textView.textStorage?.setAttributedString(composed.attributedString)
+        textView.needsDisplay = true
+        if noteChanged {
+            scrollView.contentView.scroll(to: .zero)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+    }
+}
+
+// MARK: - Small Toolbar Icon Button
 
 private struct VaultIconButton: View {
     let symbol: String
@@ -641,7 +1843,8 @@ private struct VaultIconButton: View {
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? MoMoPalette.ink : MoMoPalette.muted)
                 .frame(width: 26, height: 26)
-                .modifier(VaultHoverSurfaceModifier(isSelected: isActive, hoverOpacity: 0.65, cornerRadius: 6))
+                .background(isActive ? MoMoPalette.surface : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -656,247 +1859,7 @@ private struct VaultIconButton: View {
     }
 }
 
-private struct DesktopVaultFolderRow: View, Equatable {
-    let sectionID: String
-    let title: String
-    let itemCount: Int
-    let isExpanded: Bool
-    let accent: Color
-    let onToggle: () -> Void
-
-    nonisolated static func == (lhs: DesktopVaultFolderRow, rhs: DesktopVaultFolderRow) -> Bool {
-        lhs.sectionID == rhs.sectionID
-            && lhs.title == rhs.title
-            && lhs.itemCount == rhs.itemCount
-            && lhs.isExpanded == rhs.isExpanded
-    }
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 6) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(MoMoPalette.muted.opacity(0.85))
-                    .frame(width: 11)
-                    .accessibilityHidden(true)
-
-                Image(systemName: DreamMemoryCategory.folderSymbol(for: sectionID))
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(accent)
-                    .frame(width: 14)
-                    .accessibilityHidden(true)
-
-                Text(title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(MoMoPalette.ink.opacity(0.88))
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                Text("\(itemCount)")
-                    .font(.system(size: 10.5, weight: .regular))
-                    .monospacedDigit()
-                    .foregroundStyle(MoMoPalette.muted)
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 5.5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .modifier(VaultHoverSurfaceModifier(isSelected: false, hoverOpacity: 0.55, cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("remote.memoryFolder.\(sectionID)")
-    }
-}
-
-private struct DesktopOutlineRow: View, Equatable {
-    let memoryID: String
-    let kind: String
-    let title: String
-    let symbol: String
-    let shortJournalDate: String?
-    let rawMarkdown: String
-    let isSelected: Bool
-    let childCount: Int
-    let isExpanded: Bool
-    let underFolder: Bool
-    let accent: Color
-    let onActivate: () -> Void
-    var onOpenPopup: (() -> Void)? = nil
-    let onDelete: () -> Void
-
-    nonisolated static func == (lhs: DesktopOutlineRow, rhs: DesktopOutlineRow) -> Bool {
-        lhs.memoryID == rhs.memoryID
-            && lhs.title == rhs.title
-            && lhs.symbol == rhs.symbol
-            && lhs.shortJournalDate == rhs.shortJournalDate
-            && lhs.isSelected == rhs.isSelected
-            && lhs.childCount == rhs.childCount
-            && lhs.isExpanded == rhs.isExpanded
-            && lhs.underFolder == rhs.underFolder
-    }
-
-    var body: some View {
-        Button(action: onActivate) {
-            HStack(spacing: 6) {
-                if childCount > 0 {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8.5, weight: .bold))
-                        .foregroundStyle(MoMoPalette.muted)
-                        .frame(width: 12)
-                        .accessibilityHidden(true)
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundStyle(isSelected ? accent : MoMoPalette.muted.opacity(0.85))
-                        .frame(width: 12)
-                        .accessibilityHidden(true)
-                }
-
-                Text(title)
-                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(isSelected ? MoMoPalette.ink : MoMoPalette.ink.opacity(0.88))
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                if childCount > 0 {
-                    Text("\(childCount)")
-                        .font(.system(size: 10.5, weight: .regular))
-                        .monospacedDigit()
-                        .foregroundStyle(MoMoPalette.muted)
-                        .accessibilityHidden(true)
-                } else if let date = shortJournalDate {
-                    Text(date)
-                        .font(.system(size: 10.5))
-                        .monospacedDigit()
-                        .foregroundStyle(MoMoPalette.muted.opacity(0.8))
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5.5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .leading) {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(accent)
-                        .frame(width: 2.5)
-                        .padding(.vertical, 5)
-                        .accessibilityHidden(true)
-                }
-            }
-            .modifier(VaultHoverSurfaceModifier(isSelected: isSelected, hoverOpacity: 0.55, cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, underFolder ? 14 : 0)
-        .overlay(alignment: .leading) {
-            if underFolder {
-                Rectangle()
-                    .fill(MoMoPalette.line.opacity(0.75))
-                    .frame(width: 1)
-                    .padding(.leading, 9)
-                    .accessibilityHidden(true)
-            }
-        }
-        .accessibilityIdentifier("remote.memoryRow." + memoryID)
-        .contextMenu {
-            Button("复制 Markdown", systemImage: "doc.on.doc") {
-                MemoryCardDigest.copyToPasteboard(rawMarkdown)
-            }
-            if let onOpenPopup {
-                Button("在独立窗口预览", systemImage: "macwindow") {
-                    onOpenPopup()
-                }
-            }
-            Divider()
-            Button(kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive, action: onDelete)
-        }
-    }
-}
-
-private struct DesktopOutlineChildRow: View, Equatable {
-    let rowKey: String
-    let childID: String
-    let kind: String
-    let title: String
-    let symbol: String
-    let rawMarkdown: String
-    let isSelected: Bool
-    let underFolder: Bool
-    let accent: Color
-    let onSelect: () -> Void
-    var onOpenPopup: (() -> Void)? = nil
-    let onDelete: () -> Void
-
-    nonisolated static func == (lhs: DesktopOutlineChildRow, rhs: DesktopOutlineChildRow) -> Bool {
-        lhs.rowKey == rhs.rowKey
-            && lhs.title == rhs.title
-            && lhs.symbol == rhs.symbol
-            && lhs.isSelected == rhs.isSelected
-            && lhs.underFolder == rhs.underFolder
-    }
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 6) {
-                Image(systemName: symbol)
-                    .font(.system(size: 10.5, weight: .regular))
-                    .foregroundStyle(isSelected ? accent : MoMoPalette.muted.opacity(0.75))
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
-
-                Text(title)
-                    .font(.system(size: 12.5, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(isSelected ? MoMoPalette.ink : MoMoPalette.muted)
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .leading) {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(accent)
-                        .frame(width: 2.5)
-                        .padding(.vertical, 4)
-                        .accessibilityHidden(true)
-                }
-            }
-            .modifier(VaultHoverSurfaceModifier(isSelected: isSelected, hoverOpacity: 0.5, cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, underFolder ? 29 : 15)
-        .overlay(alignment: .leading) {
-            ZStack(alignment: .leading) {
-                if underFolder {
-                    Rectangle()
-                        .fill(MoMoPalette.line.opacity(0.75))
-                        .frame(width: 1)
-                        .padding(.leading, 9)
-                }
-                Rectangle()
-                    .fill(MoMoPalette.line.opacity(0.75))
-                    .frame(width: 1)
-                    .padding(.leading, underFolder ? 23 : 9)
-            }
-            .accessibilityHidden(true)
-        }
-        .contextMenu {
-            Button("复制 Markdown", systemImage: "doc.on.doc") {
-                MemoryCardDigest.copyToPasteboard(rawMarkdown)
-            }
-            if let onOpenPopup {
-                Button("在独立窗口预览", systemImage: "macwindow") {
-                    onOpenPopup()
-                }
-            }
-            Divider()
-            Button(kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive, action: onDelete)
-        }
-    }
-}
+// MARK: - Secondary Popup Detail Sheet
 
 private struct DesktopMemoryDetail: View {
     let model: DesktopModel

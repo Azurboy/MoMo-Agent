@@ -1592,11 +1592,20 @@ class SuperAgentGateway:
 
         notebook_entries = momo_mem.list_notebook()
         if notebook_entries:
-            nb_lines = [
-                f"- [{e['category']}] `{e['path']}` — {e['title']} ({e['characters']} chars)"
-                for e in notebook_entries[:40]
-            ]
-            notebook_summary = "Current Markdown Notebook (`memories/`):\n" + "\n".join(nb_lines)
+            from collections import Counter
+            cat_counts = Counter(e["category"] for e in notebook_entries)
+            counts_str = ", ".join(f"{k}={v}" for k, v in sorted(cat_counts.items()))
+            nb_lines = []
+            for e in notebook_entries[:120]:
+                upd_str = time.strftime("%Y-%m-%d", time.localtime(float(e["updated_at"]))) if e.get("updated_at") else ""
+                h1_flag = "" if e.get("has_h1", True) else " [⚠️缺少 # 一级标题，请重写修复或合并删除]"
+                nb_lines.append(
+                    f"- [{e['category']}] `{e['path']}` — {e['title']} ({e['characters']} chars, updated {upd_str}){h1_flag}"
+                )
+            notebook_summary = (
+                f"Current Markdown Notebook (`memories/`, total={len(notebook_entries)}: {counts_str}):\n"
+                + "\n".join(nb_lines)
+            )
         else:
             notebook_summary = "Current Markdown Notebook (`memories/`): (No BRIEFING.md, journal/*.md, people/*.md, or topics/*.md written yet.)"
 

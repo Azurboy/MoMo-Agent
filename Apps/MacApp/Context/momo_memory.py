@@ -763,12 +763,15 @@ class MoMoMemory:
                 continue
             if not text:
                 continue
-            first_line = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip()), slug)
+            first_nonempty = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+            has_h1 = bool(re.match(r"^#\s+\S", first_nonempty))
+            first_line = first_nonempty.lstrip("# ").strip() if first_nonempty else slug
             entries.append({
                 "category": kind,
                 "slug": slug,
                 "path": str(path.relative_to(self.memories_dir)),
                 "title": first_line[:120],
+                "has_h1": has_h1,
                 "characters": len(text),
                 "updated_at": round(stat.st_mtime, 2),
             })
@@ -814,9 +817,12 @@ class MoMoMemory:
             existing = path.read_text(encoding="utf-8").strip()
             if existing:
                 body = existing + "\n\n" + body
-        if not body.lstrip().startswith("#"):
-            heading = (title or clean_slug).strip()
-            body = f"# {heading}\n\n{body}"
+        if not re.match(r"^#\s+\S", body.lstrip()):
+            derived_title = (title or "").strip()
+            if not derived_title:
+                first_h2 = next((ln.lstrip("# ").strip() for ln in body.splitlines() if ln.strip().startswith("#")), "")
+                derived_title = re.sub(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2}(?:[–—-]\d{1,2}:\d{2})?)?\s*[·•—–:：\-]?\s*", "", first_h2).strip() or clean_slug
+            body = f"# {derived_title}\n\n{body}"
         _atomic_write_markdown(path, body + "\n")
         return {
             "success": True,
@@ -827,13 +833,14 @@ class MoMoMemory:
             "updated_at": round(time.time(), 2),
         }
 
-    def remove_notebook(self, category: str, slug: str | None = None) -> dict:
+    def remove_notebook(self, category: str, slug: str | None = None, *, user_initiated: bool = False) -> dict:
         cat = self._normalize_notebook_category(category)
         clean_slug, path = self.resolve_notebook_path(cat, slug)
         if not path.is_file():
             return {"success": False, "error": f"Note not found: {cat}/{clean_slug}.md"}
         path.unlink(missing_ok=True)
-        self._mark_deleted_notebook(cat, clean_slug)
+        if user_initiated:
+            self._mark_deleted_notebook(cat, clean_slug)
         return {"success": True, "category": cat, "slug": clean_slug, "removed": True}
 
 

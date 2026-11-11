@@ -114,7 +114,8 @@ function momoMemoryPromptBlock(): string {
     + `当用户指出某段记忆/日志总结有误，或告知某段内容实际是某位说话人说的（如“这个 OKR 是 shengli 说的”、“把某处说话人改成某某”）：\n`
     + `1. 立即派发或使用原生工具 \`search_recordings\` / \`read_recording\` 找到对应录音 \`source_id\` 及精确的 \`span_ids\`；\n`
     + `2. 调用 \`relabel_recording_speakers\` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 \`span_ids\` + \`scope="selection"\` 避免误改同场其他发言；若原标签是整组匿名 \`[说话人 N]\` 可用 \`scope="cluster"\`）；\n`
-    + `3. 全量排查并用 \`read_memory_notebook\` / \`write_memory_notebook\` / \`update_core_memory\` 同步订正所有受影响的笔记（\`journal/*.md\`、\`projects/*.md\`、\`people/<原误标人>.md\`、\`people/<真实说话人>.md\`、\`topics/*.md\`、\`BRIEFING.md\`、\`MEMORY.md\`），顺手清除笔记里残留的 \`remaining_parts\` / \`revision\` 等内部调试字样。`
+    + `3. 全量排查并用 \`read_memory_notebook\` / \`write_memory_notebook\` / \`remove_memory_notebook\` / \`update_core_memory\` 同步订正所有受影响的笔记（\`journal/*.md\`、\`projects/*.md\`、\`people/<原误标人>.md\`、\`people/<真实说话人>.md\`、\`topics/*.md\`、\`BRIEFING.md\`、\`MEMORY.md\`），顺手清除笔记里残留的 \`remaining_parts\` / \`revision\` 等内部调试字样。\n`
+    + `4. **记忆自治重整（严禁只追加不清理）**：更新记忆与活页时优先用 \`mode="replace"\` 重整结构、确保首行有清晰的 \`# 一级标题\`，并主动合并重叠碎片、用 \`remove_memory_notebook\` 删除过时/冗余活页，绝不无脑堆砌流水账。`
   )
   return sections.length > 0 ? `\n\n## MoMo 共享长期记忆与 Dream Markdown 活页笔记本\n${sections.join('\n\n')}` : ''
 }

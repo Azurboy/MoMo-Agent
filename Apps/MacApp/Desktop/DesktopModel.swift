@@ -922,8 +922,13 @@ final class DesktopModel {
                     memoryError = nil
                 }
             } catch {
-                if !runSilent || sources.isEmpty {
-                    let nextErr = AgentTransportFailure.isTransient(error) ? String(localized: "正在恢复本地资料连接…") : error.localizedDescription
+                if AgentTransportFailure.isTransient(error) {
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .milliseconds(1500))
+                        await self?.loadContext(silent: true)
+                    }
+                } else if !runSilent {
+                    let nextErr = error.localizedDescription
                     if memoryError != nextErr { memoryError = nextErr }
                 }
             }

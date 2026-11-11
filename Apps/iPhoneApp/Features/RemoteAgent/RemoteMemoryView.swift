@@ -195,6 +195,9 @@ struct RemoteMemoryView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                 }
+                .refreshable {
+                    await sync.refresh()
+                }
             }
         }
         .background(colors.desk.ignoresSafeArea())
@@ -204,22 +207,12 @@ struct RemoteMemoryView: View {
         .toolbarBackground(colors.desk, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    if activeCategory == .all && directoryFolders.count > 1 {
-                        Button(allFoldersExpanded ? "全部折叠" : "全部展开",
-                               systemImage: allFoldersExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
-                            toggleAllFolders()
-                        }
+            if activeCategory == .all && directoryFolders.count > 1 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(allFoldersExpanded ? "全部折叠" : "全部展开",
+                           systemImage: allFoldersExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
+                        toggleAllFolders()
                     }
-                    Button("立即 Dream 整理", systemImage: "sparkles") {
-                        Task { await sync.triggerDream() }
-                    }
-                    .disabled(sync.isSyncing || sync.isDreamRequesting || sync.memoryReview?.running == true)
-                    .accessibilityIdentifier("remote.triggerDream")
-                    Button("同步录音与记忆", systemImage: "arrow.clockwise") { Task { await sync.refresh() } }
-                        .disabled(sync.isSyncing)
-                        .accessibilityIdentifier("remote.syncMemory")
                 }
             }
         }

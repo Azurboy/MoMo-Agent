@@ -672,7 +672,22 @@ struct MemoryCardDigest: Equatable, Sendable {
                 }
             }
 
-            var resolvedHeading = rawHeading ?? Self.badgeTitleFallback(for: memory.kind)
+            var resolvedHeading: String
+            if let rawHeading, !rawHeading.isEmpty {
+                resolvedHeading = rawHeading
+            } else if let meaningfulSec = sections.first(where: { sec in
+                !sec.contains("来源与边界") && !sec.contains("本批来源") && !sec.contains("整理进度") && !sec.contains("当前卡点") && !sec.contains("当前共识") && !sec.contains("当前脉络")
+            }) {
+                resolvedHeading = meaningfulSec.replacingOccurrences(
+                    of: #"^\d{1,2}:\d{2}(?:[–—-]\d{1,2}:\d{2})?\s*[·•—–:：-]?\s*"#,
+                    with: "",
+                    options: .regularExpression
+                )
+            } else if let rawPath = memory.path, !rawPath.isEmpty {
+                resolvedHeading = Self.humanizeNotebookPath(rawPath)
+            } else {
+                resolvedHeading = Self.badgeTitleFallback(for: memory.kind)
+            }
             if extractedDate == nil,
                let dateRegex = Self.dateInHeadingRegex,
                let m = dateRegex.firstMatch(in: resolvedHeading, range: NSRange(resolvedHeading.startIndex..., in: resolvedHeading)),
@@ -1090,13 +1105,36 @@ extension MemoryCardDigest {
 
     static func cleanNotebookMarkdownForDetail(_ markdown: String) -> String {
         var s = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Strip leading # H1 line when body content follows (header margin renders digest.title)
-        let lines = s.components(separatedBy: .newlines)
-        if lines.count > 1, let first = lines.first?.trimmingCharacters(in: .whitespaces), first.hasPrefix("# ") {
-            let remainder = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !remainder.isEmpty {
-                s = remainder
+        // Strip leading # H1 line when body content follows (header margin renders digest.title),
+        // and strip legacy internal ingestion boilerplate sections (## 来源与边界 / remaining_parts=).
+        let rawLines = s.components(separatedBy: .newlines)
+        var filteredLines: [String] = []
+        filteredLines.reserveCapacity(rawLines.count)
+        var skippingBoilerplateSection = false
+        for (idx, rawLine) in rawLines.enumerated() {
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+            if idx == 0 && trimmedLine.hasPrefix("# ") && rawLines.count > 1 {
+                continue
             }
+            if trimmedLine.hasPrefix("## ") || trimmedLine.hasPrefix("### ") {
+                let headingTitle = String(trimmedLine.drop(while: { $0 == "#" || $0 == " " }))
+                if headingTitle == "来源与边界" || headingTitle == "本批来源与边界" || headingTitle == "整理进度" {
+                    skippingBoilerplateSection = true
+                    continue
+                }
+                skippingBoilerplateSection = false
+            }
+            if skippingBoilerplateSection {
+                continue
+            }
+            if trimmedLine.contains("remaining_parts=") || trimmedLine.contains("不代表读完该录音") || trimmedLine.contains("不代表复读了整场录音") {
+                continue
+            }
+            filteredLines.append(rawLine)
+        }
+        let joined = filteredLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !joined.isEmpty {
+            s = joined
         }
         if s.contains("momoagent://source/") {
             s = replace(sourceLinkRegex, in: s, with: "`⏱ $1`")
@@ -1198,6 +1236,51 @@ struct MemoryCardView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(([digest.badge.title, digest.dateBadge, digest.statusBadge, digest.title]
             .compactMap { $0 } + digest.highlights + [childCount > 0 ? (isExpanded ? "收起子项" : "展开子项") : "查看全文"]).joined(separator: "，"))
+    }
+}
+
+private struct ObsidianTagFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 7
+    var verticalSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > maxWidth {
+                usedWidth = max(usedWidth, x)
+                x = 0
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            x += (x > 0 ? horizontalSpacing : 0) + size.width
+            rowHeight = max(rowHeight, size.height)
+            usedWidth = max(usedWidth, x)
+        }
+        return CGSize(width: proposal.width ?? usedWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+            x += size.width + horizontalSpacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }
 
@@ -1430,31 +1513,29 @@ struct ClientMemoryContent: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
 
-                // Subtle Obsidian-style inline Properties metadata bar
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        obsidianPropertyTag(icon: digest.badge.symbol, label: digest.badge.title, accent: colors.tabAccent(memory.kind), colors: colors)
+                // Subtle Obsidian-style inline Properties metadata bar (wraps cleanly instead of clipping)
+                ObsidianTagFlowLayout(horizontalSpacing: 7, verticalSpacing: 6) {
+                    obsidianPropertyTag(icon: digest.badge.symbol, label: digest.badge.title, accent: colors.tabAccent(memory.kind), colors: colors)
 
-                        if let date = digest.dateBadge {
-                            obsidianPropertyTag(icon: "calendar", label: date, accent: nil, colors: colors, monospaced: true)
-                        }
+                    if let date = digest.dateBadge {
+                        obsidianPropertyTag(icon: "calendar", label: date, accent: nil, colors: colors, monospaced: true)
+                    }
 
-                        if let rawPath = memory.path, !rawPath.isEmpty {
-                            obsidianPropertyTag(icon: "link", label: rawPath, accent: nil, colors: colors, monospaced: true)
-                        }
+                    if let rawPath = memory.path, !rawPath.isEmpty {
+                        obsidianPropertyTag(icon: "link", label: rawPath, accent: nil, colors: colors, monospaced: true)
+                    }
 
-                        if !outgoingMemories.isEmpty || !digest.linkedPaths.isEmpty {
-                            let count = max(outgoingMemories.count, digest.linkedPaths.count)
-                            obsidianPropertyTag(icon: "arrow.up.right.square", label: "\(count) 个链接", accent: nil, colors: colors)
-                        }
+                    if !outgoingMemories.isEmpty || !digest.linkedPaths.isEmpty {
+                        let count = max(outgoingMemories.count, digest.linkedPaths.count)
+                        obsidianPropertyTag(icon: "arrow.up.right.square", label: "\(count) 个链接", accent: nil, colors: colors)
+                    }
 
-                        if !incomingMemories.isEmpty {
-                            obsidianPropertyTag(icon: "arrow.turn.down.left", label: "\(incomingMemories.count) 处反向提及", accent: nil, colors: colors)
-                        }
+                    if !incomingMemories.isEmpty {
+                        obsidianPropertyTag(icon: "arrow.turn.down.left", label: "\(incomingMemories.count) 处反向提及", accent: nil, colors: colors)
+                    }
 
-                        if !memory.evidence.isEmpty {
-                            obsidianPropertyTag(icon: "waveform", label: "\(memory.evidence.count) 段原音", accent: nil, colors: colors)
-                        }
+                    if !memory.evidence.isEmpty {
+                        obsidianPropertyTag(icon: "waveform", label: "\(memory.evidence.count) 段原音", accent: nil, colors: colors)
                     }
                 }
 

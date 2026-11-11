@@ -402,6 +402,13 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertTrue(cm['ok'])
         rm=asyncio.run(call_pim('remove_memory_notebook',{'category':'project','slug':'okr-2026'}))
         self.assertTrue(rm['ok'])
+        # Model-initiated removal must NOT tombstone the slug permanently, and H2-only notes auto-gain an H1 title
+        wr2=asyncio.run(call_pim('write_memory_notebook',{
+            'category':'project','slug':'okr-2026','content':'## 2026-11-06 · 双月 OKR 收敛版\n\n- 已合并冗余分支。'
+        }))
+        self.assertTrue(wr2['ok'])
+        rd2=asyncio.run(call_pim('read_memory_notebook',{'category':'project','slug':'okr-2026'}))
+        self.assertTrue(rd2['content'].startswith('# 双月 OKR 收敛版\n'))
 
 
 if __name__=='__main__':unittest.main()
