@@ -67,7 +67,7 @@ struct PhoneRemoteView: View {
         .sheet(isPresented: $showingNotebook) {
             if let sync = agent.context {
                 NavigationStack {
-                    RemoteMemoryView(sync: sync) { card in
+                    RemoteMemoryView(sync: sync, taskStore: agent.store) { card in
                         showingNotebook = false
                         if let store = agent.store {
                             store.setDraft(card.prompt)

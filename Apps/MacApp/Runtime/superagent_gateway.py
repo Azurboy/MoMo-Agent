@@ -1857,7 +1857,7 @@ class SuperAgentGateway:
                         is_owner=bool(args.get("is_owner", False)),
                         from_speaker=args.get("from_speaker"),
                         span_ids=args.get("span_ids") if isinstance(args.get("span_ids"), list) else None,
-                        scope=str(args.get("scope") or "cluster"),
+                        scope=str(args.get("scope") or "selection"),
                         reason=str(args.get("reason") or ""),
                     )
                 except Exception as exc:
@@ -3629,8 +3629,8 @@ class SuperAgentGateway:
                     raise PermissionError("Ticket assignment is no longer running")
             op = str(body.get("op") or "").strip()
             args = body["args"]
-            if op in ("list_memory_notebooks", "read_memory_notebook", "write_memory_notebook"):
-                from momo_memory import MoMoMemory
+            if op in ("list_memory_notebooks", "read_memory_notebook", "write_memory_notebook", "remove_memory_notebook", "update_core_memory"):
+                from momo_memory import MoMoMemory, execute_memory_tool
 
                 mem = MoMoMemory(self.data)
                 if op == "list_memory_notebooks":
@@ -3645,26 +3645,100 @@ class SuperAgentGateway:
                         return web.json_response({"ok": True, "category": cat, "path": fname, "content": txt, "characters": len(txt)})
                     res = mem.read_notebook(cat, args.get("slug"))
                     return web.json_response({"ok": bool(res.get("success")), **res})
+                if op == "remove_memory_notebook":
+                    res = mem.remove_notebook(str(args.get("category") or "").strip().lower(), args.get("slug"))
+                    return web.json_response({"ok": bool(res.get("success")), **res})
+                if op == "update_core_memory":
+                    with mem.store() as mem_store:
+                        raw_res = execute_memory_tool(
+                            mem_store,
+                            action=str(args.get("action") or "").strip() or None,
+                            target=str(args.get("target") or "memory").strip().lower(),
+                            content=args.get("content"),
+                            old_text=args.get("old_text"),
+                            new_text=args.get("new_text"),
+                        )
+                    parsed = json.loads(raw_res)
+                    return web.json_response({"ok": bool(parsed.get("success")), **parsed})
+                cat_write = str(args.get("category") or "briefing").strip().lower()
                 res = mem.write_notebook(
-                    str(args.get("category") or "briefing").strip().lower(),
+                    cat_write,
                     str(args.get("content") or ""),
                     slug=args.get("slug"),
                     title=args.get("title"),
                     mode=str(args.get("mode") or "replace"),
                 )
+                if res.get("success") and cat_write == "briefing":
+                    self._deliver_briefing_message_if_needed()
                 return web.json_response({"ok": bool(res.get("success")), **res})
-            if op == "relabel_recording_speakers":
+            if op in ("list_recordings", "read_recording", "search_recordings", "relabel_recording_speakers"):
                 from context_store import ContextStore
 
                 cstore = ContextStore(self.data / "context")
                 try:
+                    if op == "list_recordings":
+                        lim = max(1, min(int(args.get("limit") or 20), 50))
+                        res = cstore.list_sources(str(args.get("after") or ""), lim)
+                        for item in res.get("items") or []:
+                            item.pop("windows", None)
+                            rec_at = item.get("recorded_at")
+                            if rec_at:
+                                item["recorded_at_local"] = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(rec_at)))
+                        return web.json_response({"ok": True, **res})
+                    if op == "read_recording":
+                        res = cstore.read_source(
+                            str(args.get("source_id") or ""),
+                            str(args.get("source_revision") or "") or None,
+                            int(args.get("offset") or 0),
+                            max(1, min(int(args.get("limit") or 12000), 24000)),
+                        )
+                        for sp in res.get("spans") or []:
+                            rec_at = sp.get("recorded_at")
+                            if rec_at:
+                                sp["recorded_at_local"] = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(rec_at)))
+                            spk_label, spk_is_owner, _ = classify_transcript_span(sp)
+                            if spk_label and "speaker" not in sp:
+                                sp["speaker"] = spk_label
+                            sp["speaker_role"] = "owner" if spk_is_owner is True else ("other" if spk_is_owner is False else "unattributed")
+                        return web.json_response({"ok": True, **res})
+                    if op == "search_recordings":
+                        q = str(args.get("query") or "").strip().lower()
+                        if not q:
+                            return web.json_response({"ok": False, "matches": [], "error": "query is required"}, status=400)
+                        lim = max(1, min(int(args.get("limit") or 15), 30))
+                        rows = cstore.db.execute(
+                            "SELECT id, revision, payload, updated FROM sources WHERE deleted=0 AND lower(text) LIKE ? ORDER BY updated DESC LIMIT ?",
+                            (f"%{q}%", lim * 2),
+                        ).fetchall()
+                        matches = []
+                        for row in rows:
+                            payload = json.loads(row["payload"])
+                            spans = cstore._apply_speaker_overrides(row["id"], payload.get("spans") or [])
+                            for sp in spans:
+                                if q in str(sp.get("text") or "").lower():
+                                    spk_label, spk_is_owner, _ = classify_transcript_span(sp)
+                                    rec_at = sp.get("recorded_at")
+                                    matches.append({
+                                        "source_id": row["id"],
+                                        "source_revision": row["revision"],
+                                        "span_id": sp.get("id"),
+                                        "recorded_at_local": time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(rec_at))) if rec_at else None,
+                                        "speaker": spk_label,
+                                        "speaker_role": "owner" if spk_is_owner is True else ("other" if spk_is_owner is False else "unattributed"),
+                                        "text": str(sp.get("text") or "")[:500],
+                                    })
+                                    if len(matches) >= lim:
+                                        break
+                            if len(matches) >= lim:
+                                break
+                        return web.json_response({"ok": True, "query": q, "matches": matches})
                     res = cstore.relabel_speakers(
                         str(args.get("source_id") or ""),
                         str(args.get("target_speaker") or ""),
                         is_owner=bool(args.get("is_owner", False)),
                         from_speaker=args.get("from_speaker"),
                         span_ids=args.get("span_ids") if isinstance(args.get("span_ids"), list) else None,
-                        scope=str(args.get("scope") or "cluster"),
+                        scope=str(args.get("scope") or "selection"),
                         reason=str(args.get("reason") or ""),
                     )
                 finally:

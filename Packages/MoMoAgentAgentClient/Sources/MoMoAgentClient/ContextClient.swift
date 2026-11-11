@@ -74,8 +74,8 @@ public struct ContextStatus: Codable, Sendable {
     public let memoryReview: MemoryReviewStatus?
     public let speakerRelabels: [SpeakerRelabelInstruction]?
 }
-public struct MemoryReviewStatus: Codable, Sendable {
-    public struct Dream: Codable, Sendable { public let at: Double }
+public struct MemoryReviewStatus: Codable, Sendable, Equatable {
+    public struct Dream: Codable, Sendable, Equatable { public let at: Double }
     public let enabled: Bool
     public let running: Bool
     public let lastUpdated: Double?
@@ -83,8 +83,8 @@ public struct MemoryReviewStatus: Codable, Sendable {
     public let needsReview: Int
     public let dream: Dream?
 }
-public struct ContextMemory: Codable, Sendable, Identifiable {
-    public struct Evidence: Codable, Sendable {
+public struct ContextMemory: Codable, Sendable, Identifiable, Equatable {
+    public struct Evidence: Codable, Sendable, Equatable {
         public let sourceId: String
         public let sourceRevision: String
         public let quote: String
@@ -181,8 +181,8 @@ public struct ContextSourceWindow: Decodable, Sendable, Identifiable, Equatable 
         self.preview = preview
     }
 }
-public struct ContextSource: Decodable, Sendable, Identifiable {
-    public struct Organization: Decodable, Sendable { public let state: String; public let error: String? }
+public struct ContextSource: Decodable, Sendable, Identifiable, Equatable {
+    public struct Organization: Decodable, Sendable, Equatable { public let state: String; public let error: String? }
     public let id: String
     public let revision: String
     public let recordedAt: Double?

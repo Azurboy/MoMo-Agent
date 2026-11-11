@@ -719,10 +719,11 @@ class ContextStore:
                 return txt[1:txt.index("]")].strip()
             return ""
 
+        effective_spans = self._apply_speaker_overrides(source_id, payload.get("spans") or [])
         wanted_ids = {str(sid).strip().lower() for sid in (span_ids or []) if str(sid).strip()}
         wanted_from = str(from_speaker or "").strip().strip("[]")
         if clean_scope == "cluster" and wanted_ids and not wanted_from:
-            for sp in payload["spans"]:
+            for sp in effective_spans:
                 if str(sp.get("id", "")).lower() in wanted_ids:
                     lbl = _extract_label(sp)
                     if lbl:
@@ -730,10 +731,15 @@ class ContextStore:
                         break
 
         matched_span_ids: list[str] = []
-        for sp in payload["spans"]:
-            sid = str(sp.get("id", "")).lower()
-            lbl = _extract_label(sp)
-            if sid in wanted_ids or (wanted_from and lbl == wanted_from):
+        for raw_sp, eff_sp in zip(payload.get("spans") or [], effective_spans):
+            sid = str(eff_sp.get("id", "")).lower()
+            if clean_scope == "selection" and wanted_ids:
+                if sid in wanted_ids:
+                    matched_span_ids.append(sid)
+                continue
+            eff_lbl = _extract_label(eff_sp)
+            raw_lbl = _extract_label(raw_sp)
+            if sid in wanted_ids or (wanted_from and (eff_lbl == wanted_from or raw_lbl == wanted_from)):
                 matched_span_ids.append(sid)
 
         if not matched_span_ids:

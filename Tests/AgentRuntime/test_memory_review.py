@@ -327,5 +327,81 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertIsNone(pending['run_id'])
         self.assertEqual(1,pending['attempt'])
 
+    def test_chat_speaker_correction_tools_and_retrospective_passage_invalidation(self):
+        import asyncio, transcript_ingestion as ti
+        from superagent_gateway import SuperAgentGateway
+        gateway=SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data=self.data
+        gateway.dsh_ready=False
+        gateway.bridge_secret='secret-123'
+
+        lib_id=str(uuid.uuid4()); sess_id=str(uuid.uuid4()); dev_id=str(uuid.uuid4())
+        sp1=str(uuid.uuid4()); sp2=str(uuid.uuid4()); sp3=str(uuid.uuid4())
+        t1='[佳辰] 大家好，今天先对齐一下本周排期。'
+        t2='[佳辰] 双月 OKR 分三个目标：O1 稳住访谈核心能力，O3 客户合同 SLA 99.5%。'
+        t3='[说话人 2] 收到，那我跟进 benchmark 部分。'
+        full_text='\n'.join([t1,t2,t3])
+        receipt=self.store.sync_source({
+            'library_id':lib_id,'session_id':sess_id,'device_id':dev_id,
+            'generation':0,'version':1,'deleted':False,'recorded_at':1700000100,
+            'spans':[
+                {'id':sp1,'text':t1,'recorded_at':1700000100,'speaker':'佳辰','is_owner':False},
+                {'id':sp2,'text':t2,'recorded_at':1700000120,'speaker':'佳辰','is_owner':False},
+                {'id':sp3,'text':t3,'recorded_at':1700000140,'speaker':'说话人 2','is_owner':False},
+            ],
+            'text_sha256':digest(full_text),
+        })
+        src_id=receipt['source_id']
+        row_before=self.store.db.execute('SELECT * FROM sources WHERE id=?',(src_id,)).fetchone()
+        hashes_before=[p['hash'] for p in ti.parts(row_before,self.store)]
+
+        class FakeReq:
+            headers={'X-MoMo-Bridge':'secret-123'}
+            def __init__(self,body): self._b=json.dumps(body).encode('utf-8')
+            async def read(self): return self._b
+
+        async def call_pim(op,args):
+            resp=await gateway.handle_internal_pim(FakeReq({'op':op,'args':args}))
+            return json.loads(resp.text)
+
+        found=asyncio.run(call_pim('search_recordings',{'query':'双月 OKR'}))
+        self.assertTrue(found['ok'])
+        self.assertEqual(1,len(found['matches']))
+        self.assertEqual(sp2,found['matches'][0]['span_id'])
+        self.assertEqual('佳辰',found['matches'][0]['speaker'])
+
+        # Relabel ONLY sp2 (scope='selection' default, even if LLM also supplies from_speaker='佳辰') without touching sp1!
+        rel=asyncio.run(call_pim('relabel_recording_speakers',{
+            'source_id':src_id,
+            'from_speaker':'佳辰',
+            'span_ids':[sp2],
+            'target_speaker':'shengli',
+            'is_owner':False,
+            'reason':'用户指正双月 OKR 是 shengli 说的',
+        }))
+        self.assertTrue(rel['ok'])
+        self.assertEqual(1,rel['updated_span_count'])
+
+        read_back=asyncio.run(call_pim('read_recording',{'source_id':src_id}))
+        by_id={s['id']:s for s in read_back['spans']}
+        self.assertEqual('佳辰',by_id[sp1]['speaker'])
+        self.assertEqual('shengli',by_id[sp2]['speaker'])
+
+        # Passage hash must change when speaker override changes so retrospective ingestion sees it
+        hashes_after=[p['hash'] for p in ti.parts(row_before,self.store)]
+        self.assertNotEqual(hashes_before,hashes_after)
+
+        # Project category + core memory + remove notebook via PIM bridge
+        wr=asyncio.run(call_pim('write_memory_notebook',{
+            'category':'project','slug':'okr-2026','title':'双月 OKR','content':'# 双月 OKR\n\n- shengli 介绍双月 OKR（SLA 99.5%）。'
+        }))
+        self.assertTrue(wr['ok'])
+        rd=asyncio.run(call_pim('read_memory_notebook',{'category':'project','slug':'okr-2026'}))
+        self.assertIn('shengli 介绍双月 OKR',rd['content'])
+        cm=asyncio.run(call_pim('update_core_memory',{'action':'add','target':'memory','content':'双月 OKR 由 shengli 负责主讲。'}))
+        self.assertTrue(cm['ok'])
+        rm=asyncio.run(call_pim('remove_memory_notebook',{'category':'project','slug':'okr-2026'}))
+        self.assertTrue(rm['ok'])
+
 
 if __name__=='__main__':unittest.main()

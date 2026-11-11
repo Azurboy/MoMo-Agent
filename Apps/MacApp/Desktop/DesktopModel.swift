@@ -6,17 +6,17 @@ import MoMoAgentClient
 import MoMoContracts
 import Darwin
 
-struct AccessStatus: Decodable {
-    struct Tunnel: Decodable {
+struct AccessStatus: Decodable, Equatable, Sendable {
+    struct Tunnel: Decodable, Equatable, Sendable {
         let state: String; let endpoint: String?; let mode: String; let provider: String?; let error: String?
         let setupCommand: String?
         let configuredEndpoint: String?
         enum CodingKeys: String, CodingKey { case state, endpoint, mode, provider, error; case setupCommand = "setup_command"; case configuredEndpoint = "configured_endpoint" }
     }
-    struct Device: Decodable, Identifiable { let id: String; let name: String; let code: String; let state: String; let expires: Double; let lastSeen: Double?; let endpoint: String?
+    struct Device: Decodable, Identifiable, Equatable, Sendable { let id: String; let name: String; let code: String; let state: String; let expires: Double; let lastSeen: Double?; let endpoint: String?
         enum CodingKeys: String, CodingKey { case id, name, code, state, expires, endpoint; case lastSeen = "last_seen" }
     }
-    struct Invitation: Decodable { let id: String; let endpoint: String; let expires: Double; let payload: String }
+    struct Invitation: Decodable, Equatable, Sendable { let id: String; let endpoint: String; let expires: Double; let payload: String }
     let agentOnline: Bool
     let tunnel: Tunnel
     let devices: [Device]
@@ -37,7 +37,7 @@ enum DesktopAgentEngine: String, CaseIterable, Identifiable {
     }
 }
 
-struct DesktopProactiveSnapshot: Sendable {
+struct DesktopProactiveSnapshot: Sendable, Equatable {
     let dshReady: Bool
     let activeTickets: Int
     let totalDecisions: Int
@@ -109,6 +109,9 @@ final class DesktopModel {
     var taskStore: RemoteTaskStore?
     var memories: [ContextMemory] = []
     var sources: [ContextSource] = []
+    var vaultSnapshot: MemoryVaultSnapshot = .empty
+    var transcriptSnapshot: DesktopTranscriptSnapshot = .empty
+    @ObservationIgnored private var transcriptVersionCounter: UInt64 = 0
     var memoryError: String?
     var memoryReviewStatus: MemoryReviewStatus?
     var transcriptMemoryNeedsReview = 0
@@ -124,6 +127,9 @@ final class DesktopModel {
     private(set) var tailnetAccessError: String?
     @ObservationIgnored private var lastEmbeddedEndpoint: String?
     @ObservationIgnored private var embeddedProbeFailures = 0
+    @ObservationIgnored private var servedEmbeddedNode: (generation: UUID, port: Int32)?
+    @ObservationIgnored private var lastEmbeddedProbeAt = Date.distantPast
+    @ObservationIgnored private var lastProactiveRefreshAt = Date.distantPast
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var accessProcess: Process?
     @ObservationIgnored private var agentProcess: Process?
@@ -188,6 +194,8 @@ final class DesktopModel {
                 Task { @MainActor [weak self] in
                     guard let self, !self.shuttingDown else { return }
                     self.embeddedProbeFailures = 0
+                    self.servedEmbeddedNode = nil
+                    self.lastEmbeddedProbeAt = .distantPast
                     self.tailnet.prepareForForeground()
                     await self.refresh()
                     await self.taskStore?.retryConnection()
@@ -198,6 +206,11 @@ final class DesktopModel {
             while !Task.isCancelled {
                 await self?.refresh()
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
+            }
+        }
+        if connection != nil {
+            Task { [weak self] in
+                await self?.loadContext(silent: true)
             }
         }
     }
@@ -625,11 +638,15 @@ final class DesktopModel {
         }
     }
 
+    private func updateStatus(_ next: AccessStatus?) {
+        if status != next { status = next }
+    }
+
     func refresh() async {
         guard connection != nil, !refreshing else { return }
         refreshing = true; defer { refreshing = false }
         do {
-            status = try await controlRequest("status")
+            updateStatus(try await controlRequest("status"))
             restorePairedInstallationIfNeeded()
             if !shuttingDown, busy == nil, UserDefaults.standard.bool(forKey: resumeKey),
                status?.agentOnline != true, agentProcess?.isRunning != true,
@@ -643,7 +660,7 @@ final class DesktopModel {
             await refreshEmbeddedAccess()
             if setupStep == .pair || isPairingDevice {
                 if status?.tunnel.state == "connected", status?.invitation == nil, !pairingAccepted {
-                    status = try await controlRequest("pair/invite", body: [:])
+                    updateStatus(try await controlRequest("pair/invite", body: [:]))
                 }
             }
             if status?.agentOnline == true, taskStore == nil, let connection {
@@ -658,12 +675,15 @@ final class DesktopModel {
                 Task { [weak self] in await self?.lifeIllustrations.refresh(minimumInterval: 15) }
             }
             if runtimeEngine == .superagent, status?.agentOnline == true {
-                await refreshProactiveSnapshot()
-            } else {
+                if Date().timeIntervalSince(lastProactiveRefreshAt) >= 12 || proactiveSnapshot == nil {
+                    lastProactiveRefreshAt = Date()
+                    await refreshProactiveSnapshot()
+                }
+            } else if proactiveSnapshot != nil {
                 proactiveSnapshot = nil
             }
         } catch {
-            status = nil
+            updateStatus(nil)
             if !shuttingDown, isPrepared, accessProcess?.isRunning != true {
                 try? startAccess()
             }
@@ -686,6 +706,10 @@ final class DesktopModel {
         }
     }
 
+    nonisolated private static func decodeAccessStatus(_ data: Data) throws -> AccessStatus {
+        try JSONDecoder().decode(AccessStatus.self, from: data)
+    }
+
     private func controlRequest(_ path: String, body: [String: Any]? = nil) async throws -> AccessStatus {
         guard let connection, let port = connection.baseURL.port,
               let url = URL(string: "http://127.0.0.1:\(port + 3)/" + path) else { throw DesktopError.message(String(localized: "请先准备运行环境。")) }
@@ -699,10 +723,14 @@ final class DesktopModel {
             }
             throw DesktopError.message(String(localized: "操作未完成，请检查连接状态；配对码可能已过期。"))
         }
-        return try JSONDecoder().decode(AccessStatus.self, from: data)
+        return try await Task.detached(priority: .utility) {
+            try Self.decodeAccessStatus(data)
+        }.value
     }
 
     func applyNetworkProxy(_ settings: TailnetProxySettings) async throws {
+        servedEmbeddedNode = nil
+        lastEmbeddedProbeAt = .distantPast
         try await tailnet.updateProxy(settings)
         await refreshEmbeddedAccess()
     }
@@ -710,6 +738,8 @@ final class DesktopModel {
     private func refreshEmbeddedAccess() async {
         guard busy == nil else { return }
         guard status?.tunnel.mode == "embedded", status?.tunnel.state != "stopped" else {
+            servedEmbeddedNode = nil
+            lastEmbeddedProbeAt = .distantPast
             if tailnet.node != nil { await tailnet.close() }
             return
         }
@@ -721,21 +751,43 @@ final class DesktopModel {
             try await tailnet.start()
             if tailnet.state == "Running", let host = tailnet.address, let node = tailnet.node,
                let port = connection?.baseURL.port {
-                try await node.serveLoopbackHTTP(port: Int32(port + 2))
+                let targetPort = Int32(port + 2)
                 let url = URL(string: "http://\(host):\(TailnetEndpoint.port)")!
+                let currentGen = tailnet.generation
+                let alreadyServing = servedEmbeddedNode?.generation == currentGen && servedEmbeddedNode?.port == targetPort
+                let alreadyConnected = alreadyServing
+                    && status?.tunnel.state == "connected"
+                    && status?.tunnel.endpoint == url.absoluteString
+                    && embeddedProbeFailures == 0
+                    && tailnetAccessError == nil
+                let needsInteractiveCheck = setupStep == .pair || isPairingDevice
+                if alreadyConnected && !needsInteractiveCheck && Date().timeIntervalSince(lastEmbeddedProbeAt) < 30 {
+                    return
+                }
+                if !alreadyServing {
+                    try await node.serveLoopbackHTTP(port: targetPort)
+                    servedEmbeddedNode = (currentGen, targetPort)
+                }
                 let session = try await tailnet.connectedSession()
                 probeSession = session
                 var request = URLRequest(url: url.appendingPathComponent("pair/identity")); request.timeoutInterval = 5
                 let (data, response) = try await session.data(for: request)
-                let identity = try JSONSerialization.jsonObject(with: data) as? [String: String]
+                let instanceID = try await Task.detached(priority: .utility) {
+                    (try? JSONSerialization.jsonObject(with: data) as? [String: String])?["instance_id"]
+                }.value
                 guard (response as? HTTPURLResponse)?.statusCode == 200,
-                      identity?["instance_id"]?.lowercased() == connection?.instanceID.uuidString.lowercased() else { throw TailnetError.unavailable }
+                      instanceID?.lowercased() == connection?.instanceID.uuidString.lowercased() else { throw TailnetError.unavailable }
                 embeddedProbeFailures = 0
+                lastEmbeddedProbeAt = Date()
                 lastEmbeddedEndpoint = url.absoluteString
-                tailnetAccessError = nil
+                if tailnetAccessError != nil { tailnetAccessError = nil }
+                if status?.tunnel.state == "connected", status?.tunnel.endpoint == url.absoluteString, status?.tunnel.error == nil {
+                    return
+                }
                 body = ["state": "connected", "endpoint": url.absoluteString]
             } else {
-                tailnetAccessError = nil
+                servedEmbeddedNode = nil
+                if tailnetAccessError != nil { tailnetAccessError = nil }
                 if let knownEndpoint, !["NeedsLogin", "NeedsMachineAuth"].contains(tailnet.state) {
                     body = ["state": "reconnecting", "endpoint": knownEndpoint,
                             "error": tailnet.state == "Running" ? String(localized: "正在连接…") : String(localized: "正在恢复连接…")]
@@ -744,6 +796,8 @@ final class DesktopModel {
                 }
             }
         } catch {
+            servedEmbeddedNode = nil
+            lastEmbeddedProbeAt = .distantPast
             if let probeSession { tailnet.failedRequest(error, session: probeSession) }
             if let knownEndpoint, !["NeedsLogin", "NeedsMachineAuth"].contains(tailnet.state) {
                 embeddedProbeFailures += 1
@@ -753,14 +807,15 @@ final class DesktopModel {
                 } else {
                     tailnet.prepareForForeground()
                 }
-                tailnetAccessError = nil
+                if tailnetAccessError != nil { tailnetAccessError = nil }
                 body = ["state": "reconnecting", "endpoint": knownEndpoint, "error": String(localized: "正在恢复连接…")]
             } else {
-                tailnetAccessError = String(localized: "连接未完成，请重试。")
-                body["error"] = tailnetAccessError
+                let errText = String(localized: "连接未完成，请重试。")
+                if tailnetAccessError != errText { tailnetAccessError = errText }
+                body["error"] = errText
             }
         }
-        do { status = try await controlRequest("tunnel/embedded", body: body) }
+        do { updateStatus(try await controlRequest("tunnel/embedded", body: body)) }
         catch { if !AgentTransportFailure.isTransient(error) { failure = error.localizedDescription } }
     }
 
@@ -768,8 +823,9 @@ final class DesktopModel {
         guard busy == nil else { return }
         busy = String(localized: "正在退出账号…"); defer { busy = nil }
         do {
-            status = try await controlRequest("tunnel/stop", body: [:])
+            updateStatus(try await controlRequest("tunnel/stop", body: [:]))
             lastEmbeddedEndpoint = nil; embeddedProbeFailures = 0
+            servedEmbeddedNode = nil; lastEmbeddedProbeAt = .distantPast
             try await tailnet.logout()
         } catch { failure = error.localizedDescription }
     }
@@ -798,18 +854,30 @@ final class DesktopModel {
         return recordings
     }
 
+    func loadContextIfStale(maxAge: TimeInterval = 10) async {
+        let hasData = !memories.isEmpty || !sources.isEmpty
+        if hasData && Date().timeIntervalSince(lastContextRefreshAt) < maxAge {
+            return
+        }
+        await loadContext(silent: hasData)
+    }
+
     func loadContext(silent: Bool = false) async {
         if fetchingContext {
             contextRefreshRequested = true
             contextRefreshNonSilent = contextRefreshNonSilent || !silent
             return
         }
-        guard let connection, let url = connection.dataURL else { memoryError = String(localized: "Mac 尚未连接。"); return }
+        guard let connection, let url = connection.dataURL else {
+            let err = String(localized: "Mac 尚未连接。")
+            if memoryError != err { memoryError = err }
+            return
+        }
         fetchingContext = true
         var runSilent = silent
         defer {
             fetchingContext = false
-            contextLoading = false
+            if contextLoading { contextLoading = false }
         }
         repeat {
             contextRefreshRequested = false
@@ -818,7 +886,7 @@ final class DesktopModel {
                 contextRefreshNonSilent = false
             }
             let showLoading = !runSilent || (sources.isEmpty && memories.isEmpty)
-            if showLoading { contextLoading = true }
+            if showLoading && !contextLoading { contextLoading = true }
             lastContextRefreshAt = Date()
             do {
                 let client = try dataClient(for: connection, url: url)
@@ -826,14 +894,37 @@ final class DesktopModel {
                 async let memoriesTask = Self.fetchAllMemories(client: client)
                 async let sourcesTask = Self.fetchAllSources(client: client)
                 let (contextStatus, collected, recordings) = try await (statusTask, memoriesTask, sourcesTask)
-                memoryReviewStatus = contextStatus.memoryReview
-                transcriptMemoryNeedsReview = contextStatus.memoryNeedsReview ?? 0
-                memories = collected
-                sources = recordings
-                memoryError = nil
+                if memoryReviewStatus != contextStatus.memoryReview {
+                    memoryReviewStatus = contextStatus.memoryReview
+                }
+                let nextNeedsReview = contextStatus.memoryNeedsReview ?? 0
+                if transcriptMemoryNeedsReview != nextNeedsReview {
+                    transcriptMemoryNeedsReview = nextNeedsReview
+                }
+                if memories != collected {
+                    let builtVault = await Task.detached(priority: .userInitiated) {
+                        MemoryVaultSnapshot.build(from: collected)
+                    }.value
+                    memories = collected
+                    vaultSnapshot = builtVault
+                }
+                if sources != recordings {
+                    transcriptVersionCounter &+= 1
+                    let nextVer = transcriptVersionCounter
+                    let currentStartHour = dayStartHour
+                    let builtTranscripts = await Task.detached(priority: .userInitiated) {
+                        DesktopTranscriptSnapshot.build(sources: recordings, dayStartHour: currentStartHour, version: nextVer)
+                    }.value
+                    sources = recordings
+                    transcriptSnapshot = builtTranscripts
+                }
+                if memoryError != nil {
+                    memoryError = nil
+                }
             } catch {
                 if !runSilent || sources.isEmpty {
-                    memoryError = AgentTransportFailure.isTransient(error) ? String(localized: "正在恢复本地资料连接…") : error.localizedDescription
+                    let nextErr = AgentTransportFailure.isTransient(error) ? String(localized: "正在恢复本地资料连接…") : error.localizedDescription
+                    if memoryError != nextErr { memoryError = nextErr }
                 }
             }
             runSilent = true
@@ -942,6 +1033,17 @@ final class DesktopModel {
         dayStartHour = clamped
         DayStartBoundary.setCurrentHour(clamped)
         try? writeDayBoundaryConfiguration(hour: clamped)
+        if !sources.isEmpty {
+            transcriptVersionCounter &+= 1
+            let nextVer = transcriptVersionCounter
+            let currentSources = sources
+            Task {
+                let built = await Task.detached(priority: .userInitiated) {
+                    DesktopTranscriptSnapshot.build(sources: currentSources, dayStartHour: clamped, version: nextVer)
+                }.value
+                self.transcriptSnapshot = built
+            }
+        }
         if connection != nil {
             Task { await loadContext(silent: true) }
         }
@@ -1000,14 +1102,8 @@ final class DesktopModel {
         }
     }
 
-    func refreshProactiveSnapshot() async {
-        guard let connection, !key.isEmpty else { return }
-        var request = URLRequest(url: connection.baseURL.appendingPathComponent("momo/v1/proactive"))
-        request.timeoutInterval = 5
-        request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await controlSession.data(for: request, delegate: ControlNoRedirects.shared),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+    nonisolated private static func parseProactiveSnapshot(_ data: Data) -> DesktopProactiveSnapshot? {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         let ready = (json["dsh_ready"] as? Bool) ?? false
         let tickets = (json["tickets"] as? [[String: Any]]) ?? []
         let decisions = (json["decisions"] as? [[String: Any]]) ?? []
@@ -1027,12 +1123,27 @@ final class DesktopModel {
             }
             return kind
         }
-        proactiveSnapshot = DesktopProactiveSnapshot(
+        return DesktopProactiveSnapshot(
             dshReady: ready,
             activeTickets: activeCount,
             totalDecisions: decisions.count,
             latestSummary: latest
         )
+    }
+
+    func refreshProactiveSnapshot() async {
+        guard let connection, !key.isEmpty else { return }
+        var request = URLRequest(url: connection.baseURL.appendingPathComponent("momo/v1/proactive"))
+        request.timeoutInterval = 5
+        request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await controlSession.data(for: request, delegate: ControlNoRedirects.shared),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        guard let next = await Task.detached(priority: .utility, operation: {
+            Self.parseProactiveSnapshot(data)
+        }).value else { return }
+        if proactiveSnapshot != next {
+            proactiveSnapshot = next
+        }
     }
 
     private func privateWrite(_ data: Data, to url: URL) throws {

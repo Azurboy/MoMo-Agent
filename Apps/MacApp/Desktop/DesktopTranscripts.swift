@@ -2,9 +2,14 @@ import SwiftUI
 import MoMoAgentClient
 import MoMoContracts
 
-struct DesktopTranscriptWindow: Identifiable {
+struct DesktopTranscriptWindow: Identifiable, Equatable, Sendable {
     let source: ContextSource
     let window: ContextSourceWindow
+    let logicalDayKey: String
+    let displayPreview: String
+    let searchText: String
+    let rangeTimeLabel: String
+    let datedTimeLabel: String
     var id: String { window.id }
     var recordedAt: Double? { window.recordedAt ?? source.recordedAt }
     var endAt: Double? { window.endAt ?? recordedAt }
@@ -12,8 +17,152 @@ struct DesktopTranscriptWindow: Identifiable {
     var preview: String? { window.preview ?? source.preview }
 }
 
+struct DesktopTranscriptSnapshot: Equatable, Sendable {
+    let version: UInt64
+    let ordered: [DesktopTranscriptWindow]
+    let windowsByDayKey: [String: [DesktopTranscriptWindow]]
+    let windowByID: [String: DesktopTranscriptWindow]
+    let sourceByIDRevision: [String: ContextSource]
+    let earliestLogicalDay: Date?
+    let latestRecordedAt: Double?
+
+    static let empty = DesktopTranscriptSnapshot(
+        version: 0,
+        ordered: [],
+        windowsByDayKey: [:],
+        windowByID: [:],
+        sourceByIDRevision: [:],
+        earliestLogicalDay: nil,
+        latestRecordedAt: nil
+    )
+
+    nonisolated static func dayKey(for date: Date, calendar: Calendar = .current) -> String {
+        let comps = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
+    }
+
+    private nonisolated static let clockFormat = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
+
+    nonisolated static func build(sources: [ContextSource], dayStartHour: Int, version: UInt64) -> DesktopTranscriptSnapshot {
+        guard !sources.isEmpty else {
+            return DesktopTranscriptSnapshot(
+                version: version,
+                ordered: [],
+                windowsByDayKey: [:],
+                windowByID: [:],
+                sourceByIDRevision: [:],
+                earliestLogicalDay: nil,
+                latestRecordedAt: nil
+            )
+        }
+        let calendar = Calendar.current
+        let locale = AppLanguage.current.locale
+
+        var sourceByIDRevision: [String: ContextSource] = [:]
+        sourceByIDRevision.reserveCapacity(sources.count)
+
+        var rawItems: [(source: ContextSource, window: ContextSourceWindow)] = []
+        rawItems.reserveCapacity(sources.count * 2)
+
+        for source in sources {
+            sourceByIDRevision["\(source.id)|\(source.revision)"] = source
+            if let windows = source.windows, !windows.isEmpty {
+                for w in windows {
+                    rawItems.append((source, w))
+                }
+            } else {
+                let fallback = ContextSourceWindow(
+                    id: source.id,
+                    sourceId: source.id,
+                    sourceRevision: source.revision,
+                    recordedAt: source.recordedAt,
+                    endAt: source.recordedAt,
+                    offset: 0,
+                    end: source.totalCharacters,
+                    totalCharacters: source.totalCharacters,
+                    summary: source.summary,
+                    preview: source.preview
+                )
+                rawItems.append((source, fallback))
+            }
+        }
+
+        rawItems.sort { ($0.window.recordedAt ?? $0.source.recordedAt ?? 0) < ($1.window.recordedAt ?? $1.source.recordedAt ?? 0) }
+
+        var ordered: [DesktopTranscriptWindow] = []
+        ordered.reserveCapacity(rawItems.count)
+        var windowsByDayKey: [String: [DesktopTranscriptWindow]] = [:]
+        var windowByID: [String: DesktopTranscriptWindow] = [:]
+        windowByID.reserveCapacity(rawItems.count)
+        var earliestDay: Date?
+
+        let unknownLabel = String(localized: "时间不详")
+
+        for pair in rawItems {
+            let timestamp = pair.window.recordedAt ?? pair.source.recordedAt
+            let endTimestamp = pair.window.endAt ?? timestamp
+            let dayKeyValue: String
+            let rangeLabel: String
+            let datedLabel: String
+
+            if let ts = timestamp {
+                let startDate = Date(timeIntervalSince1970: ts)
+                let endDate = Date(timeIntervalSince1970: endTimestamp ?? ts)
+                let logicalStart = DayStartBoundary.logicalDayStart(for: startDate, calendar: calendar, startHour: dayStartHour)
+                if let currentEarliest = earliestDay {
+                    if logicalStart < currentEarliest { earliestDay = logicalStart }
+                } else {
+                    earliestDay = logicalStart
+                }
+                dayKeyValue = Self.dayKey(for: logicalStart, calendar: calendar)
+                let sText = startDate.formatted(Self.clockFormat)
+                let eText = endDate.formatted(Self.clockFormat)
+                let rText = sText == eText ? sText : "\(sText)–\(eText)"
+                rangeLabel = rText
+                let dayPrefix = startDate.formatted(.dateTime.locale(locale).month().day())
+                datedLabel = "\(dayPrefix) \(rText)"
+            } else {
+                dayKeyValue = ""
+                rangeLabel = unknownLabel
+                datedLabel = unknownLabel
+            }
+
+            let rawSummary = pair.window.summary
+            let rawPreview = pair.window.preview ?? pair.source.preview
+            let previewText = rawSummary.map { MarkdownDocument.plainTextPreview($0) } ?? rawPreview ?? ""
+            let searchable = (rawSummary ?? rawPreview ?? "").lowercased()
+
+            let item = DesktopTranscriptWindow(
+                source: pair.source,
+                window: pair.window,
+                logicalDayKey: dayKeyValue,
+                displayPreview: previewText,
+                searchText: searchable,
+                rangeTimeLabel: rangeLabel,
+                datedTimeLabel: datedLabel
+            )
+            ordered.append(item)
+            windowByID[item.id] = item
+            if !dayKeyValue.isEmpty {
+                windowsByDayKey[dayKeyValue, default: []].append(item)
+            }
+        }
+
+        return DesktopTranscriptSnapshot(
+            version: version,
+            ordered: ordered,
+            windowsByDayKey: windowsByDayKey,
+            windowByID: windowByID,
+            sourceByIDRevision: sourceByIDRevision,
+            earliestLogicalDay: earliestDay,
+            latestRecordedAt: ordered.last?.recordedAt
+        )
+    }
+}
+
 struct DesktopSources: View {
     @Bindable var model: DesktopModel
+    var isActive: Bool = true
     @State private var day = DayStartBoundary.logicalDayStart(for: Date())
     @State private var observedToday = DayStartBoundary.logicalDayStart(for: Date())
     @State private var selectedID: String?
@@ -24,7 +173,6 @@ struct DesktopSources: View {
     @State private var illustrationError: String?
     @State private var timelineAnchor: String?
     private let calendar = Calendar.current
-    private static let clockFormat = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
 
     private func logicalDay(for date: Date) -> Date {
         DayStartBoundary.logicalDayStart(for: date, calendar: calendar, startHour: model.dayStartHour)
@@ -34,39 +182,22 @@ struct DesktopSources: View {
         logicalDay(for: Date())
     }
 
-    private var ordered: [DesktopTranscriptWindow] {
-        model.sources.flatMap { source -> [DesktopTranscriptWindow] in
-            if let windows = source.windows, !windows.isEmpty {
-                return windows.map { DesktopTranscriptWindow(source: source, window: $0) }
-            }
-            let fallback = ContextSourceWindow(
-                id: source.id,
-                sourceId: source.id,
-                sourceRevision: source.revision,
-                recordedAt: source.recordedAt,
-                endAt: source.recordedAt,
-                offset: 0,
-                end: source.totalCharacters,
-                totalCharacters: source.totalCharacters,
-                summary: source.summary,
-                preview: source.preview
-            )
-            return [DesktopTranscriptWindow(source: source, window: fallback)]
-        }
-        .sorted { ($0.recordedAt ?? 0) < ($1.recordedAt ?? 0) }
+    private var snapshot: DesktopTranscriptSnapshot {
+        model.transcriptSnapshot
     }
 
     private var visible: [DesktopTranscriptWindow] {
-        ordered.filter { item in
-            if !query.isEmpty {
-                return (item.summary ?? item.preview ?? "").localizedStandardContains(query)
-            }
-            return item.recordedAt.map { calendar.isDate(logicalDay(for: Date(timeIntervalSince1970: $0)), inSameDayAs: day) } ?? false
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !trimmed.isEmpty {
+            return snapshot.ordered.filter { $0.searchText.contains(trimmed) }
         }
+        let key = DesktopTranscriptSnapshot.dayKey(for: day, calendar: calendar)
+        return snapshot.windowsByDayKey[key] ?? []
     }
 
     private var selected: DesktopTranscriptWindow? {
-        ordered.first { $0.id == selectedID }
+        guard let selectedID else { return nil }
+        return snapshot.windowByID[selectedID]
     }
 
     private var illustrations: [LifeIllustration] {
@@ -75,12 +206,12 @@ struct DesktopSources: View {
     }
 
     private var selectedIllustration: LifeIllustration? {
-        illustrations.first { $0.id == selectedIllustrationID }
+        guard let selectedIllustrationID else { return nil }
+        return illustrations.first { $0.id == selectedIllustrationID }
     }
 
     private var dayIllustrations: [LifeIllustration] {
-        let components = calendar.dateComponents([.year, .month, .day], from: day)
-        let dayKey = String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
+        let dayKey = DesktopTranscriptSnapshot.dayKey(for: day, calendar: calendar)
         return illustrations.filter { $0.logicalDay == dayKey }
     }
 
@@ -92,7 +223,7 @@ struct DesktopSources: View {
 
     private var earliest: Date {
         min(
-            ordered.compactMap(\.recordedAt).min().map { logicalDay(for: Date(timeIntervalSince1970: $0)) } ?? calendar.startOfDay(for: day),
+            snapshot.earliestLogicalDay ?? calendar.startOfDay(for: day),
             logicalToday
         )
     }
@@ -133,15 +264,16 @@ struct DesktopSources: View {
             }
         }
         .background(MoMoPalette.canvas)
-        .task {
+        .task(id: isActive) {
+            guard isActive else { return }
             let initialToday = logicalToday
             if day != initialToday && calendar.isDate(day, inSameDayAs: observedToday) {
                 day = initialToday
             }
             observedToday = initialToday
-            await model.loadContext(silent: !model.sources.isEmpty)
+            await model.loadContextIfStale(maxAge: 8)
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(8)) } catch { break }
+                do { try await Task.sleep(for: .seconds(12)) } catch { break }
                 let today = logicalToday
                 if today != observedToday {
                     if calendar.isDate(day, inSameDayAs: observedToday) { day = today }
@@ -157,7 +289,7 @@ struct DesktopSources: View {
             }
             observedToday = today
         }
-        .onChange(of: ordered.map { $0.id + $0.source.revision }) {
+        .onChange(of: snapshot.version) {
             if selectedID != nil && selected == nil { selectedID = nil }
         }
         .onChange(of: illustrations.map(\.id)) {
@@ -209,8 +341,8 @@ struct DesktopSources: View {
                                 selectedID = item.id
                             } label: {
                                 ClientTranscriptRow(
-                                    time: timeLabel(item),
-                                    preview: item.summary.map { MarkdownDocument.plainTextPreview($0) } ?? item.preview ?? "",
+                                    time: query.isEmpty ? item.rangeTimeLabel : item.datedTimeLabel,
+                                    preview: item.displayPreview,
                                     status: nil,
                                     connected: item.id != windows.last?.id,
                                     isFinal: true,
@@ -233,7 +365,7 @@ struct DesktopSources: View {
                             systemImage: "waveform",
                             description: Text(query.isEmpty ? "手机同步的录音稿会按日期出现在这里。" : "搜索范围为已同步的摘要与原文片段。")
                         )
-                        if query.isEmpty, let latest = ordered.last?.recordedAt,
+                        if query.isEmpty, let latest = snapshot.latestRecordedAt,
                            !calendar.isDate(logicalDay(for: Date(timeIntervalSince1970: latest)), inSameDayAs: day) {
                             Button("查看最近的转录") { day = logicalDay(for: Date(timeIntervalSince1970: latest)) }
                         }
@@ -253,7 +385,7 @@ struct DesktopSources: View {
     }
 
     private func showSource(for illustration: LifeIllustration) {
-        guard let source = ordered.first(where: {
+        guard let source = snapshot.ordered.first(where: {
             illustration.sourceIds.contains($0.source.id) && overlaps($0, illustration: illustration)
         }) else {
             illustrationError = String(localized: "原始转录尚未同步。")
@@ -309,18 +441,6 @@ struct DesktopSources: View {
         }
         if calendar.isDate(date, equalTo: today, toGranularity: .year) { return monthDay }
         return date.formatted(.dateTime.locale(AppLanguage.current.locale).year().month().day())
-    }
-
-    private func timeLabel(_ item: DesktopTranscriptWindow) -> String {
-        guard let timestamp = item.recordedAt else { return String(localized: "时间不详") }
-        let start = Date(timeIntervalSince1970: timestamp)
-        let end = Date(timeIntervalSince1970: item.endAt ?? timestamp)
-        let startLabel = start.formatted(Self.clockFormat)
-        let endLabel = end.formatted(Self.clockFormat)
-        let range = startLabel == endLabel ? startLabel : "\(startLabel)–\(endLabel)"
-        if query.isEmpty { return range }
-        let dayPrefix = start.formatted(.dateTime.locale(AppLanguage.current.locale).month().day())
-        return "\(dayPrefix) \(range)"
     }
 }
 

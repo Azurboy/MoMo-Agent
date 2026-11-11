@@ -7,6 +7,7 @@ import MoMoContracts
 struct DesktopRoot: View {
     @Bindable var model: DesktopModel
     @State private var sidebarVisible = true
+    @State private var visitedTabs: Set<String> = ["chat"]
     @State private var recordingCitation: RecordingCitation?
     @State private var previewingMemoryNote: ContextMemory?
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
@@ -20,9 +21,39 @@ struct DesktopRoot: View {
                         .font(.callout).padding(16).padding(.top, 32)
                         .background(MoMoPalette.failureBackground).accessibilityIdentifier("desktop.failure")
                 }
-                if model.selection == "sources" { DesktopSources(model: model).padding(.top, 36) }
-                else if model.selection == "memory" { DesktopMemory(model: model).padding(.top, 36) }
-                else { DesktopChat(model: model).padding(.top, 28) }
+                ZStack {
+                    if visitedTabs.contains("chat") || model.selection == "chat" {
+                        let active = model.selection == "chat"
+                        DesktopChat(model: model, isActive: active)
+                            .padding(.top, 28)
+                            .opacity(active ? 1 : 0)
+                            .allowsHitTesting(active)
+                            .accessibilityHidden(!active)
+                            .zIndex(active ? 1 : 0)
+                    }
+                    if visitedTabs.contains("memory") || model.selection == "memory" {
+                        let active = model.selection == "memory"
+                        DesktopMemory(model: model, isActive: active)
+                            .padding(.top, 36)
+                            .opacity(active ? 1 : 0)
+                            .allowsHitTesting(active)
+                            .accessibilityHidden(!active)
+                            .zIndex(active ? 1 : 0)
+                    }
+                    if visitedTabs.contains("sources") || model.selection == "sources" {
+                        let active = model.selection == "sources"
+                        DesktopSources(model: model, isActive: active)
+                            .padding(.top, 36)
+                            .opacity(active ? 1 : 0)
+                            .allowsHitTesting(active)
+                            .accessibilityHidden(!active)
+                            .zIndex(active ? 1 : 0)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onChange(of: model.selection, initial: true) {
+                    visitedTabs.insert(model.selection)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(MoMoPalette.canvas)
@@ -36,12 +67,12 @@ struct DesktopRoot: View {
         .environment(\.openURL, OpenURLAction { url in
             guard url.scheme?.lowercased() == "momoagent" else { return .systemAction }
             if DreamMemoryLinkResolver.isMemoryURL(url) {
-                if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+                if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.vaultSnapshot.activeMemories) {
                     previewingMemoryNote = matched
                 } else {
                     Task {
                         await model.loadContext()
-                        if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.memories) {
+                        if let matched = DreamMemoryLinkResolver.resolve(url: url, in: model.vaultSnapshot.activeMemories) {
                             previewingMemoryNote = matched
                         } else {
                             model.selection = "memory"
@@ -60,7 +91,7 @@ struct DesktopRoot: View {
         .sheet(item: $previewingMemoryNote) { note in
             MemoryNotePreviewSheet(
                 memory: note,
-                allMemories: model.memories,
+                allMemories: model.vaultSnapshot.activeMemories,
                 onOpenFullNotebook: { model.selection = "memory" }
             )
         }
@@ -256,6 +287,7 @@ struct PairingQRCode: View {
 struct DesktopChat: View {
     private let headerOverlap: CGFloat = 12
     @Bindable var model: DesktopModel
+    var isActive: Bool = true
     @State private var composeRevision = 0
     @State private var previewAttachment: AgentAttachment?
     @State private var showingActiveTasks = false
@@ -264,7 +296,7 @@ struct DesktopChat: View {
     @Environment(\.accessibilityReduceMotion) private var reduced
 
     private var briefingDocument: DreamBriefingDocument? {
-        DreamBriefingDocument.resolve(from: model.memories)
+        model.vaultSnapshot.briefingDocument
     }
 
     var body: some View {
@@ -274,7 +306,7 @@ struct DesktopChat: View {
                 let isEmpty = store.isEmpty || snapshot.messages.isEmpty
                 let draftEmpty = store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 VStack(spacing: isEmpty ? 18 : 6) {
-                    PersonalAgentSlot(size: isEmpty ? 144 : 56, active: store.hasActiveTask, expression: store.hasActiveTask ? .thinking : .present)
+                    PersonalAgentSlot(size: isEmpty ? 144 : 56, active: isActive && store.hasActiveTask, expression: store.hasActiveTask ? .thinking : .present)
                     PhoneBrandWordmark(.momo, size: isEmpty ? 22 : 12)
                 }
                 .frame(maxWidth: .infinity)
@@ -340,7 +372,7 @@ struct DesktopChat: View {
                     .padding(.top, 14)
                     .padding(.trailing, 18)
             }
-            .task { if model.memories.isEmpty { await model.loadContext() } }
+            .task { if model.memories.isEmpty { await model.loadContextIfStale(maxAge: 15) } }
             .sheet(item: $previewAttachment) { ClientAttachmentPreview(attachment: $0) }
             .sheet(isPresented: $showingBriefingDetail) {
                 if let doc = briefingDocument {
@@ -354,6 +386,7 @@ struct DesktopChat: View {
                         Divider()
                         ScrollView {
                             MarkdownReadingView(markdown: MemoryCardDigest.cleanNotebookMarkdownForDetail(doc.rawMarkdown), accessibilityID: "desktop.dreamBriefingMarkdown", handwriting: true)
+                                .equatable()
                                 .memoryNotebookPage()
                         }
                     }

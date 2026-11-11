@@ -432,10 +432,15 @@ extension View {
         modifier(MoMoHandwritingModifier(size: size, weight: weight, relativeTo: relativeTo))
     }
 
-    func memoryNotebookPage() -> some View {
-        self.padding(.leading, 40).padding(.trailing, 22).padding(.top, 16).padding(.bottom, 22)
+    func memoryNotebookPage(borderless: Bool = false) -> some View {
+        self.padding(.horizontal, borderless ? 0 : 22)
+            .padding(.vertical, borderless ? 0 : 18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(MemoryNotebookPaper())
+            .background {
+                if !borderless {
+                    MemoryNotebookPaper()
+                }
+            }
     }
 }
 
@@ -477,45 +482,14 @@ private struct MemoryNotebookPaper: View {
 
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
-        ZStack {
-            // Subtle lower sheet edge for understated physical card depth
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(colors.paper.opacity(scheme == .dark ? 0.65 : 0.85))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(colors.line, lineWidth: 0.8)
-                }
-                .scaleEffect(x: 0.982, y: 1.0, anchor: .bottom)
-                .offset(y: 4)
-
-            // Crisp white loose-leaf sheet with micro-perforated binder margin
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(colors.paper)
-                .overlay {
-                    Canvas { context, size in
-                        // Delicate vertical binder spine hairline
-                        var spine = Path()
-                        spine.move(to: CGPoint(x: 26, y: 12))
-                        spine.addLine(to: CGPoint(x: 26, y: max(12, size.height - 12)))
-                        context.stroke(spine, with: .color(colors.line.opacity(0.75)), lineWidth: 0.6)
-
-                        // Micro-perforated loose-leaf punch holes (no cartoon metal bars)
-                        for y in stride(from: 28.0, through: max(28.0, size.height - 24.0), by: 44.0) {
-                            let hole = CGRect(x: 10.5, y: y - 2.6, width: 5.2, height: 5.2)
-                            context.fill(Path(ellipseIn: hole), with: .color(colors.desk))
-                            context.stroke(Path(ellipseIn: hole), with: .color(colors.line), lineWidth: 0.7)
-                        }
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(colors.line, lineWidth: 1)
-                }
-        }
-        .shadow(color: .black.opacity(scheme == .dark ? 0.24 : 0.035), radius: 12, x: 0, y: 4)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(colors.paper)
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(colors.line, lineWidth: 0.7)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -564,7 +538,7 @@ struct MemoryCardDigest: Equatable, Sendable {
 
     private nonisolated(unsafe) static let cache: NSCache<NSString, CachedMemoryCardDigestBox> = {
         let c = NSCache<NSString, CachedMemoryCardDigestBox>()
-        c.countLimit = 256
+        c.countLimit = 1024
         return c
     }()
 
@@ -601,7 +575,7 @@ struct MemoryCardDigest: Equatable, Sendable {
     )
 
     static func cached(for memory: ContextMemory) -> MemoryCardDigest {
-        let key = "\(memory.id)|\(memory.revision)|\(memory.status)|\(memory.text.count)" as NSString
+        let key = "\(memory.id)|\(memory.revision)|\(memory.status)|\(memory.text.utf8.count)" as NSString
         if let hit = cache.object(forKey: key) {
             return hit.digest
         }
@@ -621,6 +595,7 @@ struct MemoryCardDigest: Equatable, Sendable {
     init(memory: ContextMemory) {
         self.badge = DreamMemoryCategory.badge(for: memory)
         self.isNotebookMarkdown = ["briefing", "project", "journal", "person", "topic"].contains(memory.kind)
+            || (memory.path?.lowercased().hasSuffix(".md") == true)
         if memory.status == "stale" {
             self.statusBadge = "原文已改变"
         } else if memory.basis == "inferred" {
@@ -788,23 +763,253 @@ struct MemoryCardDigest: Equatable, Sendable {
         self.sourceNote = extractedNote
     }
 
-    static func linkedChildren(for parent: ContextMemory, in allMemories: [ContextMemory]) -> [ContextMemory] {
-        let digest = cached(for: parent)
-        guard !digest.linkedPaths.isEmpty else { return [] }
-        var result: [ContextMemory] = []
-        for relPath in digest.linkedPaths {
-            let encoded = relPath
-                .split(separator: "/")
-                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-                .joined(separator: "/")
-            guard let url = URL(string: "momoagent://memory/\(encoded)"),
-                  let target = DreamMemoryLinkResolver.resolve(url: url, in: allMemories),
-                  target.id != parent.id,
-                  !result.contains(where: { $0.id == target.id }) else { continue }
-            result.append(target)
-        }
-        return result
+    private final class CachedChildrenMapBox: NSObject {
+        let map: [String: [ContextMemory]]
+        init(_ map: [String: [ContextMemory]]) { self.map = map }
     }
+
+    private nonisolated(unsafe) static let childrenMapCache: NSCache<NSString, CachedChildrenMapBox> = {
+        let cache = NSCache<NSString, CachedChildrenMapBox>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    static func memoriesSignature(_ memories: [ContextMemory]) -> String {
+        var hasher = Hasher()
+        hasher.combine(memories.count)
+        for item in memories {
+            hasher.combine(item.id)
+            hasher.combine(item.revision)
+            hasher.combine(item.status)
+            hasher.combine(item.kind)
+            hasher.combine(item.path)
+            hasher.combine(item.text.utf8.count)
+        }
+        return "\(memories.count):\(hasher.finalize())"
+    }
+
+    static func linkedChildrenMap(for allMemories: [ContextMemory]) -> [String: [ContextMemory]] {
+        let active = allMemories.filter { $0.status != "forgotten" }
+        guard !active.isEmpty else { return [:] }
+        let key = memoriesSignature(active) as NSString
+        if let hit = childrenMapCache.object(forKey: key) {
+            return hit.map
+        }
+        var built: [String: [ContextMemory]] = [:]
+        built.reserveCapacity(active.count)
+        for parent in active {
+            let digest = cached(for: parent)
+            guard !digest.linkedPaths.isEmpty else { continue }
+            var children: [ContextMemory] = []
+            for relPath in digest.linkedPaths {
+                let encoded = relPath
+                    .split(separator: "/")
+                    .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                    .joined(separator: "/")
+                guard let url = URL(string: "momoagent://memory/\(encoded)"),
+                      let target = DreamMemoryLinkResolver.resolve(url: url, in: active),
+                      target.id != parent.id,
+                      !children.contains(where: { $0.id == target.id }) else { continue }
+                children.append(target)
+            }
+            if !children.isEmpty {
+                built[parent.id] = children
+            }
+        }
+        childrenMapCache.setObject(CachedChildrenMapBox(built), forKey: key)
+        return built
+    }
+
+    private nonisolated(unsafe) static let backlinksMapCache: NSCache<NSString, CachedChildrenMapBox> = {
+        let cache = NSCache<NSString, CachedChildrenMapBox>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    static func linkedChildren(for parent: ContextMemory, in allMemories: [ContextMemory]) -> [ContextMemory] {
+        linkedChildrenMap(for: allMemories)[parent.id] ?? []
+    }
+
+    static func backlinksMap(for allMemories: [ContextMemory]) -> [String: [ContextMemory]] {
+        let active = allMemories.filter { $0.status != "forgotten" }
+        guard !active.isEmpty else { return [:] }
+        let key = memoriesSignature(active) as NSString
+        if let hit = backlinksMapCache.object(forKey: key) {
+            return hit.map
+        }
+        let outgoing = linkedChildrenMap(for: active)
+        let byID = Dictionary(uniqueKeysWithValues: active.map { ($0.id, $0) })
+        var incoming: [String: [ContextMemory]] = [:]
+        for (sourceID, targets) in outgoing {
+            guard let source = byID[sourceID] else { continue }
+            for target in targets where target.id != sourceID {
+                var list = incoming[target.id] ?? []
+                if !list.contains(where: { $0.id == source.id }) {
+                    list.append(source)
+                }
+                incoming[target.id] = list
+            }
+        }
+        for (targetID, sources) in incoming {
+            incoming[targetID] = DreamMemoryCategory.sortMemories(sources)
+        }
+        backlinksMapCache.setObject(CachedChildrenMapBox(incoming), forKey: key)
+        return incoming
+    }
+
+    static func backlinks(for target: ContextMemory, in allMemories: [ContextMemory]) -> [ContextMemory] {
+        backlinksMap(for: allMemories)[target.id] ?? []
+    }
+}
+
+struct MemoryVaultRowMeta: Equatable, Sendable {
+    let title: String
+    let symbol: String
+    let badgeTitle: String
+    let dateBadge: String?
+    let shortJournalDate: String?
+}
+
+struct MemoryVaultSnapshot: Equatable, Sendable {
+    let activeMemories: [ContextMemory]
+    let byID: [String: ContextMemory]
+    let rowMetaByID: [String: MemoryVaultRowMeta]
+    let searchTextByID: [String: String]
+    let folders: [DreamMemorySection]
+    let defaultExpandedFolderIDs: Set<String>
+    let flatVisibleItems: [ContextMemory]
+    let siblingsByMemoryID: [String: [ContextMemory]]
+    let childrenByParentID: [String: [ContextMemory]]
+    let backlinksByTargetID: [String: [ContextMemory]]
+    let briefingDocument: DreamBriefingDocument?
+
+    static let empty = MemoryVaultSnapshot(
+        activeMemories: [],
+        byID: [:],
+        rowMetaByID: [:],
+        searchTextByID: [:],
+        folders: [],
+        defaultExpandedFolderIDs: [],
+        flatVisibleItems: [],
+        siblingsByMemoryID: [:],
+        childrenByParentID: [:],
+        backlinksByTargetID: [:],
+        briefingDocument: nil
+    )
+
+    nonisolated static func build(from memories: [ContextMemory]) -> MemoryVaultSnapshot {
+        let active = memories.filter { $0.status != "forgotten" }
+        guard !active.isEmpty else { return .empty }
+
+        var byID: [String: ContextMemory] = [:]
+        byID.reserveCapacity(active.count)
+        var rowMetaByID: [String: MemoryVaultRowMeta] = [:]
+        rowMetaByID.reserveCapacity(active.count)
+        var searchTextByID: [String: String] = [:]
+        searchTextByID.reserveCapacity(active.count)
+
+        for item in active {
+            byID[item.id] = item
+            let digest = MemoryCardDigest.cached(for: item)
+            let shortDate: String? = (item.kind == "journal") ? digest.dateBadge.map { String($0.suffix(5)) } : nil
+            rowMetaByID[item.id] = MemoryVaultRowMeta(
+                title: digest.title,
+                symbol: digest.badge.symbol,
+                badgeTitle: digest.badge.title,
+                dateBadge: digest.dateBadge,
+                shortJournalDate: shortDate
+            )
+            searchTextByID[item.id] = "\(digest.title)\n\(digest.badge.title)\n\(item.text)".lowercased()
+            if digest.isNotebookMarkdown {
+                _ = MarkdownDocument.cached(digest.cleanedNotebookMarkdown)
+                #if os(macOS)
+                MacMarkdownRenderer.prewarm(digest.cleanedNotebookMarkdown, handwriting: true, plainTextOnly: false)
+                #endif
+            } else {
+                #if os(macOS)
+                MacMarkdownRenderer.prewarm(item.text, handwriting: true, plainTextOnly: true)
+                #endif
+            }
+        }
+
+        let folders = DreamMemoryCategory.directoryFolders(from: active)
+        let defaultExpanded = DreamMemoryCategory.defaultExpandedFolderIDs(for: folders)
+        let flatItems = folders.flatMap(\.items)
+
+        var siblingsByID: [String: [ContextMemory]] = [:]
+        siblingsByID.reserveCapacity(active.count)
+        for folder in folders {
+            let group = folder.items.count > 1 ? folder.items : (flatItems.count > 1 ? flatItems : folder.items)
+            for item in folder.items {
+                siblingsByID[item.id] = group
+            }
+        }
+
+        let childrenMap = MemoryCardDigest.linkedChildrenMap(for: active)
+        let backlinksMap = MemoryCardDigest.backlinksMap(for: active)
+        let briefing = DreamBriefingDocument.resolve(from: active)
+
+        return MemoryVaultSnapshot(
+            activeMemories: active,
+            byID: byID,
+            rowMetaByID: rowMetaByID,
+            searchTextByID: searchTextByID,
+            folders: folders,
+            defaultExpandedFolderIDs: defaultExpanded,
+            flatVisibleItems: flatItems,
+            siblingsByMemoryID: siblingsByID,
+            childrenByParentID: childrenMap,
+            backlinksByTargetID: backlinksMap,
+            briefingDocument: briefing
+        )
+    }
+
+    func filteredFolders(matching rawQuery: String) -> [DreamMemorySection] {
+        let q = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return folders }
+        return folders.compactMap { folder in
+            let matches = folder.items.filter { item in
+                (searchTextByID[item.id] ?? "").contains(q)
+            }
+            return matches.isEmpty
+                ? nil
+                : DreamMemorySection(id: folder.id, title: folder.title, subtitle: folder.subtitle, items: matches)
+        }
+    }
+}
+
+extension MemoryCardDigest {
+
+    static func copyToPasteboard(_ text: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
+        #endif
+    }
+
+    static func buildInstructionPrompt(for memory: ContextMemory, instruction: String) -> String {
+        let digest = cached(for: memory)
+        let location = memory.path ?? "\(memory.kind)/\(memory.id)"
+        return """
+        请针对记忆笔记 `\(location)`（标题：\(digest.title)）执行以下修改与溯源纠偏指令：
+        「\(instruction.trimmingCharacters(in: .whitespacesAndNewlines))」
+        请使用原生工具完成闭环：
+        1. 若涉及说话人归属或原音核对，先用 `search_recordings` / `read_recording` 找到对应录音 `source_id` 与精确 `span_ids`，调用 `relabel_recording_speakers` 修正说话人标签并同步回写 iPhone 声纹库（若原标签已是具名人物或“我”、仅局部片段被串轨误标，务必传精确 `span_ids` 且 `scope="selection"`，避免误改同场其他发言；若原标签为整组匿名 `[说话人 N]` 可用 `scope="cluster"`）；
+        2. 用 `read_memory_notebook` / `write_memory_notebook` / `update_core_memory` 同步修改当前笔记以及所有关联的 `journal/*.md`、`projects/*.md`、`people/*.md`、`topics/*.md`、`BRIEFING.md` 与 `MEMORY.md`，顺手清除正文中残留的 `remaining_parts` 或 `revision` 等内部调试字样。
+        """
+    }
+
+    #if os(macOS)
+    static func shareText(_ text: String) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+              let contentView = window.contentView else { return }
+        let picker = NSSharingServicePicker(items: [text])
+        let anchor = NSRect(x: contentView.bounds.maxX - 48, y: contentView.bounds.maxY - 64, width: 1, height: 1)
+        picker.show(relativeTo: anchor, of: contentView, preferredEdge: .minY)
+    }
+    #endif
 
     private static func badgeTitleFallback(for kind: String) -> String {
         switch kind {
@@ -916,9 +1121,9 @@ struct MemoryCardDigest: Equatable, Sendable {
                         let adjustedLower = s.index(fullRange.lowerBound, offsetBy: -distance)
                         fullRange = adjustedLower..<fullRange.upperBound
                     }
-                    s.replaceSubrange(fullRange, with: "  [查看详情 ›](momoagent://memory/\(encoded))")
+                    s.replaceSubrange(fullRange, with: "  [[\(friendly)]](momoagent://memory/\(encoded))")
                 } else {
-                    s.replaceSubrange(fullRange, with: "[↗ \(friendly)](momoagent://memory/\(encoded))")
+                    s.replaceSubrange(fullRange, with: "[[\(friendly)]](momoagent://memory/\(encoded))")
                 }
             }
         }
@@ -931,117 +1136,192 @@ struct MemoryCardDigest: Equatable, Sendable {
 
 struct MemoryCardView: View {
     let memory: ContextMemory
+    var childCount: Int = 0
+    var isExpanded: Bool = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        HStack(alignment: .center, spacing: 10) {
-            Circle()
-                .fill(colors.tabAccent(memory.kind))
-                .frame(width: 6, height: 6)
-                .accessibilityHidden(true)
+        HStack(alignment: .center, spacing: 9) {
+            if childCount > 0 {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(colors.secondaryInk)
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: digest.badge.symbol)
+                    .font(.system(size: 12.5, weight: .regular))
+                    .foregroundStyle(colors.tabAccent(memory.kind))
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+            }
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2.5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(digest.title)
-                        .font(.system(size: 14.5, weight: .medium))
+                        .font(.system(size: 14.5, weight: .regular))
                         .foregroundStyle(colors.ink)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     if let date = digest.dateBadge {
                         Text(date)
-                            .font(.system(size: 11.5, weight: .regular))
+                            .font(.system(size: 11, weight: .regular))
                             .monospacedDigit()
                             .foregroundStyle(colors.secondaryInk)
                     }
                 }
-                if let firstHighlight = digest.highlights.first {
+                if let firstHighlight = digest.highlights.first, childCount == 0 {
                     Text(firstHighlight)
-                        .font(.system(size: 12.5))
+                        .font(.system(size: 12))
                         .foregroundStyle(colors.secondaryInk)
                         .lineLimit(1)
                 }
             }
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(colors.secondaryInk.opacity(0.55))
-                .accessibilityHidden(true)
+            if childCount > 0 {
+                Text("\(childCount)")
+                    .font(.system(size: 11.5, weight: .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(colors.secondaryInk)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(colors.surface, in: Capsule())
+                    .accessibilityHidden(true)
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(([digest.badge.title, digest.dateBadge, digest.statusBadge, digest.title]
-            .compactMap { $0 } + digest.highlights + ["查看全文"]).joined(separator: "，"))
+            .compactMap { $0 } + digest.highlights + [childCount > 0 ? (isExpanded ? "收起子项" : "展开子项") : "查看全文"]).joined(separator: "，"))
     }
 }
 
 struct ClientMemoryContent: View {
     let memory: ContextMemory
+    var allMemories: [ContextMemory] = []
     var siblingItems: [ContextMemory] = []
+    var precomputedOutgoing: [ContextMemory]? = nil
+    var precomputedIncoming: [ContextMemory]? = nil
     var onSelectSibling: ((ContextMemory) -> Void)? = nil
+    var onSelectLinkedMemory: ((ContextMemory) -> Void)? = nil
     var backLabel: String? = nil
     var onBack: (() -> Void)? = nil
+    var canGoForward: Bool = false
+    var onForward: (() -> Void)? = nil
     var onOpenFullNotebook: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
+    var borderless: Bool = false
+    var sourceLookup: ((ContextMemory.Evidence) -> ContextSource?)? = nil
+    var onOpenSource: ((ContextSource) -> Void)? = nil
+    var onInstruct: ((String) async throws -> Void)? = nil
+    @State private var showEvidence = false
+    @State private var showBacklinks = true
+    @State private var copied = false
+    @State private var showingInstructionBar = false
+    @State private var instructionDraft = ""
+    @State private var submittingInstruction = false
+    @State private var instructionReceipt: String? = nil
+    @State private var instructionError: String? = nil
     @Environment(\.colorScheme) private var scheme
     @Environment(\.openURL) private var openURL
 
+    private var titleSize: CGFloat {
+        #if os(macOS)
+        return 22
+        #else
+        return 20
+        #endif
+    }
+
     private var plainBodySize: CGFloat {
         #if os(macOS)
-        return 13.5
+        return 14
         #else
         return 15
         #endif
     }
 
+    private func folderBreadcrumbTitle(for kind: String) -> String {
+        switch kind {
+        case "project": return "在研项目"
+        case "briefing": return "晨间简报"
+        case "topic": return "专题活页"
+        case "person": return "人物档案"
+        case "journal": return "每日日志"
+        default: return "核心记忆"
+        }
+    }
+
     var body: some View {
         let digest = MemoryCardDigest.cached(for: memory)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        VStack(alignment: .leading, spacing: 12) {
-            // Single calm top metadata bar
-            HStack(alignment: .center, spacing: 8) {
-                if let onBack {
-                    Button(action: onBack) {
-                        HStack(spacing: 3) {
+        let outgoingMemories = precomputedOutgoing ?? (allMemories.isEmpty ? [] : MemoryCardDigest.linkedChildren(for: memory, in: allMemories))
+        let incomingMemories = precomputedIncoming ?? (allMemories.isEmpty ? [] : MemoryCardDigest.backlinks(for: memory, in: allMemories))
+
+        VStack(alignment: .leading, spacing: 16) {
+            // Obsidian-style top pane header: [< >] + Folder › Note breadcrumb + overflow
+            HStack(alignment: .center, spacing: 6) {
+                if onBack != nil || onForward != nil {
+                    HStack(spacing: 2) {
+                        Button {
+                            onBack?()
+                        } label: {
                             Image(systemName: "chevron.left")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(backLabel ?? "返回")
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(1)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(onBack != nil ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
                         }
-                        .foregroundStyle(colors.ink)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(colors.surface, in: Capsule())
+                        .buttonStyle(.plain)
+                        .disabled(onBack == nil)
+                        .help(backLabel ?? "后退")
+                        .accessibilityLabel(backLabel ?? "返回")
+
+                        if onForward != nil {
+                            Button {
+                                onForward?()
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(canGoForward ? colors.ink : colors.secondaryInk.opacity(0.35))
+                                    .frame(width: 26, height: 26)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!canGoForward)
+                            .help("前进")
+                            .accessibilityLabel("前进")
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 2)
+                    .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
 
+                // Breadcrumb path: Folder › Note
                 HStack(spacing: 5) {
-                    Circle()
-                        .fill(colors.tabAccent(memory.kind))
-                        .frame(width: 6, height: 6)
-                    Text(digest.badge.title)
-                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: DreamMemoryCategory.folderSymbol(for: memory.kind))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(colors.tabAccent(memory.kind))
+                    Text(folderBreadcrumbTitle(for: memory.kind))
+                        .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(colors.secondaryInk)
-                    if let date = digest.dateBadge {
-                        Text("·")
-                            .font(.system(size: 12))
-                            .foregroundStyle(colors.secondaryInk)
-                        Text(date)
-                            .font(.system(size: 11.5, weight: .regular))
-                            .monospacedDigit()
-                            .foregroundStyle(colors.secondaryInk)
-                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(colors.secondaryInk.opacity(0.55))
+                    Text(digest.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(colors.ink)
+                        .lineLimit(1)
                 }
                 .accessibilityHidden(true)
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 6)
 
                 if siblingItems.count > 1, let onSelectSibling {
                     MemoryPageStepper(
@@ -1051,51 +1331,90 @@ struct ClientMemoryContent: View {
                     )
                 }
 
+                if onInstruct != nil {
+                    Button {
+                        showingInstructionBar.toggle()
+                        instructionError = nil
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("指令修改")
+                                .font(.system(size: 11.5, weight: .medium))
+                        }
+                        .foregroundStyle(showingInstructionBar ? colors.ink : colors.secondaryInk)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(
+                            showingInstructionBar ? colors.surface : colors.surface.opacity(0.75),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("通过自然语言指令让 MoMo 修改这篇记忆或纠正说话人")
+                    .accessibilityIdentifier("remote.memoryInstructToggle")
+                }
+
                 if let onOpenFullNotebook {
                     Button(action: onOpenFullNotebook) {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(colors.secondaryInk)
-                            .frame(width: 28, height: 28)
-                            .background(colors.surface, in: Circle())
+                            .frame(width: 26, height: 26)
+                            .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .help("在记忆手账中查看")
-                    .accessibilityLabel("在记忆手账中查看")
+                    .help("在记忆库中打开")
+                    .accessibilityLabel("在记忆库中打开")
                 }
 
-                if let onDelete {
-                    Menu {
-                        ShareLink(item: memory.text) {
-                            Label("分享", systemImage: "square.and.arrow.up")
-                        }
+                Menu {
+                    Button {
+                        MemoryCardDigest.copyToPasteboard(memory.text)
+                        copied = true
+                    } label: {
+                        Label(copied ? "已复制 Markdown" : "复制 Markdown", systemImage: "doc.on.doc")
+                    }
+                    #if os(macOS)
+                    Button {
+                        MemoryCardDigest.shareText(memory.text)
+                    } label: {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
+                    #else
+                    ShareLink(item: memory.text) {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
+                    #endif
+                    if let onDelete {
                         Divider()
                         Button(role: .destructive, action: onDelete) {
                             Label(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash")
                         }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(colors.secondaryInk)
-                            .frame(width: 28, height: 28)
-                            .background(colors.surface, in: Circle())
-                            .contentShape(Circle())
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("更多操作")
-                    .accessibilityLabel("更多操作")
-                    .accessibilityIdentifier("remote.inlineMemoryMore")
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.secondaryInk)
+                        .frame(width: 26, height: 26)
+                        .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("更多操作")
+                .accessibilityLabel("更多操作")
+                .accessibilityIdentifier("remote.inlineMemoryMore")
 
                 if let onClose {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(colors.secondaryInk)
-                            .frame(width: 28, height: 28)
-                            .background(colors.surface, in: Circle())
+                            .frame(width: 26, height: 26)
+                            .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .help("关闭")
@@ -1103,28 +1422,138 @@ struct ClientMemoryContent: View {
                 }
             }
 
+            // Document Title + Obsidian Properties Strip
+            VStack(alignment: .leading, spacing: 10) {
+                Text(digest.title)
+                    .font(.system(size: titleSize, weight: .bold))
+                    .foregroundStyle(colors.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+
+                // Subtle Obsidian-style inline Properties metadata bar
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        obsidianPropertyTag(icon: digest.badge.symbol, label: digest.badge.title, accent: colors.tabAccent(memory.kind), colors: colors)
+
+                        if let date = digest.dateBadge {
+                            obsidianPropertyTag(icon: "calendar", label: date, accent: nil, colors: colors, monospaced: true)
+                        }
+
+                        if let rawPath = memory.path, !rawPath.isEmpty {
+                            obsidianPropertyTag(icon: "link", label: rawPath, accent: nil, colors: colors, monospaced: true)
+                        }
+
+                        if !outgoingMemories.isEmpty || !digest.linkedPaths.isEmpty {
+                            let count = max(outgoingMemories.count, digest.linkedPaths.count)
+                            obsidianPropertyTag(icon: "arrow.up.right.square", label: "\(count) 个链接", accent: nil, colors: colors)
+                        }
+
+                        if !incomingMemories.isEmpty {
+                            obsidianPropertyTag(icon: "arrow.turn.down.left", label: "\(incomingMemories.count) 处反向提及", accent: nil, colors: colors)
+                        }
+
+                        if !memory.evidence.isEmpty {
+                            obsidianPropertyTag(icon: "waveform", label: "\(memory.evidence.count) 段原音", accent: nil, colors: colors)
+                        }
+                    }
+                }
+
+                if showingInstructionBar, let onInstruct {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(colors.tabAccent(memory.kind))
+                            TextField("告诉 MoMo 怎么改（如：这个 OKR 是 shengli 说的，帮我纠正说话人和相关记忆）…", text: $instructionDraft)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 13))
+                                .disabled(submittingInstruction)
+                                .onSubmit {
+                                    submitMemoryInstruction(using: onInstruct)
+                                }
+                                .accessibilityIdentifier("remote.memoryInstructInput")
+
+                            if submittingInstruction {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Button {
+                                    submitMemoryInstruction(using: onInstruct)
+                                } label: {
+                                    Text("发送")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? colors.secondaryInk : MoMoPalette.canvas)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4.5)
+                                        .background(
+                                            instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                ? colors.surface
+                                                : colors.ink,
+                                            in: Capsule()
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("remote.memoryInstructSend")
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(colors.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(colors.line, lineWidth: 0.7)
+                        }
+
+                        if let instructionError {
+                            Text(instructionError)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(MoMoPalette.failure)
+                        }
+                    }
+                } else if let receipt = instructionReceipt {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(MoMoPalette.success)
+                        Text(receipt)
+                            .font(.system(size: 12))
+                            .foregroundStyle(colors.secondaryInk)
+                        Spacer()
+                        Button {
+                            instructionReceipt = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(colors.secondaryInk)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surface.opacity(0.55), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+            }
+
             Rectangle()
-                .fill(colors.line)
-                .frame(height: 0.7)
+                .fill(colors.line.opacity(0.8))
+                .frame(height: 0.6)
                 .accessibilityHidden(true)
 
-            // Full un-truncated editorial title
-            Text(digest.title)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(colors.ink)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
-                .accessibilityAddTraits(.isHeader)
-
+            // Main Markdown / Note Body
             if digest.isNotebookMarkdown {
-                MarkdownReadingView(markdown: digest.cleanedNotebookMarkdown,
-                                    accessibilityID: "remote.memoryText", handwriting: true)
+                MarkdownReadingView(
+                    markdown: digest.cleanedNotebookMarkdown,
+                    accessibilityID: "remote.memoryText",
+                    handwriting: true
+                )
+                .equatable()
             } else {
                 if !digest.highlights.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(digest.highlights.enumerated()), id: \.offset) { _, point in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text("·")
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Text("•")
                                     .foregroundStyle(colors.secondaryInk)
                                     .accessibilityHidden(true)
                                 Text(point)
@@ -1133,95 +1562,359 @@ struct ClientMemoryContent: View {
                             }
                         }
                     }
-                    .lineSpacing(3.5)
+                    .lineSpacing(4)
                 }
+                #if os(macOS)
+                MarkdownReadingView(
+                    markdown: memory.text,
+                    accessibilityID: "remote.memoryText",
+                    handwriting: true,
+                    plainTextOnly: true
+                )
+                .equatable()
+                #else
                 Text(memory.text)
                     .font(.system(size: plainBodySize))
-                    .lineSpacing(4.5)
+                    .lineSpacing(5)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("remote.memoryText")
+                #endif
             }
 
-            if !digest.linkedPaths.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
+            // Obsidian Bidirectional Links Section: Outgoing Links + Backlinks (Linked Mentions)
+            if !outgoingMemories.isEmpty || !digest.linkedPaths.isEmpty || !incomingMemories.isEmpty || !memory.evidence.isEmpty {
+                VStack(alignment: .leading, spacing: 14) {
                     Rectangle()
-                        .fill(colors.line.opacity(0.7))
+                        .fill(colors.line.opacity(0.75))
                         .frame(height: 0.6)
-                        .padding(.bottom, 2)
+                        .padding(.top, 6)
                         .accessibilityHidden(true)
 
-                    Text("关联页面")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(colors.secondaryInk)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(digest.linkedPaths, id: \.self) { relPath in
-                                let label = MemoryCardDigest.humanizeNotebookPath(relPath)
-                                let encoded = relPath
-                                    .split(separator: "/")
-                                    .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-                                    .joined(separator: "/")
-                                Button {
-                                    if let url = URL(string: "momoagent://memory/\(encoded)") {
-                                        openURL(url)
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Text(label)
-                                            .font(.system(size: 12, weight: .medium))
-                                        Image(systemName: "arrow.up.right")
-                                            .font(.system(size: 9.5, weight: .semibold))
-                                            .foregroundStyle(colors.secondaryInk)
-                                    }
-                                    .foregroundStyle(colors.ink)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(colors.surface, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                }
-                .padding(.top, 4)
-            }
-
-            if !memory.evidence.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(evidence.quote)
-                                .font(.system(size: 12.5))
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                            if let time = evidence.recordedAt {
-                                Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
-                                    .font(.caption2)
+                    // 1. Outgoing Links (出链 · 关联笔记)
+                    if !outgoingMemories.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("关联笔记")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                Text("\(outgoingMemories.count)")
+                                    .font(.system(size: 11))
                                     .monospacedDigit()
                             }
+                            .foregroundStyle(colors.secondaryInk)
+
+                            FlowingWikiLinkRow(
+                                memories: outgoingMemories,
+                                colors: colors,
+                                onSelect: { target in
+                                    navigate(to: target)
+                                }
+                            )
                         }
-                        .padding(.leading, 10)
-                        .overlay(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(colors.line)
-                                .frame(width: 2.5)
-                                .accessibilityHidden(true)
+                    } else if !digest.linkedPaths.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("关联笔记")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            .foregroundStyle(colors.secondaryInk)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(digest.linkedPaths, id: \.self) { relPath in
+                                        let label = MemoryCardDigest.humanizeNotebookPath(relPath)
+                                        let encoded = relPath
+                                            .split(separator: "/")
+                                            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                                            .joined(separator: "/")
+                                        Button {
+                                            if let url = URL(string: "momoagent://memory/\(encoded)") {
+                                                openURL(url)
+                                            }
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "doc.text")
+                                                    .font(.system(size: 10.5))
+                                                    .foregroundStyle(colors.secondaryInk)
+                                                Text("[[\(label)]]")
+                                                    .font(.system(size: 12, weight: .medium))
+                                            }
+                                            .foregroundStyle(colors.ink)
+                                            .padding(.horizontal, 9)
+                                            .padding(.vertical, 5)
+                                            .background(colors.surface.opacity(0.8), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
                         }
-                        .foregroundStyle(colors.secondaryInk)
+                    }
+
+                    // 2. Backlinks / Linked Mentions (反向链接 · 被提及)
+                    if !incomingMemories.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.16)) {
+                                    showBacklinks.toggle()
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: showBacklinks ? "chevron.down" : "chevron.right")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                        .frame(width: 11)
+                                    Text("反向链接 · 被以下笔记提及")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                    Text("\(incomingMemories.count)")
+                                        .font(.system(size: 11))
+                                        .monospacedDigit()
+                                    Spacer()
+                                }
+                                .foregroundStyle(colors.secondaryInk)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            if showBacklinks {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(incomingMemories) { sourceNote in
+                                        let srcDigest = MemoryCardDigest.cached(for: sourceNote)
+                                        Button {
+                                            navigate(to: sourceNote)
+                                        } label: {
+                                            HStack(alignment: .top, spacing: 8) {
+                                                Image(systemName: srcDigest.badge.symbol)
+                                                    .font(.system(size: 11.5, weight: .medium))
+                                                    .foregroundStyle(colors.tabAccent(sourceNote.kind))
+                                                    .frame(width: 16)
+                                                    .padding(.top, 2)
+
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    HStack(spacing: 6) {
+                                                        Text(srcDigest.title)
+                                                            .font(.system(size: 13, weight: .medium))
+                                                            .foregroundStyle(colors.ink)
+                                                            .lineLimit(1)
+                                                        Text(srcDigest.badge.title)
+                                                            .font(.system(size: 11))
+                                                            .foregroundStyle(colors.secondaryInk)
+                                                        if let d = srcDigest.dateBadge {
+                                                            Text(d)
+                                                                .font(.system(size: 10.5))
+                                                                .monospacedDigit()
+                                                                .foregroundStyle(colors.secondaryInk)
+                                                        }
+                                                    }
+                                                    if let snippet = srcDigest.highlights.first {
+                                                        Text(snippet)
+                                                            .font(.system(size: 12))
+                                                            .foregroundStyle(colors.secondaryInk)
+                                                            .lineLimit(1)
+                                                    }
+                                                }
+                                                Spacer(minLength: 4)
+                                                Image(systemName: "arrow.up.right")
+                                                    .font(.system(size: 10, weight: .medium))
+                                                    .foregroundStyle(colors.secondaryInk.opacity(0.6))
+                                                    .padding(.top, 3)
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 7)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(colors.surface.opacity(0.55), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Collapsible Source Evidence (原音引证)
+                    if !memory.evidence.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.16)) {
+                                    showEvidence.toggle()
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: showEvidence ? "chevron.down" : "chevron.right")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                        .frame(width: 11)
+                                    Text("原音引证")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                    Text("\(memory.evidence.count)")
+                                        .font(.system(size: 11))
+                                        .monospacedDigit()
+                                    Spacer()
+                                }
+                                .foregroundStyle(colors.secondaryInk)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            if showEvidence {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ForEach(Array(memory.evidence.enumerated()), id: \.offset) { _, evidence in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            #if os(macOS)
+                                            MarkdownReadingView(
+                                                markdown: evidence.quote,
+                                                accessibilityID: "remote.memoryEvidence.\(evidence.sourceId)",
+                                                handwriting: true,
+                                                plainTextOnly: true
+                                            )
+                                            .equatable()
+                                            #else
+                                            Text(evidence.quote)
+                                                .font(.system(size: 12.5))
+                                                .lineSpacing(3)
+                                                .textSelection(.enabled)
+                                            #endif
+                                            HStack(spacing: 8) {
+                                                if let time = evidence.recordedAt {
+                                                    Text(Date(timeIntervalSince1970: time), format: .dateTime.month().day().hour().minute())
+                                                        .font(.caption2)
+                                                        .monospacedDigit()
+                                                }
+                                                if let sourceLookup, let onOpenSource, let matchedSource = sourceLookup(evidence) {
+                                                    Button {
+                                                        onOpenSource(matchedSource)
+                                                    } label: {
+                                                        HStack(spacing: 3) {
+                                                            Image(systemName: "waveform")
+                                                                .font(.system(size: 10))
+                                                            Text("打开转录原文")
+                                                                .font(.system(size: 11, weight: .medium))
+                                                        }
+                                                        .foregroundStyle(colors.ink)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                }
+                                            }
+                                        }
+                                        .padding(.leading, 10)
+                                        .overlay(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 1)
+                                                .fill(colors.line)
+                                                .frame(width: 2)
+                                                .accessibilityHidden(true)
+                                        }
+                                        .foregroundStyle(colors.secondaryInk)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                .padding(.top, 2)
             }
         }
         .foregroundStyle(colors.ink)
-        .memoryNotebookPage()
+        .memoryNotebookPage(borderless: borderless)
+        .onChange(of: memory.id) {
+            copied = false
+            showingInstructionBar = false
+            instructionDraft = ""
+            instructionError = nil
+            instructionReceipt = nil
+        }
+    }
+
+    private func submitMemoryInstruction(using handler: @escaping (String) async throws -> Void) {
+        let trimmed = instructionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !submittingInstruction else { return }
+        let fullPrompt = MemoryCardDigest.buildInstructionPrompt(for: memory, instruction: trimmed)
+        submittingInstruction = true
+        instructionError = nil
+        Task {
+            defer { submittingInstruction = false }
+            do {
+                try await handler(fullPrompt)
+                instructionDraft = ""
+                showingInstructionBar = false
+                instructionReceipt = "已交给 MoMo 修正记忆与说话人（可在首页查看进度，完成后将自动同步）"
+            } catch {
+                instructionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func navigate(to target: ContextMemory) {
+        if let onSelectLinkedMemory {
+            onSelectLinkedMemory(target)
+        } else if let rawPath = target.path, !rawPath.isEmpty {
+            let encoded = rawPath
+                .split(separator: "/")
+                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                .joined(separator: "/")
+            if let url = URL(string: "momoagent://memory/\(encoded)") {
+                openURL(url)
+            }
+        }
+    }
+
+    private func obsidianPropertyTag(icon: String, label: String, accent: Color?, colors: MemoryNotebookPalette, monospaced: Bool = false) -> some View {
+        HStack(spacing: 4.5) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(accent ?? colors.secondaryInk)
+            Text(label)
+                .font(.system(size: 11.5, weight: .regular))
+                .monospacedDigit()
+                .foregroundStyle(colors.secondaryInk)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
+        .background(colors.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
 
-struct DreamMemorySection: Identifiable {
+private struct FlowingWikiLinkRow: View {
+    let memories: [ContextMemory]
+    let colors: MemoryNotebookPalette
+    let onSelect: (ContextMemory) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(memories) { item in
+                    let digest = MemoryCardDigest.cached(for: item)
+                    Button {
+                        onSelect(item)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: digest.badge.symbol)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(colors.tabAccent(item.kind))
+                            Text(digest.title)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(colors.ink)
+                                .lineLimit(1)
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(colors.secondaryInk.opacity(0.7))
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5.5)
+                        .background(colors.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
+struct DreamMemorySection: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let subtitle: String?
@@ -1276,9 +1969,24 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
         .all
     }
 
+    private final class CachedFoldersBox: NSObject {
+        let folders: [DreamMemorySection]
+        init(_ folders: [DreamMemorySection]) { self.folders = folders }
+    }
+
+    private nonisolated(unsafe) static let directoryFoldersCache: NSCache<NSString, CachedFoldersBox> = {
+        let cache = NSCache<NSString, CachedFoldersBox>()
+        cache.countLimit = 8
+        return cache
+    }()
+
     static func directoryFolders(from memories: [ContextMemory]) -> [DreamMemorySection] {
         let active = memories.filter { $0.status != "forgotten" }
         guard !active.isEmpty else { return [] }
+        let cacheKey = MemoryCardDigest.memoriesSignature(active) as NSString
+        if let hit = directoryFoldersCache.object(forKey: cacheKey) {
+            return hit.folders
+        }
         let specs: [(id: String, title: String, subtitle: String?, filter: (ContextMemory) -> Bool)] = [
             ("project", "在研项目", "项目与关联专题、人物", { $0.kind == "project" }),
             ("briefing", "晨间简报", "今日焦点与未闭环事项", { $0.kind == "briefing" }),
@@ -1294,6 +2002,7 @@ enum DreamMemoryCategory: String, CaseIterable, Identifiable {
                 folders.append(DreamMemorySection(id: spec.id, title: spec.title, subtitle: spec.subtitle, items: matching))
             }
         }
+        directoryFoldersCache.setObject(CachedFoldersBox(folders), forKey: cacheKey)
         return folders
     }
 
@@ -1434,39 +2143,32 @@ struct MemoryDirectoryFolderHeader: View {
         let colors = MemoryNotebookPalette(scheme: scheme)
         Button(action: onToggle) {
             HStack(spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(colors.secondaryInk)
+                    .frame(width: 13)
+                    .accessibilityHidden(true)
+
                 Image(systemName: DreamMemoryCategory.folderSymbol(for: section.id))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(colors.tabAccent(section.id))
-                    .frame(width: 18)
+                    .frame(width: 16)
                     .accessibilityHidden(true)
 
                 Text(section.title)
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(colors.ink)
-
-                if let subtitle = section.subtitle, !isExpanded {
-                    Text(subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(colors.secondaryInk)
-                        .lineLimit(1)
-                }
 
                 Spacer(minLength: 6)
 
                 Text("\(section.items.count)")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(.system(size: 11.5, weight: .regular))
                     .monospacedDigit()
                     .foregroundStyle(colors.secondaryInk)
-
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(colors.secondaryInk)
-                    .frame(width: 14)
-                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1482,10 +2184,11 @@ struct MemoryDirectoryChildRowLabel: View {
     var body: some View {
         let digest = MemoryCardDigest.cached(for: child)
         let colors = MemoryNotebookPalette(scheme: scheme)
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(colors.line)
-                .frame(width: 1.5, height: 18)
+        HStack(spacing: 8) {
+            Image(systemName: digest.badge.symbol)
+                .font(.system(size: 11.5, weight: .regular))
+                .foregroundStyle(colors.tabAccent(child.kind))
+                .frame(width: 14)
                 .accessibilityHidden(true)
 
             Text(digest.title)
@@ -1496,17 +2199,12 @@ struct MemoryDirectoryChildRowLabel: View {
             Spacer(minLength: 4)
 
             Text(digest.badge.title)
-                .font(.system(size: 11.5))
+                .font(.system(size: 11))
                 .foregroundStyle(colors.secondaryInk)
-
-            Image(systemName: "chevron.right")
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(colors.secondaryInk.opacity(0.5))
-                .accessibilityHidden(true)
         }
-        .padding(.leading, 24)
-        .padding(.trailing, 14)
-        .padding(.vertical, 10)
+        .padding(.leading, 12)
+        .padding(.trailing, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -1891,12 +2589,32 @@ struct DreamBriefingDocument: Equatable, Sendable {
         )
     }
 
+    private final class CachedBriefingBox: NSObject {
+        let text: String
+        let document: DreamBriefingDocument
+        init(text: String, document: DreamBriefingDocument) {
+            self.text = text
+            self.document = document
+        }
+    }
+
+    private nonisolated(unsafe) static let briefingCache: NSCache<NSString, CachedBriefingBox> = {
+        let cache = NSCache<NSString, CachedBriefingBox>()
+        cache.countLimit = 8
+        return cache
+    }()
+
     static func resolve(from memories: [ContextMemory]) -> DreamBriefingDocument? {
-        let active = memories.filter { $0.status != "forgotten" }
-        guard let briefing = active.first(where: { $0.kind == "briefing" }) else {
+        guard let briefing = memories.first(where: { $0.status != "forgotten" && $0.kind == "briefing" }) else {
             return nil
         }
-        return parse(markdown: briefing.text)
+        let cacheKey = "\(briefing.id)|\(briefing.revision)|\(briefing.text.utf8.count)" as NSString
+        if let hit = briefingCache.object(forKey: cacheKey), hit.text == briefing.text {
+            return hit.document
+        }
+        let parsed = parse(markdown: briefing.text)
+        briefingCache.setObject(CachedBriefingBox(text: briefing.text, document: parsed), forKey: cacheKey)
+        return parsed
     }
 }
 
@@ -2160,6 +2878,7 @@ struct MemoryNotePreviewSheet: View {
     let allMemories: [ContextMemory]
     var onOpenFullNotebook: (() -> Void)? = nil
     @State private var navigationStack: [ContextMemory] = []
+    @State private var forwardStack: [ContextMemory] = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
 
@@ -2180,14 +2899,27 @@ struct MemoryNotePreviewSheet: View {
         return sameKind.isEmpty ? [memory] : sameKind
     }
 
+    private func pushMemory(_ next: ContextMemory) {
+        guard next.id != memory.id else { return }
+        navigationStack.append(memory)
+        forwardStack.removeAll()
+        memory = next
+    }
+
     var body: some View {
         let colors = MemoryNotebookPalette(scheme: scheme)
         let backAction: (() -> Void)? = navigationStack.last.map { prev in
             {
                 _ = navigationStack.popLast()
+                forwardStack.append(memory)
                 memory = prev
             }
         }
+        let forwardAction: (() -> Void)? = (!navigationStack.isEmpty || !forwardStack.isEmpty) ? {
+            guard let next = forwardStack.popLast() else { return }
+            navigationStack.append(memory)
+            memory = next
+        } : nil
         let openAllAction: (() -> Void)? = onOpenFullNotebook.map { action in
             {
                 dismiss()
@@ -2200,20 +2932,27 @@ struct MemoryNotePreviewSheet: View {
             ScrollView {
                 ClientMemoryContent(
                     memory: memory,
+                    allMemories: allMemories,
                     siblingItems: siblingMemories,
                     onSelectSibling: {
                         navigationStack.removeAll()
+                        forwardStack.removeAll()
                         memory = $0
                     },
-                    backLabel: "返回",
+                    onSelectLinkedMemory: { pushMemory($0) },
+                    backLabel: "后退",
                     onBack: backAction,
+                    canGoForward: !forwardStack.isEmpty,
+                    onForward: forwardAction,
                     onOpenFullNotebook: openAllAction,
-                    onClose: { dismiss() }
+                    onClose: { dismiss() },
+                    borderless: true
                 )
-                .padding(10)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
             }
-            .frame(width: 520, height: 470)
-            .background(colors.desk)
+            .frame(width: 560, height: 480)
+            .background(colors.paper)
             #else
             TabView(
                 selection: Binding(
@@ -2221,6 +2960,7 @@ struct MemoryNotePreviewSheet: View {
                     set: { newID in
                         if let next = siblingMemories.first(where: { $0.id == newID }) {
                             navigationStack.removeAll()
+                            forwardStack.removeAll()
                             memory = next
                         }
                     }
@@ -2230,32 +2970,37 @@ struct MemoryNotePreviewSheet: View {
                     ScrollView {
                         ClientMemoryContent(
                             memory: item,
+                            allMemories: allMemories,
                             siblingItems: siblingMemories,
                             onSelectSibling: {
                                 navigationStack.removeAll()
+                                forwardStack.removeAll()
                                 memory = $0
                             },
-                            backLabel: "返回",
+                            onSelectLinkedMemory: { pushMemory($0) },
+                            backLabel: "后退",
                             onBack: backAction,
+                            canGoForward: !forwardStack.isEmpty,
+                            onForward: forwardAction,
                             onOpenFullNotebook: openAllAction,
-                            onClose: { dismiss() }
+                            onClose: { dismiss() },
+                            borderless: true
                         )
-                        .padding(.horizontal, 16)
-                        .padding(.top, 18)
-                        .padding(.bottom, 24)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 20)
+                        .padding(.bottom, 28)
                     }
                     .tag(item.id)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .background(colors.desk.ignoresSafeArea())
+            .background(colors.paper.ignoresSafeArea())
             .presentationDragIndicator(.visible)
             #endif
         }
         .environment(\.openURL, OpenURLAction { url in
             if let next = DreamMemoryLinkResolver.resolve(url: url, in: allMemories), next.id != memory.id {
-                navigationStack.append(memory)
-                memory = next
+                pushMemory(next)
                 return .handled
             }
             return .systemAction

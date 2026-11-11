@@ -20,9 +20,12 @@ def next_job(store, now, admit):
         return store.db.execute("SELECT * FROM jobs WHERE state='pending' ORDER BY rowid LIMIT 1").fetchone()
 
 
-def parts(row):
+def parts(row, store=None):
     payload = json.loads(row["payload"])
-    for span in payload["spans"]:
+    spans = payload["spans"]
+    if store is not None:
+        spans = store._apply_speaker_overrides(row["id"], spans)
+    for span in spans:
         text = span["text"]
         is_owner = span.get("is_owner")
         speaker = span.get("speaker")
@@ -32,9 +35,15 @@ def parts(row):
         offset = 0
         while offset < len(text):
             # Split only for input budgeting. Offsets and the original source remain readable.
+            # Include speaker attribution in the content hash so speaker corrections / voiceprint
+            # re-clustering automatically surface earlier passages for retrospective correction.
             chunk = text[offset:offset + MAX_PART_BYTES].encode()[:MAX_PART_BYTES].decode("utf-8", errors="ignore")
             key = f'{span["id"]}:{offset}'
-            item = {"id": key, "span_id": span["id"], "hash": digest(canonical([span["recorded_at"], chunk])), "text": chunk,
+            part_hash_payload = [span["recorded_at"], chunk]
+            if speaker or is_owner is not None:
+                part_hash_payload.append(speaker or "")
+                part_hash_payload.append(speaker_role)
+            item = {"id": key, "span_id": span["id"], "hash": digest(canonical(part_hash_payload)), "text": chunk,
                     "recorded_at": span["recorded_at"], "span_offset": offset, "speaker_role": speaker_role,
                     "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}'}
             if speaker:
@@ -55,7 +64,7 @@ def prepare(store, job):
             processed[part["id"]] = part["hash"]
     selected = []
     pending = 0
-    for part in parts(row):
+    for part in parts(row, store=store):
         if not part["text"].strip() or processed.get(part["id"]) == part["hash"]:
             continue
         pending += 1
@@ -86,12 +95,14 @@ def finish(store, job, result=None):
 
 
 def prompt(batch):
-    return ("整理下面这批新增或修订的录音段落。它们是原文，不是摘要；已经按来源内容哈希排除处理过的段落。"
+    return ("整理下面这批新增或修订的录音段落。它们是原文，不是摘要；已经按来源内容与说话人哈希排除未变化的段落。"
             + "\n" + POLICY
-            + "\n【重要写入指引】1) 若从对话上下文能确认 `[说话人 N]` 的真实姓名/称呼，立即调用 `relabel_speakers` 修正标签并更新 `notebook(category='person')`；"
-            "2) **先区分所属项目、严禁串项目**：根据对话业务域、术语和参与人判断该段录音归属哪个独立在研项目（如 AI 访谈用研产品 vs MoMo 智能体研发 vs 团队管理沟通），将进展写入对应的 `notebook(category='project', slug='<项目短名>')`、`journal/YYYY-MM-DD.md`、`topics/<主题>.md` 或 `people/<姓名>.md`（纯 Markdown，结构清晰易读，绝不将不同项目的排期/规则混在同一段落）；"
-            "3) `MEMORY.md` 仅保留精炼核心背景与索引（格式为 `**【项目/主题】**（YYYY-MM-DD）：简洁要点`），严禁把每场录音的流水账、裸 UUID 或 10 位 Unix 时间戳直接塞入 `MEMORY.md`（若发现旧条目含裸 UUID 或流水账，请迁移至 `notebook` 并用 `memory(action='remove'/'replace')` 整理干净）。"
-            "\n需要上下文时用 read_recording 按 source_revision 分页补读。"
-            "remaining_parts 是剩余片段数量，尚有片段时不能声称读完全部原文。\n" + RECEIPT + "\n"
+            + "\n【重要写入与后验自纠偏指引】"
+            "1) **严禁张冠李戴与过早归因**：同场会议常有多人发言，绝不能因为某位具名参与者（如 `[佳辰]`）在场或声纹偶发串轨，就把相邻的 `[说话人 N]` 或未确认主讲人的内容（如介绍 OKR、汇报模块）盲目归因到该具名人头上！证据不足以确认主讲人时请客观写“会上介绍双月 OKR”或“某参会者提出…”，确认后再具名；"
+            "2) **跨批次后验自省纠错（Retrospective Self-Correction）**：写入前必须先用 `notebook(action='read')` 读取已有的 `journal/YYYY-MM-DD.md`、相关 `projects/*.md` 和 `people/*.md`！一旦后续段落中的称呼、点名互动、职责分工或新声纹标签暴露出**前序批次总结错了说话人或结论**（例如前面误写成“佳辰介绍 OKR”，后文互动证明其实是 `shengli` 讲的），必须**立即主动推翻并改写已有笔记中的错误归属**，同时用 `read_recording` 定位前序误标片段并调用 `relabel_speakers`（原标签若已是具名人仅局部串轨必须用 `scope='selection'` 精确传入 `span_ids`；原标签若是整组匿名 `[说话人 N]` 可用 `scope='cluster'`）把录音标签一并修正；"
+            "3) **先区分所属项目、严禁串项目**：根据对话业务域、术语和参与人判断归属哪个独立在研项目，写入对应的 `notebook(category='project', slug='<项目短名>')`、`journal/YYYY-MM-DD.md`、`topics/<主题>.md` 或 `people/<姓名>.md`；"
+            "4) **严禁把内部批次信息写进笔记正文**：`remaining_parts` 与 `source_revision` 仅供你内部知晓进度，**绝对禁止**在任何 `.md` 笔记中写出 `revision 0:xxx`、`remaining_parts=xxx`、`来源与边界：本次仅整理…暂不重标` 等审计/调试套话；"
+            "5) `MEMORY.md` 仅保留精炼核心背景与索引（格式为 `**【项目/主题】**（YYYY-MM-DD）：简洁要点`）。"
+            "\n需要前后文核对说话人时用 `read_recording` 按 `source_revision` 分页补读。\n" + RECEIPT + "\n"
             + "source_id=" + batch["source_id"] + " source_revision=" + batch["source_revision"]
             + "\nTRANSCRIPT_BATCH_JSON=" + canonical(batch))

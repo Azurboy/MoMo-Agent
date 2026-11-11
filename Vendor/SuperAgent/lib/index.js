@@ -9272,6 +9272,7 @@ function momoMemoryPromptBlock() {
 	if (briefingMd) sections.push(`### BRIEFING.md (最新 Dream 晨间简报)\n${briefingMd}`);
 	const notesIndex = [];
 	for (const [label, folder] of [
+		["project", "projects"],
 		["person", "people"],
 		["topic", "topics"],
 		["journal", "journal"]
@@ -9285,6 +9286,7 @@ function momoMemoryPromptBlock() {
 		}
 	} catch {}
 	if (notesIndex.length > 0) sections.push(`### Dream Markdown 活页笔记本索引 (可用 read 或 read_memory_notebook 工具按需精读)\n${notesIndex.join("\n")}`);
+	sections.push("### 记忆订正与说话人声纹回写工作流 (用户纠偏指令必读)\n当用户指出某段记忆/日志总结有误，或告知某段内容实际是某位说话人说的（如“这个 OKR 是 shengli 说的”、“把某处说话人改成某某”）：\n1. 立即派发或使用原生工具 `search_recordings` / `read_recording` 找到对应录音 `source_id` 及精确的 `span_ids`；\n2. 调用 `relabel_recording_speakers` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 `span_ids` + `scope=\"selection\"` 避免误改同场其他发言；若原标签是整组匿名 `[说话人 N]` 可用 `scope=\"cluster\"`）；\n3. 全量排查并用 `read_memory_notebook` / `write_memory_notebook` / `update_core_memory` 同步订正所有受影响的笔记（`journal/*.md`、`projects/*.md`、`people/<原误标人>.md`、`people/<真实说话人>.md`、`topics/*.md`、`BRIEFING.md`、`MEMORY.md`），顺手清除笔记里残留的 `remaining_parts` / `revision` 等内部调试字样。");
 	return sections.length > 0 ? `\n\n## MoMo 共享长期记忆与 Dream Markdown 活页笔记本\n${sections.join("\n\n")}` : "";
 }
 function noWait({ name, arguments: input }, routed) {
@@ -10388,9 +10390,10 @@ function momoPimTools(host, ticketId) {
 		},
 		{
 			name: "list_memory_notebooks",
-			description: "List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, journal, person, topic).",
+			description: "List pure Markdown (.md) living notebook pages curated by MoMo Dream (briefing, project, journal, person, topic).",
 			schema: z.object({ category: z.enum([
 				"briefing",
+				"project",
 				"journal",
 				"person",
 				"topic"
@@ -10399,10 +10402,11 @@ function momoPimTools(host, ticketId) {
 		},
 		{
 			name: "read_memory_notebook",
-			description: "Read a pure Markdown (.md) living notebook page or core memory file (briefing, journal, person, topic, user, memory).",
+			description: "Read a pure Markdown (.md) living notebook page or core memory file (briefing, project, journal, person, topic, user, memory).",
 			schema: z.object({
 				category: z.enum([
 					"briefing",
+					"project",
 					"journal",
 					"person",
 					"topic",
@@ -10415,10 +10419,11 @@ function momoPimTools(host, ticketId) {
 		},
 		{
 			name: "write_memory_notebook",
-			description: "Create or update a pure Markdown (.md) living notebook page (briefing, journal, person, topic). Content must be pure Markdown, never raw JSON.",
+			description: "Create or update a pure Markdown (.md) living notebook page (briefing, project, journal, person, topic). Content must be clean user-facing Markdown (never JSON, and strip internal debug noise like remaining_parts or revision).",
 			schema: z.object({
 				category: z.enum([
 					"briefing",
+					"project",
 					"journal",
 					"person",
 					"topic"
@@ -10431,15 +10436,74 @@ function momoPimTools(host, ticketId) {
 			execute: (args, signal) => call("write_memory_notebook", args, signal)
 		},
 		{
+			name: "remove_memory_notebook",
+			description: "Remove an obsolete or erroneously created Markdown notebook page (project, journal, person, topic, briefing).",
+			schema: z.object({
+				category: z.enum([
+					"briefing",
+					"project",
+					"journal",
+					"person",
+					"topic"
+				]),
+				slug: z.string().max(180).optional()
+			}).strict(),
+			execute: (args, signal) => call("remove_memory_notebook", args, signal)
+		},
+		{
+			name: "update_core_memory",
+			description: "Add, patch, or remove concise entries in core MEMORY.md (target=\"memory\") or USER.md (target=\"user\").",
+			schema: z.object({
+				action: z.enum([
+					"add",
+					"patch",
+					"remove"
+				]),
+				target: z.enum(["memory", "user"]).default("memory"),
+				content: z.string().max(4e3).optional(),
+				old_text: z.string().max(2e3).optional()
+			}).strict(),
+			execute: (args, signal) => call("update_core_memory", args, signal)
+		},
+		{
+			name: "list_recordings",
+			description: "List synchronized phone recordings with source_id, source_revision, local timestamps, and previews.",
+			schema: z.object({
+				after: z.string().max(200).default(""),
+				limit: z.number().int().min(1).max(50).default(20)
+			}).strict(),
+			execute: (args, signal) => call("list_recordings", args, signal)
+		},
+		{
+			name: "search_recordings",
+			description: "Full-text search across synchronized recordings to locate exact source_id, span_id, timestamps, and current speaker labels for any topic, quote, or OKR.",
+			schema: z.object({
+				query: z.string().trim().min(1).max(300),
+				limit: z.number().int().min(1).max(30).default(15)
+			}).strict(),
+			execute: (args, signal) => call("search_recordings", args, signal)
+		},
+		{
+			name: "read_recording",
+			description: "Read original transcript spans (with span id, speaker, speaker_role, recorded_at_local) by source_id and offset.",
+			schema: z.object({
+				source_id: z.string().min(1).max(200),
+				source_revision: z.string().max(200).default(""),
+				offset: z.number().int().min(0).default(0),
+				limit: z.number().int().min(1).max(24e3).default(12e3)
+			}).strict(),
+			execute: (args, signal) => call("read_recording", args, signal)
+		},
+		{
 			name: "relabel_recording_speakers",
-			description: "Relabel anonymous ([说话人 1]) or misattributed speaker spans in a synchronized recording based on semantic dialogue context, and queue the correction back to iPhone.",
+			description: "Relabel anonymous ([说话人 N]) or misattributed speaker spans in a recording and sync back to iPhone voiceprints. IMPORTANT: If the old label was ALREADY a named person or \"我\" and only specific turns were misattributed, pass exact span_ids and scope=\"selection\" so that person's other turns are preserved; use scope=\"cluster\" only when relabeling an entire anonymous [说话人 N] cluster.",
 			schema: z.object({
 				source_id: z.string().min(1).max(200),
 				target_speaker: z.string().trim().min(1).max(64),
 				is_owner: z.boolean().default(false),
 				from_speaker: z.string().max(64).optional(),
 				span_ids: z.array(z.string().min(1)).max(200).optional(),
-				scope: z.enum(["cluster", "selection"]).default("cluster"),
+				scope: z.enum(["cluster", "selection"]).default("selection"),
 				reason: z.string().max(400).default("")
 			}).strict(),
 			execute: (args, signal) => call("relabel_recording_speakers", args, signal)

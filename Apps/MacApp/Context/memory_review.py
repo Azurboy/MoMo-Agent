@@ -297,10 +297,12 @@ def next_review(store, data, now):
     return job if job['state'] in {'pending', 'running'} else None
 
 
-DREAM_INSTRUCTION = """执行闲时深度 Dream（四阶段认知循环，产出物全部使用纯 Markdown `.md`）：
-1. 【阶段一：语义说话人推理与人物活页（`relabel_speakers` + `notebook(category='person')`）】
-   - 调用 `list_recordings` 与 `read_recording` 查看近期录音。声学分轨（`[说话人 1]`、`[说话人 2]` 或偶发误判的 `[我]`）可能出错或未命名。
-   - 结合对话中的称呼、自我介绍、业务/生活角色及既有 `people/*.md` 推理真实说话人身份：一旦语义证据明确，立即调用 `relabel_speakers` 将匿名 `[说话人 N]` 或误标片段修正为真实称呼/姓名（或修正 `is_owner`），并用 `notebook(action='write', category='person', slug='<姓名>', ...)` 更新该人物的关系、协作方式、共同事项与待兑现约定。
+DREAM_INSTRUCTION = """执行闲时深度 Dream（四阶段认知循环 + 后验自省纠偏，产出物全部使用纯 Markdown `.md`）：
+1. 【阶段一：全局后验自省纠错、语义说话人推理与人物活页（`relabel_speakers` + `notebook`）】
+   - 调用 `list_recordings`、`read_recording`、`search_recordings` 与 `session_search`，结合完整录音全貌与用户后续对话，**主动审查既有 `journal/*.md`、`projects/*.md`、`people/*.md`、`MEMORY.md` 中是否存在早期分批整理时的误判或张冠李戴**（例如：会议开场批次误把某段发言/OKR 归因给 A，但中后段对话互动、职责分工或用户后续纠正表明实际主讲人是 B；或早期笔记残留了 `revision 0:xxx`、`remaining_parts=xxx`、`来源与边界：暂不重标` 等内部调试废话）。
+   - 一旦发现前序归属错误或新确认了真实说话人身份：
+     a) 立即调用 `relabel_speakers` 修正录音标签（注意：**若原标签已是具名人物或 `[我]`、仅其中某几段声纹串轨，必须用 `scope='selection'` 并精确传入被误标的 `span_ids`，严禁误伤该人物同场其他正常发言**；若原标签是整组匿名 `[说话人 N]` 确认系同一人，可用 `scope='cluster'`）；
+     b) **溯源全量订正**：同步改写受影响的 `journal/*.md`、`projects/*.md`、`topics/*.md`、`people/<原误标人>.md`、`people/<真实说话人>.md` 与 `MEMORY.md`，彻底消除错误归因并清理任何调试元信息。
 2. 【阶段二：全天时空拼图与计划对账（`notebook(category='journal')`）】
    - 调用 `phone_context` 读取到访地点（`visits`）、日程（`calendar`）、待办（`reminders`）与作息（`health`），结合当天录音与聊天（`session_search`），将碎片对话按逻辑日整合写入 `notebook(action='write', category='journal', slug='YYYY-MM-DD', ...)`。
    - 包含：`# YYYY-MM-DD · <当日主线标题>`、`## 时空与事件脉络`（带 `[HH:MM 原音](momoagent://source/...)` 锚点）、`## 思考火花与决策演变`、`## 承诺与待办对账`（对照日历/提醒事项与口头实际进展）。
@@ -335,7 +337,7 @@ DREAM_INSTRUCTION = """执行闲时深度 Dream（四阶段认知循环，产出
 def prompt(job):
     kind = job["kind"]
     instruction = (
-        "整理这批真实聊天。用户本人明确表达可作为个人偏好或目标依据；不要把助手建议当成用户已经接受。按 offset 识别长消息片段，remaining 为真表示尚未读完。若涉及核心项目或人物脉络，请先区分所属项目边界（严禁串项目），同步更新 `notebook(category='project'|'topic'|'person')` 中的 Markdown 笔记。"
+        "整理这批真实聊天。用户本人明确表达可作为个人偏好、事实订正或说话人纠偏的最高优依据（例如用户指出某场会议/某段内容实际是某人说的，必须立即调用 `search_recordings`/`read_recording` + `relabel_speakers` 修正对应录音片段，并同步订正 `journal`、`project`、`person`、`topic` 与 `MEMORY.md` 中的旧记录）；不要把助手建议当成用户已经接受。按 offset 识别长消息片段，remaining 为真表示尚未读完。"
         if kind == "chat"
         else DREAM_INSTRUCTION
     )

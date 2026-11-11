@@ -19,7 +19,7 @@ struct ChatRendererView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .body) private var fontSize = Double(PhoneTextStyle.body.size)
     @State private var renderingFailed = false
-    @State private var rendererReady = false
+    @State private var rendererReady = ChatWebSurface.hasWarmRenderedView
     @State private var nativeFocusedRequest: String?
 
     var body: some View {
@@ -190,11 +190,35 @@ struct ChatRendererView: View {
 
 #if os(macOS)
 private typealias ChatWebRepresentable = NSViewRepresentable
+
+@MainActor fileprivate enum WarmChatWebPool {
+    struct Entry {
+        let web: WKWebView
+        let resourceDirectory: URL
+        let documentID: UUID
+        let sent: ChatRenderPayload?
+        let sentScroll: Int
+        let didRender: Bool
+    }
+    static var entry: Entry?
+    static func take() -> Entry? {
+        defer { entry = nil }
+        return entry
+    }
+}
 #else
 private typealias ChatWebRepresentable = UIViewRepresentable
 #endif
 
 private struct ChatWebSurface: ChatWebRepresentable {
+    static var hasWarmRenderedView: Bool {
+        #if os(macOS)
+        MainActor.assumeIsolated { WarmChatWebPool.entry?.didRender == true }
+        #else
+        false
+        #endif
+    }
+
     let snapshot: ChatRenderSnapshot
     let scrollToBottomRequest: Int
     let dark: Bool
@@ -232,6 +256,16 @@ private struct ChatWebSurface: ChatWebRepresentable {
     static func dismantleUIView(_ web: WKWebView, coordinator: ChatWebCoordinator) { dismantleWebView(web, coordinator: coordinator) }
     #endif
     private func makeWebView(context: Context) -> WKWebView {
+        #if os(macOS)
+        if let warm = WarmChatWebPool.take() {
+            warm.web.configuration.userContentController.removeScriptMessageHandler(forName: "chat")
+            warm.web.configuration.userContentController.add(context.coordinator, name: "chat")
+            configureBackground(warm.web)
+            warm.web.navigationDelegate = context.coordinator
+            context.coordinator.adoptWarm(warm)
+            return warm.web
+        }
+        #endif
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -297,6 +331,16 @@ private struct ChatWebSurface: ChatWebRepresentable {
     }
 
     private static func dismantleWebView(_ web: WKWebView, coordinator: ChatWebCoordinator) {
+        coordinator.setActive(false)
+        #if os(macOS)
+        if WarmChatWebPool.entry == nil, let warm = coordinator.exportWarmState(for: web) {
+            coordinator.webView = nil
+            web.navigationDelegate = nil
+            web.configuration.userContentController.removeScriptMessageHandler(forName: "chat")
+            WarmChatWebPool.entry = warm
+            return
+        }
+        #endif
         coordinator.webView = nil
         web.navigationDelegate = nil
         web.configuration.userContentController.removeScriptMessageHandler(forName: "chat")
@@ -380,6 +424,34 @@ final class ChatWebCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDe
         pending = payload; pendingScroll = scrollRequest
         scheduleFlush()
     }
+
+    #if os(macOS)
+    fileprivate func adoptWarm(_ warm: WarmChatWebPool.Entry) {
+        self.webView = warm.web
+        self.resourceDirectory = warm.resourceDirectory
+        self.documentID = warm.documentID
+        self.ready = true
+        self.needsReload = false
+        self.sent = warm.sent
+        self.sentScroll = warm.sentScroll
+        self.didRender = warm.didRender
+        if warm.didRender {
+            self.rendered()
+        }
+    }
+
+    fileprivate func exportWarmState(for web: WKWebView) -> WarmChatWebPool.Entry? {
+        guard ready, !needsReload, !sending, let resourceDirectory else { return nil }
+        return WarmChatWebPool.Entry(
+            web: web,
+            resourceDirectory: resourceDirectory,
+            documentID: documentID,
+            sent: sent,
+            sentScroll: sentScroll,
+            didRender: didRender
+        )
+    }
+    #endif
 
     func setActive(_ value: Bool) {
         let resumed = value && !active

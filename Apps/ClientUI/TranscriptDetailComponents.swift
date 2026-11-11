@@ -49,11 +49,16 @@ struct TranscriptDetailDateHeader: View {
     }
 }
 
-struct TranscriptParagraphText: View {
+struct TranscriptParagraphText: View, Equatable {
     let text: String
     let accessibilityID: String
     var body: some View {
+        #if os(macOS)
+        MarkdownReadingView(markdown: text, accessibilityID: accessibilityID, handwriting: false, plainTextOnly: true)
+            .equatable()
+        #else
         Text(text).phoneText(.transcript).textSelection(.enabled).accessibilityIdentifier(accessibilityID)
+        #endif
     }
 }
 

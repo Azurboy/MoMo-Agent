@@ -98,7 +98,7 @@ struct PersonalAgentActor: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
-    @State private var loaded = false
+    @State private var loaded = PersonalAgentWebSurface.hasWarmView
     @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
 
     var body: some View {
@@ -128,11 +128,32 @@ struct PersonalAgentActor: View {
 
 #if os(macOS)
 private typealias AgentWebRepresentable = NSViewRepresentable
+
+@MainActor private enum WarmAvatarWebPool {
+    struct Entry {
+        let web: WKWebView
+        let resourceURL: URL
+        let sent: PersonalAgentWebSurface.Coordinator.Appearance?
+    }
+    static var entry: Entry?
+    static func take() -> Entry? {
+        defer { entry = nil }
+        return entry
+    }
+}
 #else
 private typealias AgentWebRepresentable = UIViewRepresentable
 #endif
 
 private struct PersonalAgentWebSurface: AgentWebRepresentable {
+    static var hasWarmView: Bool {
+        #if os(macOS)
+        MainActor.assumeIsolated { WarmAvatarWebPool.entry != nil }
+        #else
+        false
+        #endif
+    }
+
     let dark: Bool
     let reduceMotion: Bool
     let active: Bool
@@ -154,6 +175,20 @@ private struct PersonalAgentWebSurface: AgentWebRepresentable {
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) { dismantleWebView(web, coordinator: coordinator) }
     #endif
     private func makeWebView(context: Context) -> WKWebView {
+        #if os(macOS)
+        let forceUnavailable: Bool = {
+            #if DEBUG
+            return ProcessInfo.processInfo.environment["MOMO_UI_TEST_AVATAR_UNAVAILABLE"] == "1"
+            #else
+            return false
+            #endif
+        }()
+        if !forceUnavailable, let warm = WarmAvatarWebPool.take() {
+            warm.web.navigationDelegate = context.coordinator
+            context.coordinator.adoptWarm(web: warm.web, resourceURL: warm.resourceURL, sent: warm.sent)
+            return warm.web
+        }
+        #endif
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -189,6 +224,15 @@ private struct PersonalAgentWebSurface: AgentWebRepresentable {
                                          playful: playful, expression: expression, conversationID: conversationID, lowPower: lowPower))
     }
     private static func dismantleWebView(_ web: WKWebView, coordinator: Coordinator) {
+        #if os(macOS)
+        if WarmAvatarWebPool.entry == nil, let warm = coordinator.detachWarmState(for: web) {
+            web.navigationDelegate = nil
+            coordinator.invalidate()
+            coordinator.web = nil
+            WarmAvatarWebPool.entry = warm
+            return
+        }
+        #endif
         web.stopLoading()
         web.navigationDelegate = nil
         coordinator.invalidate()
@@ -223,6 +267,41 @@ private struct PersonalAgentWebSurface: AgentWebRepresentable {
         private var sent: Appearance?
         init(availability: @escaping (Bool) -> Void) { self.availability = availability }
         func invalidate() { generation += 1; ready = false; sending = false; sent = nil }
+        #if os(macOS)
+        func adoptWarm(web: WKWebView, resourceURL: URL, sent: Appearance?) {
+            self.web = web
+            self.resourceURL = resourceURL
+            self.ready = true
+            self.needsReload = false
+            self.sent = sent
+            self.availability(true)
+        }
+        func detachWarmState(for web: WKWebView) -> WarmAvatarWebPool.Entry? {
+            guard ready, !needsReload, let resourceURL else { return nil }
+            var pausedSent = sent ?? pending
+            if let base = pausedSent, base.active {
+                let paused = Appearance(
+                    dark: base.dark,
+                    reduceMotion: base.reduceMotion,
+                    active: false,
+                    greeting: base.greeting,
+                    playful: base.playful,
+                    expression: base.expression,
+                    conversationID: base.conversationID,
+                    lowPower: base.lowPower
+                )
+                pausedSent = paused
+                web.callAsyncJavaScript(
+                    "if (window.agentAvatar) window.agentAvatar.update(appearance);",
+                    arguments: ["appearance": paused.arguments],
+                    in: nil,
+                    in: .page,
+                    completionHandler: nil
+                )
+            }
+            return WarmAvatarWebPool.Entry(web: web, resourceURL: resourceURL, sent: pausedSent)
+        }
+        #endif
         private func reloadIfPossible() {
             guard reloadAttempts < 1, let web, let resourceURL else { return }
             reloadAttempts += 1

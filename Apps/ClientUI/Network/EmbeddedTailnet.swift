@@ -142,25 +142,64 @@ final class EmbeddedTailnet {
         await close()
     }
 
+    private struct ParsedTailnetStatus: Sendable {
+        let backendState: String
+        let address: String?
+        let authURL: URL?
+        let mappedAddresses: Set<String>
+    }
+
+    nonisolated private static func parseStatusJSON(_ data: Data) throws -> ParsedTailnetStatus {
+        let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let peers = status["Peer"] as? [String: [String: Any]]
+        let mapped = Set((peers ?? [:]).values.filter { $0["InNetworkMap"] as? Bool == true }
+            .flatMap { $0["TailscaleIPs"] as? [String] ?? [] })
+        let backendState = status["BackendState"] as? String ?? "starting"
+        let resolvedAddress = (status["TailscaleIPs"] as? [String] ?? []).first(where: TailnetEndpoint.isAddress)
+        let resolvedAuthURL: URL?
+        if let raw = status["AuthURL"] as? String, let url = URL(string: raw),
+           url.scheme == "https", url.host == "login.tailscale.com" {
+            resolvedAuthURL = url
+        } else {
+            resolvedAuthURL = nil
+        }
+        return ParsedTailnetStatus(
+            backendState: backendState,
+            address: resolvedAddress,
+            authURL: resolvedAuthURL,
+            mappedAddresses: mapped
+        )
+    }
+
     func refreshStatus() async {
         guard let node, !(needsRestart && state == "failed") else { return }
         let attempt = generation
         do {
             let data = try await node.statusJSON()
+            let parsed = try await Task.detached(priority: .utility) {
+                try Self.parseStatusJSON(data)
+            }.value
             guard attempt == generation else { return }
-            let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-            let peers = status["Peer"] as? [String: [String: Any]]
-            mappedAddresses = Set((peers ?? [:]).values.filter { $0["InNetworkMap"] as? Bool == true }
-                .flatMap { $0["TailscaleIPs"] as? [String] ?? [] })
-            diagnostics.recordStatus(data)
-            state = status["BackendState"] as? String ?? "starting"
-            address = (status["TailscaleIPs"] as? [String] ?? []).first(where: TailnetEndpoint.isAddress)
-            if let raw = status["AuthURL"] as? String, let url = URL(string: raw), url.scheme == "https", url.host == "login.tailscale.com" { authURL = url }
-            else { authURL = nil }
-            if state == "Running", !needsRestart { message = nil }
-            if state == "NeedsMachineAuth" { message = String(localized: "请在 Tailscale 管理页面允许这台设备加入。") }
+            let stateChanged = state != parsed.backendState || address != parsed.address
+            mappedAddresses = parsed.mappedAddresses
+            if stateChanged {
+                diagnostics.recordStatus(data)
+            }
+            if state != parsed.backendState { state = parsed.backendState }
+            if address != parsed.address { address = parsed.address }
+            if authURL != parsed.authURL { authURL = parsed.authURL }
+            if state == "Running", !needsRestart, message != nil { message = nil }
+            if state == "NeedsMachineAuth" {
+                let approvalMessage = String(localized: "请在 Tailscale 管理页面允许这台设备加入。")
+                if message != approvalMessage { message = approvalMessage }
+            }
         } catch {
-            if attempt == generation { state = "failed"; message = String(localized: "无法读取连接状态，请重试。"); needsRestart = true }
+            if attempt == generation {
+                if state != "failed" { state = "failed" }
+                let failedMessage = String(localized: "无法读取连接状态，请重试。")
+                if message != failedMessage { message = failedMessage }
+                needsRestart = true
+            }
         }
     }
 
@@ -279,7 +318,8 @@ final class EmbeddedTailnet {
             while !Task.isCancelled {
                 guard let self, self.generation == attempt else { return }
                 await self.refreshStatus()
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                let interval: Duration = self.state == "Running" ? .seconds(6) : .seconds(2)
+                do { try await Task.sleep(for: interval) } catch { return }
             }
         }
     }

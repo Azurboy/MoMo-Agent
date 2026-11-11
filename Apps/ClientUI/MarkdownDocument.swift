@@ -16,16 +16,72 @@ struct MarkdownDocument {
 
     let blocks: [Block]
 
+    private final class CachedDocumentBox: NSObject {
+        let markdown: String
+        let result: Result<MarkdownDocument, Error>
+        init(markdown: String, result: Result<MarkdownDocument, Error>) {
+            self.markdown = markdown
+            self.result = result
+        }
+    }
+
+    private final class CachedPreviewBox: NSObject {
+        let markdown: String
+        let limit: Int
+        let preview: String
+        init(markdown: String, limit: Int, preview: String) {
+            self.markdown = markdown
+            self.limit = limit
+            self.preview = preview
+        }
+    }
+
+    private nonisolated(unsafe) static let documentCache: NSCache<NSString, CachedDocumentBox> = {
+        let cache = NSCache<NSString, CachedDocumentBox>()
+        cache.countLimit = 512
+        return cache
+    }()
+
+    private nonisolated(unsafe) static let previewCache: NSCache<NSString, CachedPreviewBox> = {
+        let cache = NSCache<NSString, CachedPreviewBox>()
+        cache.countLimit = 1024
+        return cache
+    }()
+
+    private static func fastKey(for markdown: String, extra: Int = 0) -> NSString {
+        var hasher = Hasher()
+        hasher.combine(extra)
+        hasher.combine(markdown.utf8.count)
+        hasher.combine(markdown)
+        return "\(markdown.utf8.count):\(extra):\(hasher.finalize())" as NSString
+    }
+
+    static func cached(_ markdown: String) -> Result<MarkdownDocument, Error> {
+        let key = fastKey(for: markdown)
+        if let hit = documentCache.object(forKey: key), hit.markdown == markdown {
+            return hit.result
+        }
+        let parsed = Result { try MarkdownDocument(markdown) }
+        documentCache.setObject(CachedDocumentBox(markdown: markdown, result: parsed), forKey: key)
+        return parsed
+    }
+
     static func plainTextPreview(_ markdown: String, limit: Int = 256) -> String {
+        let cacheKey = fastKey(for: markdown, extra: limit)
+        if let hit = previewCache.object(forKey: cacheKey), hit.limit == limit, hit.markdown == markdown {
+            return hit.preview
+        }
         let plain: String
-        if let document = try? MarkdownDocument(markdown), !document.blocks.isEmpty {
+        if case .success(let document) = cached(markdown), !document.blocks.isEmpty {
             plain = document.blocks.map(\.plainText).joined(separator: "  ")
         } else {
             plain = markdown
         }
-        return String(plain.replacingOccurrences(of: "\n", with: " ")
+        let formatted = String(plain.replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .prefix(limit))
+        previewCache.setObject(CachedPreviewBox(markdown: markdown, limit: limit, preview: formatted), forKey: cacheKey)
+        return formatted
     }
 
     init(_ markdown: String) throws {

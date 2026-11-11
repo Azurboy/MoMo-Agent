@@ -28,7 +28,7 @@ struct SettingsView: View {
                         }.accessibilityIdentifier("settings.mac")
                         if let sync = remoteAgent.context {
                             rowDivider
-                            NavigationLink { RemoteMemoryView(sync: sync) } label: {
+                            NavigationLink { RemoteMemoryView(sync: sync, taskStore: remoteAgent.store) } label: {
                                 PhoneSettingsLinkRow(title: "记忆", symbol: "sparkles")
                             }.accessibilityIdentifier("settings.memories")
                         }
