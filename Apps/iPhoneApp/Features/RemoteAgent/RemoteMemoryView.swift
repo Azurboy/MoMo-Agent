@@ -148,8 +148,7 @@ struct RemoteMemoryView: View {
                                         }
                                     },
                                     backLabel: backText,
-                                    onBack: backAction,
-                                    onDelete: { forgetting = item }
+                                    onBack: backAction
                                 )
                                 .contextMenu {
                                     Button(item.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) {
@@ -237,7 +236,8 @@ struct RemoteMemoryView: View {
                     if activeCategory.isNotebookReaderCategory, let memory = activeReaderMemory {
                         Menu {
                             ShareLink(item: memory.text) { Label("分享", systemImage: "square.and.arrow.up") }
-                            Button("忘记这条记忆", role: .destructive) { forgetting = memory }
+                            Divider()
+                            Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) { forgetting = memory }
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
@@ -270,7 +270,6 @@ struct RemoteMemoryView: View {
     @ViewBuilder
     private func directoryItemView(_ memory: ContextMemory, colors: MemoryNotebookPalette) -> some View {
         let childMemories = MemoryCardDigest.linkedChildren(for: memory, in: allMemories)
-        let digest = MemoryCardDigest.cached(for: memory)
         let isParentExpanded = !collapsedParentIDs.contains(memory.id)
 
         VStack(alignment: .leading, spacing: 0) {
@@ -311,21 +310,6 @@ struct RemoteMemoryView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(isParentExpanded ? "收起关联页面" : "展开关联页面")
-                }
-
-                if memory.kind == "person" {
-                    Button(role: .destructive) {
-                        forgetting = memory
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .regular))
-                            .foregroundStyle(colors.secondaryInk)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("删除\(digest.title)")
-                    .accessibilityIdentifier("remote.deletePerson.\(memory.id)")
                 }
             }
 
@@ -483,8 +467,7 @@ private struct RemoteMemoryDetail: View {
                                             memoryID = $0.id
                                         },
                                         backLabel: "返回",
-                                        onBack: backAction,
-                                        onDelete: { confirmingForget = true }
+                                        onBack: backAction
                                     )
                                     if let failure = sync.failure {
                                         Text(failure)
@@ -505,8 +488,7 @@ private struct RemoteMemoryDetail: View {
                             ClientMemoryContent(
                                 memory: memory,
                                 backLabel: "返回",
-                                onBack: backAction,
-                                onDelete: { confirmingForget = true }
+                                onBack: backAction
                             )
                             if let failure = sync.failure {
                                 Text(failure)
@@ -538,7 +520,8 @@ private struct RemoteMemoryDetail: View {
                 if let memory {
                     Menu {
                         ShareLink(item: memory.text) { Label("分享", systemImage: "square.and.arrow.up") }
-                        Button("忘记这条记忆", role: .destructive) { confirmingForget = true }
+                        Divider()
+                        Button(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", role: .destructive) { confirmingForget = true }
                             .accessibilityIdentifier("remote.forgetMemory")
                     } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
                     .accessibilityLabel("记忆操作")

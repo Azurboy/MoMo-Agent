@@ -1065,17 +1065,28 @@ struct ClientMemoryContent: View {
                 }
 
                 if let onDelete {
-                    Button(role: .destructive, action: onDelete) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11.5, weight: .regular))
+                    Menu {
+                        ShareLink(item: memory.text) {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
+                        Divider()
+                        Button(role: .destructive, action: onDelete) {
+                            Label(memory.kind == "person" ? "删除该人物" : "忘记这条记忆", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(colors.secondaryInk)
                             .frame(width: 28, height: 28)
                             .background(colors.surface, in: Circle())
+                            .contentShape(Circle())
                     }
-                    .buttonStyle(.plain)
-                    .help(memory.kind == "person" ? "删除该人物" : "忘记这条记忆")
-                    .accessibilityLabel(memory.kind == "person" ? "删除该人物" : "忘记这条记忆")
-                    .accessibilityIdentifier("remote.inlineDeleteMemory")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("更多操作")
+                    .accessibilityLabel("更多操作")
+                    .accessibilityIdentifier("remote.inlineMemoryMore")
                 }
 
                 if let onClose {

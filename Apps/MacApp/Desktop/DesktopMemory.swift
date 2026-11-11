@@ -560,18 +560,6 @@ private struct DesktopOutlineRow: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("remote.memoryRow." + memory.id)
 
-            if isHovered || (memory.kind == "person" && isSelected) {
-                Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundStyle(MoMoPalette.muted)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(memory.kind == "person" ? "删除\(digest.title)" : "忘记这条记忆")
-            }
-
             if let onToggleChildren, childCount > 0 {
                 Button(action: onToggleChildren) {
                     HStack(spacing: 2.5) {
@@ -631,16 +619,6 @@ private struct DesktopOutlineChildRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            if isHovered {
-                Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(MoMoPalette.muted)
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain)
-            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
