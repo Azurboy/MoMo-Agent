@@ -411,6 +411,7 @@ final class WatchRuntime {
     func beginConnectivityGrant() {
         energyCounters.connectivityGrants += 1
         connectivityGrant = true
+        flushAudioBatch = true
         grantID = UUID()
         grantControlsRemaining = 4
         grantSubmitted = false
@@ -943,7 +944,7 @@ final class WatchRuntime {
             inputLevel = progress.normalizedLevel
         }
         if hasSealedChunk {
-            requestReconciliation(flushAudio: presentationActive || statusBudget.isPeerViewing(now: ProcessInfo.processInfo.systemUptime))
+            requestReconciliation(flushAudio: true)
         }
         else { requestStatusPublication(force: previousActivity != captureState.activity) }
     }
@@ -1539,13 +1540,21 @@ final class WatchRuntime {
                             try await store.fileReplaysScheduled(scheduled)
                         }
                     }
+                    // Hand sealed files to the OS even if the interactive channel goes away.
+                    var fileSubmissionError: Error?
+                    do {
+                        try await submitFileBatch(maximumScanned: connectivityGrant ? 256 : 512)
+                    } catch {
+                        fileSubmissionError = error
+                    }
+                    guard grantID == startingGrant else { return }
                     try await submitControlBatch(maximumCount: connectivityGrant ? 4 : LinkControlBudget.maximumCount)
                     guard grantID == startingGrant else { return }
                     if !connectivityGrant {
                         startLocalBulkSyncIfPossible()
                         try await submitAudioBlockCopy()
                     }
-                    try await submitFileBatch(maximumScanned: connectivityGrant ? 256 : 512)
+                    if let fileSubmissionError { throw fileSubmissionError }
                 }
                 if pendingChunkCount == 0, !pendingLocalSyncWork, !transport.hasRetryableControls, !transport.hasRetryableFiles {
                     transportSyncFailure = nil
@@ -1872,20 +1881,8 @@ final class WatchRuntime {
             } catch {
                 break
             }
-            if page.isEmpty {
-                if cursor != 0 {
-                    cursor = 0
-                    let retryPage = (try? await store.pendingChunkPage(after: 0, through: admittedThrough, limit: 16)) ?? []
-                    if retryPage.isEmpty { break }
-                    await uploadLocalBulkPage(retryPage, route: route, receiver: bound, networkFailed: &encounteredNetworkError)
-                    if encounteredNetworkError { break }
-                    continue
-                }
-                break
-            }
-            if let lastSeq = page.last?.sequence {
-                cursor = lastSeq
-            }
+            guard let last = page.last else { break }
+            cursor = last.sequence
             await uploadLocalBulkPage(page, route: route, receiver: bound, networkFailed: &encounteredNetworkError)
             if encounteredNetworkError { break }
         }
@@ -1905,80 +1902,43 @@ final class WatchRuntime {
         receiver: (deviceID: UUID, libraryInstanceID: UUID),
         networkFailed: inout Bool
     ) async {
-        let validEntries = page.filter { !invalidAudioBlockSources.contains($0.chunk.envelope.manifest.chunkID) }
-        guard !validEntries.isEmpty else { return }
-        for entry in validEntries {
-            localSyncInFlightChunkIDs.insert(entry.chunk.envelope.manifest.chunkID)
-        }
-        updateSynchronizationState()
-
         let client = localSyncClient
-        let uploadResults = await withTaskGroup(of: (UUID, Result<Receipt, any Error>).self) { group in
-            var iterator = validEntries.makeIterator()
-            let maxConcurrency = 1
-            for _ in 0..<min(maxConcurrency, validEntries.count) {
-                if let next = iterator.next() {
-                    let id = next.chunk.envelope.manifest.chunkID
-                    let env = next.chunk.envelope
-                    let url = next.chunk.audioURL
-                    group.addTask {
-                        do {
-                            let receipt = try await client.uploadChunk(route: route, envelope: env, audioURL: url)
-                            return (id, .success(receipt))
-                        } catch {
-                            return (id, .failure(error))
-                        }
-                    }
-                }
-            }
-            var collected: [(UUID, Result<Receipt, any Error>)] = []
-            while let result = await group.next() {
-                collected.append(result)
-                if !Task.isCancelled, let next = iterator.next() {
-                    let id = next.chunk.envelope.manifest.chunkID
-                    let env = next.chunk.envelope
-                    let url = next.chunk.audioURL
-                    group.addTask {
-                        do {
-                            let receipt = try await client.uploadChunk(route: route, envelope: env, audioURL: url)
-                            return (id, .success(receipt))
-                        } catch {
-                            return (id, .failure(error))
-                        }
-                    }
-                }
-            }
-            return collected
-        }
-
         var appliedItems: [ReceiptApplied] = []
-        for (chunkID, outcome) in uploadResults {
-            localSyncInFlightChunkIDs.remove(chunkID)
-            switch outcome {
-            case .success(let receipt):
-                do {
-                    let applied = try await store.applyReceipt(receipt)
-                    invalidAudioBlockSources.remove(chunkID)
-                    try? transport.confirmFileDelivery(applied.receipt)
-                    appliedItems.append(applied)
-                } catch {
-                    reconciliationRequested = true
-                }
-            case .failure(let error):
-                if error as? LocalSyncError == .invalidSource {
-                    invalidAudioBlockSources.insert(chunkID)
-                    if let chunk = try? await store.chunk(id: chunkID) {
-                        _ = try? await store.originalAvailableForTransferRetry(chunk.envelope, maximumValidationBytes: Int64.max)
-                    }
-                } else {
-                    networkFailed = true
-                }
+        for entry in page {
+            guard !Task.isCancelled, !connectivityGrant, pendingReceiver == nil else { break }
+            let chunk = entry.chunk
+            let chunkID = chunk.envelope.manifest.chunkID
+            guard !invalidAudioBlockSources.contains(chunkID) else { continue }
+
+            // Reserve only the active upload. Other files can use WatchConnectivity.
+            localSyncInFlightChunkIDs.insert(chunkID)
+            updateSynchronizationState()
+            defer { localSyncInFlightChunkIDs.remove(chunkID) }
+            let receipt: Receipt
+            do {
+                receipt = try await client.uploadChunk(route: route, envelope: chunk.envelope, audioURL: chunk.audioURL)
+            } catch LocalSyncError.invalidSource {
+                invalidAudioBlockSources.insert(chunkID)
+                _ = try? await store.originalAvailableForTransferRetry(chunk.envelope, maximumValidationBytes: Int64.max)
+                continue
+            } catch {
+                networkFailed = true
+                break
+            }
+            do {
+                let applied = try await store.applyReceipt(receipt)
+                invalidAudioBlockSources.remove(chunkID)
+                try? transport.confirmFileDelivery(applied.receipt)
+                appliedItems.append(applied)
+            } catch {
+                reconciliationRequested = true
             }
         }
         updateSynchronizationState()
 
         if !appliedItems.isEmpty {
-            if (try? await client.sendReceiptsApplied(route: route, items: appliedItems)) != nil {
+            if !networkFailed, !Task.isCancelled, !connectivityGrant,
+               (try? await client.sendReceiptsApplied(route: route, items: appliedItems)) != nil {
                 for item in appliedItems {
                     try? await store.markControlPreserved(
                         .receiptApplied(item),
