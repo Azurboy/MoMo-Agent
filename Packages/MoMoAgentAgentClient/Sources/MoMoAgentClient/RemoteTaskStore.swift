@@ -649,6 +649,15 @@ public final class RemoteTaskStore {
         defer { controlsInFlight.remove(id) }
         await cancel(id: id, generation: generation)
     }
+    /// The paired Mac owns the default used when it admits a new chat task.
+    public func chatMode(setting mode: ChatMode? = nil) async throws -> ChatMode {
+        struct Preference: Codable { let mode: ChatMode }
+        let body = try mode.map { try JSONEncoder().encode(Preference(mode: $0)) }
+        let data = try await client.request(path: ["momo", "v1", "conversation", "mode"],
+                                            method: mode == nil ? "GET" : "POST", body: body)
+        return try JSONDecoder().decode(Preference.self, from: data).mode
+    }
+
     public func fetchWorkOverview(limit: Int = 15) async throws -> ConversationWorkOverview {
         guard canContactServer else { throw CancellationError() }
         return try await client.workOverview(limit: limit)
@@ -1331,4 +1340,8 @@ public final class RemoteTaskStore {
             }
         }
     }
+}
+
+public enum ChatMode: String, Codable, Sendable {
+    case standard, creator
 }

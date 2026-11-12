@@ -51,7 +51,8 @@ from conversation_store import ProductStore
 from momo_memory import MoMoMemory
 from rtc_transport import permitted_route
 from runtime_engine import engine_config_path, read_engine_config, write_engine_config
-from superagent_gateway import SuperAgentGateway
+from superagent_gateway import BridgeStore, SuperAgentGateway
+from superagent_runtime import prepare_dsh_instance
 
 
 class RuntimeEngineConfigTests(unittest.TestCase):
@@ -77,6 +78,32 @@ class RuntimeEngineConfigTests(unittest.TestCase):
                 write_engine_config(data, engine="invalid")
             with self.assertRaises(ValueError):
                 write_engine_config(data, proactive_mode="invalid")
+
+    def test_restarting_a_legacy_profile_keeps_user_plugins_and_their_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            momo_agent.initialize(data, 19831)
+            (data / "profile/config.yaml").write_text(json.dumps(
+                {"model": {"provider": "custom", "default": "local", "base_url": "http://127.0.0.1:19832/v1"}}
+            ))
+            installed = data / "runtime/superagent/node_modules"
+            (installed / "my-bundle").mkdir(parents=True)
+            profile = data / "superagent/dsh-home/profiles/momo"
+            profile.mkdir(parents=True)
+            (profile / "node_modules").symlink_to(installed)
+            user_patch = "- id: my-bundle\n  disabled: true\n"
+            (profile / "cordis.patch.yml").write_text(user_patch)
+            (profile / "package.json").write_text(json.dumps({
+                "dependencies": {"my-bundle": "1.0.0"}, "dsh": {"profile": {"bundles": ["my-bundle"]}},
+            }))
+            for port in (19833, 19834):
+                instance = prepare_dsh_instance(data, python_executable=Path(sys.executable), dsh_port=port)
+                self.assertIn("my-bundle", json.loads((profile / "package.json").read_text())["dsh"]["profile"]["bundles"])
+                self.assertEqual((profile / "cordis.patch.yml").read_text(), user_patch)
+                self.assertFalse((profile / "node_modules").is_symlink())
+                self.assertTrue((profile / "node_modules/my-bundle").is_dir())
+                runtime_patch = json.loads((instance["state_dir"] / "momo-runtime.patch.yml").read_text())
+                self.assertEqual(next(e for e in runtime_patch if e["id"] == "webserver")["config"]["port"], port)
 
     def test_webrtc_route_allowlist_permits_proactive_endpoints(self) -> None:
         self.assertEqual(permitted_route("GET", "/momo/v1/proactive"), ("/momo/v1/proactive", False, False))
@@ -132,6 +159,35 @@ class SharedContextAndMemoryCLITests(unittest.TestCase):
 
 
 class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_mode_is_authenticated_and_captured_when_each_chat_is_admitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            conn = momo_agent.initialize(data, 19830)
+            gateway = SuperAgentGateway(data, conn, python_executable=Path(sys.executable),
+                                        base_env=momo_agent.child_environment(data), manage_dsh=False)
+            path = "/momo/v1/conversation/mode"
+            for method in ("GET", "POST"):
+                self.assertIsNotNone(permitted_route(method, path))
+            async with TestClient(TestServer(gateway.create_app())) as client:
+                headers = {"Authorization": f"Bearer {gateway.api_key}"}
+                self.assertEqual((await client.post(path, json={"mode": "creator"})).status, 401)
+                self.assertEqual(await (await client.get(path, headers=headers)).json(), {"mode": "standard"})
+                self.assertEqual((await client.post(path, headers=headers, json={"mode": "other"})).status, 400)
+                async def submit():
+                    return await client.post("/momo/v1/conversation/messages", headers=headers,
+                                             json={"content": "test", "operation_id": str(uuid.uuid4())})
+                for mode in ("creator", "standard"):
+                    self.assertEqual(await (await client.post(path, headers=headers, json={"mode": mode})).json(), {"mode": mode})
+                    self.assertEqual((await submit()).status, 200)
+                events, _, _ = gateway.bridge.list_triggers(0)
+                self.assertEqual([event["chat_mode"] for event in events], ["creator", "standard"])
+                await client.post(path, headers=headers, json={"mode": "creator"})
+            reopened = BridgeStore(data / "superagent/bridge.sqlite")
+            try:
+                self.assertEqual(reopened.chat_mode(), "creator")
+            finally:
+                reopened.close()
+
     async def test_two_dispatched_chat_tasks_can_reply_in_reverse_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "Agent"

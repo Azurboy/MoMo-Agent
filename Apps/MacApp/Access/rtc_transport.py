@@ -68,14 +68,14 @@ def permitted_route(method, path):
         if method == 'POST' and re.fullmatch(r'/work/[A-Za-z0-9_%:-]+/(cancel|report-retry)', suffix) and '..' not in suffix and not parts.query: return path, False, False
         if method == 'GET' and re.fullmatch(r'/work/[A-Za-z0-9_%:-]+', suffix) and '..' not in suffix and not parts.query: return path, False, False
         query = parse_qs(parts.query, keep_blank_values=True)
-        if method == 'GET' and suffix in ('','/push','/snapshot') and not parts.query: return path, False, False
+        if method == 'GET' and suffix in ('','/push','/snapshot','/mode') and not parts.query: return path, False, False
         if method == 'GET' and suffix == '/works' and set(query) <= {'limit'} and all(len(v) == 1 and v[0].isdigit() for v in query.values()): return path, False, False
         if method == 'GET' and suffix == '/subscribe' and set(query) == {'after'} and len(query['after']) == 1 and query['after'][0].isdigit(): return path, False, True
         if method == 'GET' and suffix == '/runs' and set(query) <= {'after','limit'} and all(len(v) == 1 and v[0].isdigit() for v in query.values()): return path, False, False
         if method == 'GET' and suffix in ('/messages', '/events'):
             if set(query) <= {'after', 'before', 'limit'} and not {'after','before'} <= set(query) and all(len(v) == 1 and v[0].isdigit() for v in query.values()):
                 return path, False, False
-        if method == 'POST' and suffix in ('/messages', '/read', '/adopt', '/push', '/push/revoke', '/push/visible') and not parts.query: return path, False, False
+        if method == 'POST' and suffix in ('/messages', '/read', '/adopt', '/mode', '/push', '/push/revoke', '/push/visible') and not parts.query: return path, False, False
         return None
     stream = method == 'GET' and re.fullmatch(r'/v1/runs/[A-Za-z0-9_-]+/events', target) is not None and not context
     allowed = (method == 'GET' and re.fullmatch(r'/v1/(capabilities|runs/[A-Za-z0-9_-]+)', target) is not None or

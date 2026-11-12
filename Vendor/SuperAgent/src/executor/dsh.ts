@@ -123,6 +123,11 @@ const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
 /** Returns `text` up to `limit` characters, or a truncated preview with total character count and the resource path to read the full text. */
 const capped = (text: string, limit: number, read: string) =>
   text.length <= limit ? { text } : { text: `${text.slice(0, limit)}…`, chars: text.length, read }
+export function isCreatorRequest(trigger: Trigger | undefined): boolean {
+  return trigger?.source === 'momo' && trigger.meta.stream === 'chat' && trigger.meta.chatMode === 'creator'
+    && trigger.actor.id === 'owner' && trigger.human && trigger.addressed === 'direct'
+}
+
 /**
  * Formats a Trigger for worker delivery: author, thread, timestamp, text up to `TRIGGER_CHARS`, source message link,
  * optional routing note, and a preview of the replied-to message when the worker has not yet seen it.

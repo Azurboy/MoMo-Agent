@@ -655,44 +655,42 @@ def prepare_dsh_instance(
     )
     _atomic_private(cli_wrapper, cli_script, 0o700)
 
-    runner = superagent_runner_dir(data)
-    node_modules = runner / "node_modules"
-    profile_nm = profile_dir / "node_modules"
-    if profile_nm.is_symlink() or profile_nm.exists():
-        if profile_nm.is_symlink() and profile_nm.resolve() == node_modules.resolve():
-            pass
-        else:
-            if profile_nm.is_symlink() or profile_nm.is_file():
-                profile_nm.unlink()
-            else:
-                shutil.rmtree(profile_nm)
-            profile_nm.symlink_to(node_modules)
-    else:
-        profile_nm.symlink_to(node_modules)
-
-    profile_pkg = {
-        "name": "dsh-profile-momo",
-        "private": True,
-        "dependencies": {
-            "dsh-superagent": f"file:{SUPERAGENT_SOURCE}",
-        },
-        "dsh": {
-            "profile": {
-                "bundles": [
-                    "@deepseek-ai/dsh-base",
-                    "@deepseek-ai/dsh-web-app",
-                    "dsh-superagent",
-                ]
-            }
-        },
-    }
-    _atomic_private(profile_dir / "package.json", json.dumps(profile_pkg, indent=2) + "\n", 0o600)
-    _atomic_private(profile_dir / "cordis.yml", "[]\n", 0o600)
-    _atomic_private(
-        profile_dir / "pnpm-workspace.yaml",
-        "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n",
-        0o600,
-    )
+    # Keep plugin-manager installs in the user's profile. The prepared runner owns
+    # the bundled SuperAgent, while DSH resolves base and web from its installation.
+    installed = superagent_runner_dir(data) / "node_modules"
+    manifest = profile_dir / "package.json"
+    bundles = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-superagent"]
+    package = json.loads(manifest.read_text()) if manifest.exists() else {"name": "dsh-profile-momo", "private": True}
+    dependencies = package.setdefault("dependencies", {})
+    bundled_agent = f"link:{installed / 'dsh-superagent'}"
+    update_manifest = dependencies.get("dsh-superagent") != bundled_agent
+    dependencies["dsh-superagent"] = bundled_agent
+    profile = package.setdefault("dsh", {}).setdefault("profile", {})
+    selected = profile.get("bundles", [])
+    missing = [name for name in bundles if name not in selected]
+    profile["bundles"] = missing + selected
+    modules = profile_dir / "node_modules"
+    if modules.is_symlink() and modules.resolve() == installed.resolve():
+        # Older profiles shared the runner's whole directory. Preserve any links
+        # for previously installed user packages as we detach from it.
+        modules.unlink()
+    modules.mkdir(exist_ok=True, mode=0o700)
+    for name in dependencies:
+        parts = name.split("/")
+        scoped = len(parts) == 2 and parts[0].startswith("@")
+        if (len(parts) != 1 and not scoped) or any(part in ("", ".", "..") for part in parts):
+            raise ValueError(f"Invalid package name in Harness profile: {name}")
+        entry = modules / name
+        if not entry.exists() and not entry.is_symlink() and (name == "dsh-superagent" or (installed / name).exists()):
+            entry.parent.mkdir(exist_ok=True)
+            entry.symlink_to(installed / name, target_is_directory=True)
+    if update_manifest or missing:
+        _atomic_private(manifest, json.dumps(package, ensure_ascii=False, indent=2) + "\n", 0o600)
+    if not (profile_dir / "cordis.yml").exists():
+        _atomic_private(profile_dir / "cordis.yml", "[]\n", 0o600)
+    if not (profile_dir / "pnpm-workspace.yaml").exists():
+        _atomic_private(profile_dir / "pnpm-workspace.yaml",
+                        "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n", 0o600)
 
     patch_entries = [
         {"id": "webserver", "config": {"host": "127.0.0.1", "port": dsh_port}},
@@ -707,7 +705,7 @@ def prepare_dsh_instance(
         {"id": "dsh-superagent-github", "disabled": False},
         {"id": "dsh-superagent-momo", "disabled": False},
     ]
-    _atomic_private(profile_dir / "cordis.patch.yml", json.dumps(patch_entries, ensure_ascii=False, indent=2) + "\n", 0o600)
+    _atomic_private(state_dir / "momo-runtime.patch.yml", json.dumps(patch_entries, ensure_ascii=False, indent=2) + "\n", 0o600)
 
     return {
         "dsh_home": dsh_home,

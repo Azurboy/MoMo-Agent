@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
+import { isCreatorRequest } from '../../executor/dsh.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
@@ -104,6 +105,11 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
     case 'attach': {
+      const destination = host.store.tickets.get(item.ticket_id!)
+      const incoming = host.store.triggers.get(item.trigger_id)
+      if (destination && incoming && isCreatorRequest(incoming) !== isCreatorRequest(host.store.triggers.get(destination.origin.triggerId))) {
+        return { refused: 'This ticket uses a different chat mode. Accept a new ticket for this request.' }
+      }
       const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined))
       return { reason: 'Attached: the ticket follows the trigger\'s thread and receives the trigger', ticketId: ticket.id }
     }

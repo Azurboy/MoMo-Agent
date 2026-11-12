@@ -564,7 +564,7 @@ struct DesktopSettings: View {
             let terms: [String]
             switch destination {
             case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), String(localized: "生活插画"), "DeepSeek Harness", "SuperAgent", "Proactive"]
-            case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude", "Antigravity", "Gemini"]
+            case .model: terms = [String(localized: "模型"), String(localized: "聊天模式"), String(localized: "创作"), "Creator", "API", "Codex", "Claude", "Antigravity", "Gemini"]
             case .pairing: terms = [String(localized: "设备"), String(localized: "配对手机"), String(localized: "远程访问")]
             }
             return terms.contains { $0.localizedStandardContains(search.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -611,6 +611,9 @@ struct DesktopSettings: View {
                     .padding(14)
                     .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityIdentifier("settings.providerNotice")
+                }
+                if let store = model.taskStore {
+                    ChatModeSettings(store: store)
                 }
                 DesktopSettingsGroup("接入方式") {
                     ModelConnectionFields(model: model).padding(.vertical, 6)

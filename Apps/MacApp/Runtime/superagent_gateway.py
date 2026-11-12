@@ -245,7 +245,13 @@ class BridgeStore:
             self.db.execute("ALTER TABLE triggers ADD COLUMN title TEXT")
         with suppress(sqlite3.OperationalError):
             self.db.execute("ALTER TABLE source_watermarks ADD COLUMN last_recorded_at REAL NOT NULL DEFAULT 0")
+        with suppress(sqlite3.OperationalError):
+            self.db.execute("ALTER TABLE triggers ADD COLUMN chat_mode TEXT")
         path.chmod(0o600)
+
+    def chat_mode(self) -> str:
+        row = self.db.execute("SELECT value FROM meta WHERE key='chat_mode'").fetchone()
+        return "creator" if row and row[0] == "creator" else "standard"
 
     def close(self) -> None:
         self.db.close()
@@ -267,14 +273,15 @@ class BridgeStore:
         title: str | None = None,
         run_id: str | None = None,
         at_iso: str | None = None,
+        chat_mode: str | None = None,
     ) -> dict:
         timestamp = at_iso or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with self.db:
             self.db.execute(
                 """INSERT OR IGNORE INTO triggers(
                        id, kind, thread_id, message_id, source_id, title, actor_id, actor_name,
-                       addressed, human, observed, text, at_iso, run_id
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       addressed, human, observed, text, at_iso, run_id, chat_mode
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trigger_id,
                     kind,
@@ -290,6 +297,7 @@ class BridgeStore:
                     text,
                     timestamp,
                     run_id,
+                    chat_mode,
                 ),
             )
         row = self.db.execute("SELECT * FROM triggers WHERE id=?", (trigger_id,)).fetchone()
@@ -325,6 +333,8 @@ class BridgeStore:
                     "text": row["text"],
                     "reply_allowed": True,
                 }
+                if row["chat_mode"]:
+                    event["chat_mode"] = row["chat_mode"]
                 if row["actor_name"]:
                     event["actor_name"] = row["actor_name"]
                 if row["addressed"]:
@@ -887,7 +897,7 @@ class SuperAgentGateway:
         log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             proc = subprocess.Popen(
-                [str(dsh_bin), "--profile", "momo"],
+                [str(dsh_bin), "--profile", "momo", "--patch", str(instance["state_dir"] / "momo-runtime.patch.yml")],
                 cwd=str(workspace_dir),
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -3875,10 +3885,18 @@ class SuperAgentGateway:
         }
 
     async def handle_conversation(self, request: web.Request) -> web.Response | web.StreamResponse:
-        if refused := self._check_bearer(request):
+        if (refused := self._check_bearer(request)) is not None:
             return refused
         try:
             suffix = request.match_info["tail"]
+            if suffix == "/mode" and request.method in ("GET", "POST"):
+                if request.method == "POST":
+                    value = await request.json()
+                    if not isinstance(value, dict) or set(value) != {"mode"} or value["mode"] not in ("standard", "creator"):
+                        raise ValueError("Expected standard or creator")
+                    with self.bridge.db:
+                        self.bridge.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chat_mode',?)", (value["mode"],))
+                return web.json_response({"mode": self.bridge.chat_mode()})
             if request.method == "GET" and suffix == "":
                 cfg = read_engine_config(self.data)
                 return web.json_response(
@@ -4010,11 +4028,14 @@ class SuperAgentGateway:
             raise ValueError("Invalid message")
 
         work_id = value.get("work_id")
+        mode = self.bridge.chat_mode()
         if target:
             target_row = self.bridge.db.execute("SELECT * FROM chat_runs WHERE run_id=?", (target,)).fetchone()
             if not target_row or target_row["status"] not in ("queued", "started", "waiting_for_input"):
                 _conflict("stale_target")
             work_id = target_row["work_id"]
+            origin = self.bridge.db.execute("SELECT chat_mode FROM triggers WHERE id=?", (target_row["trigger_id"],)).fetchone()
+            mode = origin["chat_mode"] if origin and origin["chat_mode"] else "standard"
 
         scope = hashlib.sha256(("superagent\0" + self.api_key).encode()).hexdigest()
         row = self.store.accept(
@@ -4090,6 +4111,7 @@ class SuperAgentGateway:
                 observed=False,
                 text=prompt_text,
                 run_id=run_id,
+                chat_mode=mode,
             )
             self._trigger_wakeup.set()
 
