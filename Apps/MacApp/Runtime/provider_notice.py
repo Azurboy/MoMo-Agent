@@ -6,6 +6,7 @@ headers, tokens, and stack traces never leave the local runtime process.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import uuid
 PROVIDER_NOTICE_REL = "runtime/provider-notice.json"
 NOTICE_COALESCE_SECONDS = 120.0
 NOTICE_MAX_AGE_SECONDS = 43200.0  # 12 hours
+QUOTA_REMINDER_INTERVAL = 24 * 60 * 60
 
 _PROVIDER_CANONICAL = {
     "codex": "openai-codex",
@@ -272,27 +274,32 @@ def _write_private_json(path: Path, payload: dict) -> None:
         raise
 
 
-def read_provider_notice(data_dir: Path, *, now: float | None = None) -> dict | None:
-    path = _notice_path(data_dir)
-    if not path.is_file():
-        return None
+@contextlib.contextmanager
+def _notice_lock(path: Path):
+    # Gateway, recording and illustration workers can report the same failure concurrently.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def _read_state(path: Path) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    if not isinstance(raw, dict):
-        return None
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _current_notice(raw: dict) -> dict | None:
     required = ("id", "kind", "provider", "provider_label", "title", "message", "short_error", "created_at")
     if not all(isinstance(raw.get(k), str) and raw[k] for k in required[:-1]):
         return None
     try:
         created_at = float(raw["created_at"])
         updated_at = float(raw.get("updated_at", created_at))
-    except (TypeError, ValueError):
-        return None
-    ref_now = float(now if now is not None else time.time())
-    if ref_now - updated_at > NOTICE_MAX_AGE_SECONDS:
-        clear_provider_notice(data_dir)
+    except (KeyError, TypeError, ValueError):
         return None
     return {
         "id": raw["id"],
@@ -305,6 +312,28 @@ def read_provider_notice(data_dir: Path, *, now: float | None = None) -> dict | 
         "created_at": created_at,
         "updated_at": updated_at,
     }
+
+
+def read_provider_notice(data_dir: Path, *, now: float | None = None) -> dict | None:
+    notice = _current_notice(_read_state(_notice_path(data_dir)))
+    ref_now = time.time() if now is None else now
+    if notice and ref_now - notice["updated_at"] <= NOTICE_MAX_AGE_SECONDS:
+        return notice
+    return None
+
+
+def _quota_episodes(state: dict, current: dict | None) -> dict:
+    stored = state.get("quota_episodes")
+    episodes = {}
+    if isinstance(stored, dict):
+        for provider, entry in stored.items():
+            if (isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
+                    and isinstance(entry.get("created_at"), (int, float))):
+                episodes[provider] = entry
+    # Carry an already dismissed ID across upgrades from the single-notice format.
+    if current and current["kind"] == "quota":
+        episodes[current["provider"]] = {"id": current["id"], "created_at": current["created_at"]}
+    return episodes
 
 
 def record_provider_issue(
@@ -321,21 +350,26 @@ def record_provider_issue(
     if classified is None:
         return None
 
-    existing = read_provider_notice(data_dir, now=ref_now)
-    if (
-        existing is not None
-        and existing["provider"] == classified["provider"]
-        and existing["kind"] == classified["kind"]
-        and (ref_now - float(existing["updated_at"])) <= coalesce_seconds
-    ):
-        # Coalesce rapid retries from the same failure burst under one notice ID
-        # so acknowledging "知道了" is not immediately spammed by an in-flight retry.
-        classified["id"] = existing["id"]
-        classified["created_at"] = existing["created_at"]
-        classified["updated_at"] = ref_now
-
-    with contextlib.suppress(OSError):
-        _write_private_json(_notice_path(data_dir), classified)
+    path = _notice_path(data_dir)
+    with contextlib.suppress(OSError), _notice_lock(path):
+        state = _read_state(path)
+        current = _current_notice(state)
+        episodes = _quota_episodes(state, current)
+        if classified["kind"] == "quota":
+            episode = episodes.get(classified["provider"])
+            # A successful lightweight request can briefly clear the status while
+            # other requests still hit quota. Keep the first reminder for the day.
+            if episode and (not episode.get("recovered") or ref_now - episode["created_at"] < QUOTA_REMINDER_INTERVAL):
+                classified["id"] = episode["id"]
+                classified["created_at"] = episode["created_at"]
+            episodes[classified["provider"]] = {"id": classified["id"], "created_at": classified["created_at"]}
+        elif (
+            current and current["provider"] == classified["provider"] and current["kind"] == classified["kind"]
+            and ref_now - current["updated_at"] <= coalesce_seconds
+        ):
+            classified["id"] = current["id"]
+            classified["created_at"] = current["created_at"]
+        _write_private_json(path, {**classified, "quota_episodes": episodes})
     return classified
 
 
@@ -343,15 +377,29 @@ def clear_provider_notice(data_dir: Path, *, provider: str | None = None) -> boo
     path = _notice_path(data_dir)
     if not path.is_file():
         return False
-    if provider is not None:
-        existing = read_provider_notice(data_dir)
-        canon = canonical_provider(provider)
-        if existing is not None and canon != "unknown" and existing["provider"] not in (canon, "unknown"):
-            return False
     try:
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return False
+        with _notice_lock(path):
+            if provider is None:
+                path.unlink()
+                return True
+            state = _read_state(path)
+            current = _current_notice(state)
+            episodes = _quota_episodes(state, current)
+            canon = canonical_provider(provider)
+            recovered = False
+            for key in {canon, "unknown"}:
+                episode = episodes.get(key)
+                if episode and not episode.get("recovered"):
+                    episode["recovered"] = True
+                    recovered = True
+            if current and current["provider"] in (canon, "unknown"):
+                current = None
+            elif not recovered:
+                return False
+            if current or episodes:
+                _write_private_json(path, {**(current or {}), "quota_episodes": episodes})
+            else:
+                path.unlink()
+            return True
     except OSError:
         return False

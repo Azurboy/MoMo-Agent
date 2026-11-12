@@ -391,12 +391,62 @@ class ModelSetupTests(unittest.TestCase):
             provider='codex',
             now=1700.0,
         )
-        self.assertNotEqual(first['id'], later['id'])
+        self.assertEqual(first['id'], later['id'])
 
         with patch.object(setup, 'resolve_credentials', return_value={'provider': 'antigravity', 'api_key': 'antigravity-cli'}), \
                 patch.object(setup, 'probe'):
             setup.verify_and_save(self.data, 'antigravity', 'gemini-4-carbon-low')
         self.assertIsNone(pn.read_provider_notice(self.data, now=1705.0))
+        fresh = pn.record_provider_issue(self.data, 'insufficient_quota', provider='codex', now=1710.0)
+        self.assertNotEqual(first['id'], fresh['id'])
+
+    def test_dismissed_quota_survives_expiry_upgrade_and_interleaved_failures(self):
+        import provider_notice as pn
+
+        original = pn.build_provider_notice('quota', provider='antigravity', now=1000)
+        path = self.data / pn.PROVIDER_NOTICE_REL
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(original))  # Installed version before quota episode tracking.
+        tomorrow = 1000 + 86400
+        self.assertIsNone(pn.read_provider_notice(self.data, now=tomorrow))
+        other = pn.record_provider_issue(self.data, 'insufficient_quota', provider='codex', now=tomorrow)
+        pn.record_provider_issue(self.data, 'rate limit', provider='agy', now=tomorrow)
+        retry = pn.record_provider_issue(self.data, 'RESOURCE_EXHAUSTED', provider='agy', now=tomorrow + 1)
+        self.assertEqual((retry['id'], retry['created_at']), (original['id'], original['created_at']))
+        self.assertEqual(pn.read_provider_notice(self.data, now=tomorrow + 1), retry)
+
+        self.assertTrue(pn.clear_provider_notice(self.data, provider='antigravity'))
+        self.assertIsNone(pn.read_provider_notice(self.data, now=tomorrow + 1))
+        other_retry = pn.record_provider_issue(self.data, 'insufficient_quota', provider='codex', now=tomorrow + 2)
+        self.assertEqual(other['id'], other_retry['id'])
+        new = pn.record_provider_issue(self.data, 'RESOURCE_EXHAUSTED', provider='agy', now=tomorrow + 3)
+        self.assertNotEqual(new['id'], original['id'])
+
+    def test_concurrent_quota_reports_share_one_notice(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        import provider_notice as pn
+
+        start = Barrier(8)
+        def report(_):
+            start.wait(timeout=5)
+            return pn.record_provider_issue(self.data, 'insufficient_quota', provider='agy')['id']
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            self.assertEqual(set(pool.map(report, range(8))), {pn.read_provider_notice(self.data)['id']})
+
+    def test_intermittent_model_success_cannot_repeat_the_quota_alert_within_a_day(self):
+        import provider_notice as pn
+
+        first = pn.record_provider_issue(self.data, 'insufficient_quota', provider='agy', now=1000)
+        self.assertTrue(pn.clear_provider_notice(self.data, provider='agy'))
+        self.assertIsNone(pn.read_provider_notice(self.data, now=2000))
+        retry = pn.record_provider_issue(self.data, 'RESOURCE_EXHAUSTED', provider='agy', now=2000)
+        self.assertEqual(first['id'], retry['id'])
+        self.assertTrue(pn.clear_provider_notice(self.data, provider='agy'))
+        self.assertFalse(pn.clear_provider_notice(self.data, provider='agy'))
+        next_day = pn.record_provider_issue(self.data, 'RESOURCE_EXHAUSTED', provider='agy', now=1000 + 86400)
+        self.assertNotEqual(first['id'], next_day['id'])
 
     def test_oversize_latest_recording_page_keeps_cursor_and_tool_identity(self):
         from antigravity_bridge import build_antigravity_prompt, MAX_PROMPT_UTF8_BYTES

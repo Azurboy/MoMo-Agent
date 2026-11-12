@@ -242,6 +242,10 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 legacy_run = await (await client.get(f"/v1/runs/{run_id}", headers=auth)).json()
                 self.assertEqual(legacy_run["status"], "started")
 
+                health = {"health": {"models": {"state": "error", "detail": "insufficient_quota"}}}
+                gateway._inspect_dsh_provider_health(health, [], [])
+                quota = gateway.current_provider_notice()
+                self.assertEqual(quota["kind"], "quota")
                 ack_resp = await client.post(
                     "/momo/internal/superagent/outbound",
                     headers=bridge_headers,
@@ -258,6 +262,7 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(ack_resp.status, 200)
+                self.assertEqual(gateway.current_provider_notice()["id"], quota["id"])
 
                 reply_payload = {
                     "id": "reply-1",
@@ -272,6 +277,9 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                 }
                 reply_resp = await client.post("/momo/internal/superagent/outbound", headers=bridge_headers, json=reply_payload)
                 self.assertEqual(reply_resp.status, 200)
+                self.assertIsNone(gateway.current_provider_notice())
+                gateway._inspect_dsh_provider_health(health, [], [])
+                self.assertIsNone(gateway.current_provider_notice())
                 # Duplicate retry is idempotent (no duplicate chat bubble!)
                 dup_resp = await (await client.post("/momo/internal/superagent/outbound", headers=bridge_headers, json=reply_payload)).json()
                 self.assertTrue(dup_resp["duplicate"])

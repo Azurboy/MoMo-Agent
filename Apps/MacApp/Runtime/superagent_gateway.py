@@ -40,6 +40,7 @@ from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
 from provider_notice import (
+    canonical_provider,
     classify_provider_issue,
     clear_provider_notice,
     read_provider_notice,
@@ -473,6 +474,7 @@ class SuperAgentGateway:
         self._ticket_auto_retries: dict[str, tuple[int, str]] = {}
         self._dsh_log_offset: int = 0
         self._dsh_seeded_failure_baseline: bool = False
+        self._last_dsh_model_health: dict = {}
         self._seen_dsh_failure_keys: set[str] = set()
         self._source_meta_cache: dict[str, tuple[str | None, float | None]] = {}
         self._active_api_runs: set[str] = set()
@@ -1237,8 +1239,9 @@ class SuperAgentGateway:
         self._scan_dsh_log_for_provider_issues()
         health = state.get("health") if isinstance(state, dict) and isinstance(state.get("health"), dict) else {}
         models_h = health.get("models") if isinstance(health.get("models"), dict) else {}
-        if models_h.get("state") == "error" and models_h.get("detail"):
+        if models_h != self._last_dsh_model_health and models_h.get("state") == "error" and models_h.get("detail"):
             self._record_provider_issue(str(models_h["detail"]))
+        self._last_dsh_model_health = models_h
 
         first_pass = not self._dsh_seeded_failure_baseline
         for t in tickets:
@@ -4710,7 +4713,6 @@ class SuperAgentGateway:
         if existing:
             return web.json_response({"status": "sent", "duplicate": True, "message_id": existing["message_id"]})
 
-        self._clear_provider_notice_if_recovered()
         now = time.time()
         # Locate linked chat run by ticket_id, exact trigger messageId, or oldest active chat run on chat:* channel.
         linked_run = None
@@ -4749,6 +4751,11 @@ class SuperAgentGateway:
             return web.json_response({"status": "sent"})
 
         # kind == "reply": commit visible assistant message to shared ProductStore!
+        # The Antigravity bridge already observes the actual model completion. Outbox
+        # messages may have been queued before a newer quota failure.
+        provider = self._active_provider_hint()
+        if kind == "reply" and canonical_provider(provider) != "antigravity":
+            self._clear_provider_notice_if_recovered(provider)
         if linked_run:
             run_id = linked_run["run_id"]
         else:
