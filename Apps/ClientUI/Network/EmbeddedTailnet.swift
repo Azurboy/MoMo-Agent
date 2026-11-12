@@ -38,8 +38,6 @@ final class EmbeddedTailnet {
     @ObservationIgnored private var signedOut = false
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathSignature: String?
-    @ObservationIgnored private var consecutiveTransportFailures = 0
-    @ObservationIgnored private var consecutivePeerMapTimeouts = 0
     @ObservationIgnored var startupTimeout: Duration = .seconds(15)
     @ObservationIgnored var peerMapTimeout: Duration = .seconds(12)
     @ObservationIgnored var peerWarmupTimeout: Duration = .seconds(4)
@@ -59,18 +57,20 @@ final class EmbeddedTailnet {
         guard proxySettingsError == nil else { throw TailnetError.unavailable }
         let checkedProxy = needsProxyCheck
         await checkProxyIfNeeded()
-        if let closing { await Self.awaitCleanup(closing, timeout: .seconds(5)) }
+        if let closing { await closing.value }
         try Task.checkCancellation()
         guard !signingOut, !signedOut else { throw TailnetError.loginRequired }
         if needsRestart { await close(); return try await start() }
         if let existing = node {
+            let attempt = generation
             if checkedProxy || state != "Running" {
                 await refreshStatus()
                 try Task.checkCancellation()
+                guard attempt == generation else { throw CancellationError() }
                 if needsRestart { await close(); return try await start() }
             }
             if Self.startupStates.contains(state) {
-                ensureNodeUp(existing, attempt: generation)
+                ensureNodeUp(existing, attempt: attempt)
             }
             return
         }
@@ -102,7 +102,8 @@ final class EmbeddedTailnet {
         }
         do {
             let created = try await task.value
-            guard attempt == generation else { try? await created.close(); throw CancellationError() }
+            // close() owns cleanup of any startup it supersedes.
+            guard attempt == generation else { throw CancellationError() }
             if node != nil { return }
             node = created; startup = nil
             ensureNodeUp(created, attempt: attempt)
@@ -276,11 +277,8 @@ final class EmbeddedTailnet {
                 while !mappedAddresses.contains(peer) {
                     guard attempt == generation else { throw CancellationError() }
                     guard state == "Running", ContinuousClock.now < deadline else {
-                        consecutivePeerMapTimeouts += 1
+                        // A missing remote peer is not evidence that the local listener failed.
                         needsProxyCheck = true
-                        if consecutivePeerMapTimeouts >= 2 {
-                            needsRestart = true
-                        }
                         throw URLError(.notConnectedToInternet)
                     }
                     try await Task.sleep(for: .milliseconds(200))
@@ -290,7 +288,6 @@ final class EmbeddedTailnet {
             }
         }
         if let peer {
-            consecutivePeerMapTimeouts = 0
             await warmPeerIfNeeded(peer, node: node)
             guard attempt == generation else { throw CancellationError() }
         }
@@ -399,10 +396,6 @@ final class EmbeddedTailnet {
         }
     }
 
-    func recordTransportSuccess() {
-        consecutiveTransportFailures = 0
-    }
-
     func restartForRecovery() async {
         guard !signingOut, !signedOut else { return }
         await close()
@@ -427,11 +420,6 @@ final class EmbeddedTailnet {
         failedSession.finishTasksAndInvalidate()
         needsProxyCheck = true
         needsPeerWarmup = true
-        consecutiveTransportFailures += 1
-        if consecutiveTransportFailures >= 6 {
-            consecutiveTransportFailures = 0
-            needsRestart = true
-        }
     }
 
     private enum PeerPingOutcome: Sendable {
@@ -565,22 +553,12 @@ final class EmbeddedTailnet {
         if generation == attempt { proxyCheck = nil }
     }
 
-    private static func awaitCleanup(_ cleanup: Task<Void, Never>, timeout: Duration) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await cleanup.value }
-            group.addTask { try? await Task.sleep(for: timeout) }
-            _ = await group.next()
-            group.cancelAll()
-        }
-    }
-
     func close() async {
-        if let closing { await Self.awaitCleanup(closing, timeout: .seconds(5)); return }
+        if let closing { await closing.value; return }
         generation = UUID(); watch?.cancel(); watch = nil; up?.cancel(); up = nil
         pathMonitor?.cancel(); pathMonitor = nil; lastPathSignature = nil
         needsRestart = false; needsProxyCheck = false; proxyCheck = nil
         peerWarmup?.cancel(); peerWarmup = nil; needsPeerWarmup = true; lastPeerWarmupAt = nil
-        consecutiveTransportFailures = 0; consecutivePeerMapTimeouts = 0
         invalidateCachedSessions(finishTasks: false)
         let pending = startup
         let old = node; node = nil; startup = nil
@@ -590,7 +568,7 @@ final class EmbeddedTailnet {
             else if let pending, let created = try? await pending.value { try? await created.close() }
         }
         closing = cleanup
-        await Self.awaitCleanup(cleanup, timeout: .seconds(5))
+        await cleanup.value
         if closing == cleanup { closing = nil }
     }
 

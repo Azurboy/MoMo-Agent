@@ -27,28 +27,23 @@ struct EmbeddedTailnetTransport: AgentTransport {
         do {
             if url.path == "/desktop/v1/frames" {
                 let diagnostics = await network.diagnostics
-                let stream = try await AgentHTTPStream.open(request, configuration: session.configuration) { metrics in
+                return try await AgentHTTPStream.open(request, configuration: session.configuration) { metrics in
                     diagnostics.record(metrics, request: request)
                 }
-                await network.recordTransportSuccess()
-                return stream
             }
             if desktop {
                 let (data, response) = try await session.data(for: request)
                 guard let response = response as? HTTPURLResponse else { throw URLError(.networkConnectionLost) }
                 guard data.count <= 3 * 1024 * 1024 else { throw AgentClientError.responseTooLarge }
-                await network.recordTransportSuccess()
                 return AgentByteStream(status: response.statusCode, contentType: response.mimeType, chunks: AsyncThrowingStream { continuation in
                     continuation.yield(data); continuation.finish()
                 })
             }
             let diagnostics = await network.diagnostics
-            let stream = try await TailnetChunkStream.open(request: request, session: session, diagnostics: diagnostics) { error in
+            return try await TailnetChunkStream.open(request: request, session: session, diagnostics: diagnostics) { error in
                 guard !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) else { return }
                 Task { @MainActor in network.failedRequest(error, session: session) }
             }
-            await network.recordTransportSuccess()
-            return stream
         } catch {
             if !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) {
                 await network.failedRequest(error, session: session)
