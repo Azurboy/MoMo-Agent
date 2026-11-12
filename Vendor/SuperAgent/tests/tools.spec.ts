@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
-import { UserError } from '../src/core/index.ts'
+import { momoTrigger } from '../src/sources/momo.ts'
+import { key, UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
@@ -244,6 +245,33 @@ it('ignores a proactive candidate from its card beside other decisions, marked s
     { trigger_id: thanks.id, kind: 'ignore', decision: 'ignore', reason: 'Thanks only.' },
     { trigger_id: proposal.id, kind: 'accept', refused: expect.stringContaining('assess proactive candidates with orchestrator_eval') },
   ])
+})
+
+it('answers a MoMo follow-up in its own chat and preserves the worker’s exact authorization instructions', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 接入飞书'))
+  const followup = momoTrigger({ cursor: '2', id: 'question', stream: 'chat', thread_id: 'chat:followup',
+    actor_id: 'owner', human: true, addressed: 'direct', at: '2026-11-12T13:51:44Z', text: '我在哪里授权', reply_allowed: true,
+  }, 'http://127.0.0.1:18787')
+  h.runtime.store.triggers.save(followup)
+  const attach = { kind: 'attach', trigger_id: followup.id, ticket_id: ticket.id }
+  const reply = '还没有登录链接，我去确认这个机器人能否读取该群。'
+  await expect(h.route(attach)).rejects.toThrow('needs acknowledgement')
+  expect(h.runtime.store.tickets.get(ticket.id)!.inputs).toHaveLength(0)
+  await h.route({ ...attach, acknowledgement: reply })
+  const receipt = h.runtime.store.receipts.get(key('attach-reply', followup.id))
+  expect(receipt).toMatchObject({ kind: 'reply', channel: followup.channel, text: reply })
+  expect(receipt?.ticketId).toBeUndefined()
+  expect(h.runtime.store.tickets.get(ticket.id)!.inputs).toEqual([expect.objectContaining({ triggerId: followup.id })])
+
+  const question = '请在本条聊天回复「使用群机器人」。手机和 Mac 都可以在这里回复。'
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: '等待选择读取身份。',
+    human_action: question, question_for_trigger_id: followup.id, reply_to_trigger_id: followup.id })
+  const attention = h.runtime.store.tickets.get(ticket.id)!.attention!
+  await h.runTool(h.runtime.masterId, 'orchestrator_reply', { purpose: 'attention', ticket_id: ticket.id,
+    human_action: question, text: '目前没有生成链接。' })
+  expect(h.runtime.store.receipts.get(key('attention-reply', attention.id))).toMatchObject({
+    channel: followup.channel, text: `目前没有生成链接。\n\n${question}`,
+  })
 })
 
 it('returns where a reply stands: sent, or dropped when its conversation can no longer receive it', async () => {

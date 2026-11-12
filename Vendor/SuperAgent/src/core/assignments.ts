@@ -99,6 +99,11 @@ export class Assignments extends EnginePart {
   report(ticketId: string, report: WorkerReport): Ticket {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    // A blocked worker can explain the next step and ask the same person to take it in one attention reply.
+    if (report.state === 'blocked' && report.question && report.askedBy && report.answers === report.askedBy) {
+      const { answers, ...attentionReport } = report
+      report = attentionReport
+    }
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
     if (report.askedBy && !report.question) throw new UserError('askerWithoutQuestion')
     const person = (id: string, channel: boolean) => {

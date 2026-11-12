@@ -121,7 +121,7 @@ declare class Engine {
    * once unless processing is paused.
    * @throws UserError for a ticket a person stopped, which withdrew its Mandate, or one whose Mandate the Policy no longer holds.
    */
-  attach(ticketId: string, triggerId: string, note?: string): Ticket;
+  attach(ticketId: string, triggerId: string, note?: string, replyToSender?: string): Ticket;
   /**
    * Ask a running worker that waits in `waiting` state for its status; any other worker is left alone.
    * @returns whether the worker was asked.

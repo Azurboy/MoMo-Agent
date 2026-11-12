@@ -1350,14 +1350,18 @@ class SuperAgentGateway:
             wait_reason = row["wait_reason"]
             err = row["error"]
             if dec and dec.get("kind") == "ignore" and not ticket_id:
-                # Allow Outbox a brief window to deliver orchestrator_reply(purpose='answer') before closing un-replied runs.
+                # Routing and delivery are independent. A routing decision alone cannot settle a chat turn.
                 has_reply = self.store.db.execute(
                     "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1",
                     (row["run_id"],),
                 ).fetchone()
-                if has_reply or now - float(row["updated_at"]) >= 10.0:
+                if has_reply:
                     new_status = "completed"
                     wait_reason = None
+                elif orch_idle and now - float(row["updated_at"]) >= 120.0:
+                    new_status = "failed"
+                    wait_reason = None
+                    err = "这条消息的回复未送达，请重试。"
             elif ticket:
                 ended_info = ticket.get("ended")
                 ended_outcome = (

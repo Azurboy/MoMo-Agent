@@ -226,6 +226,38 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                     (second["run_id"], "下午三点有评审。"), (first["run_id"], "会议记录核对好了。"),
                 ])
 
+    async def test_routed_followup_waits_for_its_own_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "Agent"
+            gateway = SuperAgentGateway(data, momo_agent.initialize(data, 19830), python_executable=Path(sys.executable),
+                                        base_env=momo_agent.child_environment(data), manage_dsh=False)
+            async with TestClient(TestServer(gateway.create_app())) as client:
+                auth = {"Authorization": f"Bearer {gateway.api_key}"}
+                turn = await (await client.post("/momo/v1/conversation/messages", headers=auth, json={
+                    "operation_id": str(uuid.uuid4()), "content": "我在哪里授权",
+                })).json()
+                run_id = turn["run_id"]
+                trigger = gateway.bridge.db.execute("SELECT * FROM triggers WHERE run_id=?", (run_id,)).fetchone()
+                decision = {"kind": "ignore", "triggerIds": [trigger["id"]], "reason": [{"code": "routed", "values": {"ticket": "lark"}}]}
+                idle = {"state": "ready", "detail": "Nothing waiting"}
+                state = {"health": {"assessment": idle, "relay": idle}}
+                def status():
+                    return gateway.bridge.db.execute("SELECT status FROM chat_runs WHERE run_id=?", (run_id,)).fetchone()[0]
+                gateway.bridge.db.execute("UPDATE chat_runs SET updated_at=updated_at-15 WHERE run_id=?", (run_id,))
+                gateway._apply_dsh_projections(state, [], [decision])
+                self.assertNotIn(status(), ("completed", "failed"))
+                gateway.bridge.db.execute("UPDATE chat_runs SET updated_at=updated_at-120 WHERE run_id=?", (run_id,))
+                gateway._apply_dsh_projections(state, [], [decision])
+                self.assertEqual(status(), "failed")
+                answer = {"id": "followup-answer", "kind": "reply", "text": "现在还没有授权链接。",
+                          "channel": {"thread": trigger["thread_id"], "address": {"messageId": trigger["message_id"]}}}
+                for _ in range(2):
+                    response = await client.post("/momo/internal/superagent/outbound", headers={"X-MoMo-Bridge": gateway.bridge_secret}, json=answer)
+                    self.assertEqual(response.status, 200)
+                self.assertEqual(status(), "completed")
+                messages = gateway.store.db.execute("SELECT content FROM messages WHERE run_id=? AND role='assistant'", (run_id,)).fetchall()
+                self.assertEqual([m[0] for m in messages], [answer["text"]])
+
     async def test_antigravity_worker_stops_only_on_unchanged_tool_results(self):
         from unittest.mock import AsyncMock, Mock, patch
         from superagent_gateway import SuperAgentGateway
