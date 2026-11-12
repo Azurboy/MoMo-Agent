@@ -153,6 +153,34 @@ final class RemoteContextSyncTests: XCTestCase {
         XCTAssertEqual(restored.memories.first?.id, memory.id)
         XCTAssertNotNil(restored.lastSourcesSent)
     }
+
+    func testMemoryRefreshAndUploadReportIndependentFailures() async throws {
+        let (sync, root, archive, _) = try fixture()
+        _ = try await summaryWindow(archive: archive, root: root)
+        MemoryResponse.state.rejectSources = true
+        await sync.refresh()
+        let lastRead = try XCTUnwrap(sync.lastSynced)
+        let noteID = try XCTUnwrap(sync.memories.first?.id)
+        XCTAssertNil(sync.failure)
+        XCTAssertNotNil(sync.sourceDeliveryFailure)
+        XCTAssertGreaterThan(sync.pendingSources, 0)
+
+        MemoryResponse.state.rejectMemories = true
+        await sync.refresh()
+        XCTAssertNotNil(sync.failure)
+        XCTAssertNotNil(sync.sourceDeliveryFailure)
+        XCTAssertEqual(sync.memories.first?.id, noteID)
+        XCTAssertEqual(sync.lastSynced, lastRead)
+
+        MemoryResponse.state.rejectSources = false
+        try await sync.synchronize(includeMemories: false)
+        XCTAssertNil(sync.sourceDeliveryFailure)
+        XCTAssertEqual(sync.pendingSources, 0)
+        XCTAssertNotNil(sync.failure, "A recording receipt cannot confirm a memory refresh")
+        MemoryResponse.state.rejectMemories = false
+        await sync.refresh()
+        XCTAssertNil(sync.failure)
+    }
     func testPendingUntranscribedRecordingDoesNotBlockOlderTranscriptDelivery() async throws {
         let (sync, root, archive, _) = try fixture()
         let fingerprint = ContentHash.sha256(Data("pending-sync-test".utf8))
@@ -250,6 +278,7 @@ private final class MemoryResponses: @unchecked Sendable {
     private var summaryRevision: String?
     private var payloads: [SourceEnvelope] = []
     private var rejected = false
+    private var memoriesRejected = false
     private var waitingForSource: XCTestExpectation?
     private var heldResponse: (@Sendable () -> Void)?
     func holdNextSource(_ waiting: XCTestExpectation) { lock.withLock { waitingForSource = waiting } }
@@ -270,10 +299,14 @@ private final class MemoryResponses: @unchecked Sendable {
         get { lock.withLock { rejected } }
         set { lock.withLock { rejected = newValue } }
     }
+    var rejectMemories: Bool {
+        get { lock.withLock { memoriesRejected } }
+        set { lock.withLock { memoriesRejected = newValue } }
+    }
     var requests: Int { lock.withLock { count } }
     var syncedSourceIDs: [String] { lock.withLock { synced } }
     var sourcePayloads: [SourceEnvelope] { lock.withLock { payloads } }
-    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; payloads = []; summaryRevision = nil; rejected = false } }
+    func reset(_ workspace: UUID) { lock.withLock { self.workspace = workspace; count = 0; synced = []; payloads = []; summaryRevision = nil; rejected = false; memoriesRejected = false } }
     func receive(_ request: URLRequest) -> (Int, String) {
         lock.withLock {
             count += 1
@@ -305,6 +338,7 @@ private final class MemoryResponses: @unchecked Sendable {
                 return (200, "{\"source_id\":\"\(sourceID)\",\"source_revision\":\"\(rev)\",\"revision\":1}")
             }
             if request.url?.path == "/v1/memories" {
+                if memoriesRejected { return (503, "{}") }
                 return (200, #"{"revision":1,"next_cursor":null,"items":[{"id":"hermes-memory-fixture","text":"下周五发方案","kind":"memory","basis":"hermes","status":"current","revision":1,"evidence":[]}]}"#)
             }
             return (503, "{}")

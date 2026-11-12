@@ -21997,6 +21997,23 @@
         }
       }
     },
+    "录音资料暂未上传，稍后自动重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording uploads will retry shortly."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "录音资料暂未上传，稍后自动重试。"
+          }
+        }
+      }
+    },
     "录音片段缺少原始时间，尚未同步。": {
       "localizations": {
         "en": {
@@ -42051,6 +42068,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "稍后继续整理，回到 App 后会自动继续"
+          }
+        }
+      }
+    },
+    "笔记暂未刷新，稍后自动重试。": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes couldn’t refresh. Another attempt will follow shortly."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "笔记暂未刷新，稍后自动重试。"
           }
         }
       }

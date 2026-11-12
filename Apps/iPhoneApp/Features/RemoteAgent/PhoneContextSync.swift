@@ -12,6 +12,7 @@ final class PhoneContextSync {
     private(set) var memories: [ContextMemory] = []
     private(set) var lastSynced: Date?
     private(set) var failure: String?
+    private(set) var sourceDeliveryFailure: String?
     private(set) var isSyncing = false
     private(set) var memoryPending = 0
     private(set) var memoryNeedsReview = 0
@@ -130,24 +131,36 @@ final class PhoneContextSync {
         if let inFlight { return try await inFlight.value }
         isSyncing = true
         let task = Task {
+            var uploadError: Error?
             repeat {
                 syncRequested = false
                 let includeMemories = memoriesRequested
                 memoriesRequested = false
-                try await synchronizeArchive(includeMemories: includeMemories)
+                do {
+                    uploadError = try await synchronizeArchive(includeMemories: includeMemories)
+                } catch {
+                    if !AgentTransportFailure.isCancelled(error) {
+                        if includeMemories {
+                            failure = AgentTransportFailure.isTransient(error)
+                                ? String(localized: "笔记暂未刷新，稍后自动重试。") : error.localizedDescription
+                        } else {
+                            sourceDeliveryFailure = sourceFailureMessage(error)
+                        }
+                    }
+                    throw error
+                }
             } while syncRequested && !Task.isCancelled
+            if let uploadError { throw uploadError }
         }
         inFlight = task
         defer { inFlight = nil; isSyncing = false }
-        do { try await task.value; failure = nil }
+        do { try await task.value }
         catch {
             if AgentTransportFailure.isCancelled(error) { throw error }
             if case AgentClientError.http(401, _, _, _) = error {
                 authenticationRequired = true; background(); onAuthenticationRequired?(error)
+                failure = error.localizedDescription
             }
-            failure = AgentTransportFailure.isTransient(error)
-                ? String(localized: "尚未同步到 Mac，连接后自动重试。")
-                : error.localizedDescription
             throw error
         }
     }
@@ -206,8 +219,7 @@ final class PhoneContextSync {
         defer { isDreamRequesting = false }
         do {
             _ = try await client.triggerDream()
-            try await synchronize(includeMemories: true)
-            failure = nil
+            await refresh()
         } catch {
             guard !AgentTransportFailure.isCancelled(error) else { return }
             if case AgentClientError.http(401, _, _, _) = error {
@@ -286,7 +298,13 @@ final class PhoneContextSync {
             updated.sources[source.envelope.sessionId]?.receipt = receipt; try commit(updated)
         }
     }
-    private func synchronizeArchive(includeMemories: Bool) async throws {
+    private func sourceFailureMessage(_ error: Error) -> String {
+        AgentTransportFailure.isTransient(error)
+            ? String(localized: "录音资料暂未上传，稍后自动重试。") : error.localizedDescription
+    }
+
+    // Return a delivery error separately so a waiting memory refresh still runs.
+    private func synchronizeArchive(includeMemories: Bool) async throws -> Error? {
         let status = try await client.contextStatus()
         guard status.workspaceId == state.connection.workspaceID, status.sourceSync,
               ["Hermes", "SuperAgent"].contains(status.memoryWriter) else { throw SyncError.identity }
@@ -296,11 +314,20 @@ final class PhoneContextSync {
             await applySpeakerRelabels(relabels)
         }
         var uploadError: Error?
-        do { try await uploadSources() }
-        catch is CancellationError { throw CancellationError() }
-        catch { uploadError = error }
-        if includeMemories { try await downloadMemories() }
-        if let uploadError { throw uploadError }
+        do {
+            try await uploadSources()
+            sourceDeliveryFailure = nil
+        } catch {
+            if AgentTransportFailure.isCancelled(error) { throw error }
+            if case AgentClientError.http(401, _, _, _) = error { throw error }
+            sourceDeliveryFailure = sourceFailureMessage(error)
+            uploadError = error
+        }
+        if includeMemories {
+            try await downloadMemories()
+            failure = nil
+        }
+        return uploadError
     }
     private func applySpeakerRelabels(_ relabels: [SpeakerRelabelInstruction]) async {
         var ackIDs: [String] = []

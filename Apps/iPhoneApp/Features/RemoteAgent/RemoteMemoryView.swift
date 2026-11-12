@@ -308,15 +308,24 @@ struct RemoteMemoryView: View {
     }
 
     private var syncStatusFooter: some View {
-        HStack(spacing: 6) {
-            if sync.memoryReview?.running == true || sync.isDreamRequesting {
-                Text("正在整理…")
-            } else {
-                Text(sync.isSyncing ? String(localized: "正在同步") : sourceStatus)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if sync.memoryReview?.running == true || sync.isDreamRequesting {
+                    Text("正在整理…")
+                } else if let date = sync.lastSynced {
+                    Text("上次同步")
+                    Text(date, style: .relative)
+                } else if sync.isSyncing {
+                    Text("正在读取记忆…")
+                } else {
+                    Text("尚未同步")
+                }
+                Spacer(minLength: 8)
             }
-            Spacer(minLength: 8)
-            if let date = sync.lastSynced {
-                Text(date, style: .relative)
+            if let deliveryFailure = sync.sourceDeliveryFailure {
+                Text(deliveryFailure)
+            } else if sync.pendingSources > 0 {
+                Text("\(sync.pendingSources) 份待送达")
             }
         }
         .font(.caption2)
@@ -373,10 +382,6 @@ struct RemoteMemoryView: View {
         }
     }
 
-    private var sourceStatus: String {
-        if sync.pendingSources > 0 { return String(localized: "\(sync.pendingSources) 份待送达") }
-        return sync.lastSourcesSent == nil ? String(localized: "尚未同步") : String(localized: "已同步")
-    }
 }
 
 private struct VaultFolderHeaderRow: View {
