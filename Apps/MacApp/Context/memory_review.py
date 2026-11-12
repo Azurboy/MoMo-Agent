@@ -12,12 +12,13 @@ from context_store import Conflict, canonical, digest
 CHAT_IDLE_SECONDS = 10 * 60
 DREAM_INTERVAL = 24 * 60 * 60
 AUTOMATIC_INTERVAL = DREAM_INTERVAL
-CURATION_POLICY_VERSION = "v4-free-hierarchy"
+CURATION_POLICY_VERSION = "v5-transcript-evidence"
 MAX_BYTES = 32_000
 MAX_PARTS = 48
 RECEIPT = '''最后只返回 JSON：{"memory_review":{"outcome":"updated 或 no_change","reason":"本批保存、合并、清理、目录分层重整或纠正了什么（含记忆、Markdown 活页笔记重组/移动/删除或说话人修正），或为何无需改动"}}。
 updated 必须以原生 memory、notebook 或 relabel_speakers 工具成功回执为依据，文字承诺不算写入。工具失败时修正后重试；仍失败则说明失败，不得报告 no_change。'''
-POLICY = '''这是 MoMo Agent 的闲时记忆与生活上下文自治整理（Dream / Autonomous Memory Curation），不是用户的新任务。所有持久产出物均为纯 Markdown（`.md`）：核心摘要保存在 `USER.md` / `MEMORY.md`（通过 `memory` 工具），深层生活与工作知识库保存在 `memories/` 下的 Obsidian 式纯 Markdown 知识库（通过 `notebook` 工具自由读写、移动与清理 `BRIEFING.md` 及任意多级目录路径 `path`，如 `projects/<项目名>/overview.md`、`projects/<项目名>/双月OKR.md`、`journal/2026-11/2026-11-10.md`、`people/核心团队/小林.md` 或你按领域自建的多级文件夹，严禁往笔记里写 JSON）。
+TRANSCRIPT_GUIDANCE = Path(__file__).with_name('dream-transcript-evidence.md').read_text(encoding='utf-8').strip()
+POLICY = TRANSCRIPT_GUIDANCE + '\n\n' + '''这是 MoMo Agent 的闲时记忆与生活上下文自治整理（Dream / Autonomous Memory Curation），不是用户的新任务。所有持久产出物均为纯 Markdown（`.md`）：核心摘要保存在 `USER.md` / `MEMORY.md`（通过 `memory` 工具），深层生活与工作知识库保存在 `memories/` 下的 Obsidian 式纯 Markdown 知识库（通过 `notebook` 工具自由读写、移动与清理 `BRIEFING.md` 及任意多级目录路径 `path`，如 `projects/<项目名>/overview.md`、`projects/<项目名>/双月OKR.md`、`journal/2026-11/2026-11-10.md`、`people/核心团队/小林.md` 或你按领域自建的多级文件夹，严禁往笔记里写 JSON）。
 USER.md 保存用户明确表达的稳定偏好、身份与核心原则；MEMORY.md 保存高优先级个人背景、当前活跃主线、有效承诺及指向深层笔记的索引。
 【核心自治原则：自由组织多级目录 + 严禁只追加不清理，由你自主决定如何分层、重整、合并与断舍离】
 记忆库绝不是死板的一级平铺列表，也不是只进不出的流水账。你拥有完整的 Obsidian 知识库园丁自治权：
@@ -29,8 +30,7 @@ USER.md 保存用户明确表达的稳定偏好、身份与核心原则；MEMORY
 【排版与可读性铁律】所有记忆与笔记直接面向用户阅读，必须像一位懂你的私人幕僚写的清晰手记：
 - `MEMORY.md` 每条统一采用 `**【主题】**（YYYY-MM-DD）：简洁自然的 1-3 句要点，分句用分号“；”隔开`；
 - **严禁**在正文中直接出现裸 UUID（如 `3d1a1f88-6daf-...`）、10 位 Unix 时间戳（如 `1793179516`）、内部版本号（如 `revision 0:315`、`remaining_parts=1589`）或生硬的审计免责套话（如 `## 来源与边界`、`（归属/执行未核）`、`不能代表全天已结束`）；需要引用原音时统一用 `[HH:MM 原音](momoagent://source/...)` 形式。
-语音转录常有同音、近音或中英混杂误听（如将“GitHub Actions”识别成“get up 的 action”），写入时结合全天上下文与领域常识还原明显被误听的术语、人名或产品名；语境不足以确认原词时不强行猜测。
-【关键：语义说话人推理与标签修正】声学声纹分轨（如 `[说话人 1]`、`[说话人 2]` 或偶发的 `[我]` 误判）仅基于声音特征，可能出现漏认、串轨或匿名聚类。阅读对话时，请结合称呼（如“小林，你觉得…”后紧接着 `[说话人 2]` 回答）、自我介绍、职责分工、以及既有 `people/*.md` 档案进行语义推理：
+【关键：语义说话人推理与标签修正】声学声纹分轨（如 `[说话人 1]`、`[说话人 2]` 或偶发的 `[我]` 误判）仅基于声音特征，可能出现漏认、串轨或匿名聚类。阅读对话时，请结合称呼（如“小林，你觉得…”后紧接着 `[说话人 2]` 回答）、经核实的自我介绍、职责分工、以及既有 `people/*.md` 档案进行语义推理：
 - 一旦从对话语义能够明确判断某位 `[说话人 N]` 的真实姓名/称呼（或发现某段 `[我]` / `[他人]` 声学归属明显标反），立即调用 `relabel_speakers` 工具修正该场录音的说话人标签（原标签若已是具名人仅局部串轨必须用 `scope='selection'` 传精确 `span_ids`；整组匿名 `[说话人 N]` 可用 `scope='cluster'`），并同步创建或更新 `people/<姓名>.md` 人物活页！
 - 对仍无法确认身份的说话人，在笔记中自然记为同场参与者，绝不把他人发言当成用户本人的偏好、承诺或健康状态。
 先对照已有记忆与笔记，有变化或演进时保留精炼时间线脉络（将“明天/上周”换算为绝对日期 `YYYY-MM-DD`），用户明确纠正优先，已完成的承诺及时在笔记与记忆中更新或归档清理。

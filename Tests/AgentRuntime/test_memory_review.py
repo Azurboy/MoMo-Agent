@@ -15,6 +15,22 @@ import memory_review as review
 
 
 class MemoryReviewTests(unittest.TestCase):
+    def test_transcript_guidance_reaches_all_dream_inputs(self):
+        import daily_review
+        import transcript_ingestion
+
+        daily_job, _ = review.enqueue_manual_dream(self.store, self.data, now=100)
+        self.store.db.execute("UPDATE memory_reviews SET first_attempt=100 WHERE id=?", (daily_job["id"],))
+        prompts = {
+            "daily and manual": daily_review.prompt(self.store, daily_job),
+            "deep review": review.prompt({"kind": "dream", "input": "{}"}),
+            "chat review": review.prompt({"kind": "chat", "input": "{}"}),
+            "transcript batch": transcript_ingestion.prompt({"source_id": "fixture", "source_revision": "1"}),
+        }
+        for route, prompt in prompts.items():
+            with self.subTest(route=route):
+                self.assertIn(review.TRANSCRIPT_GUIDANCE, prompt)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.data = Path(self.tmp.name)
