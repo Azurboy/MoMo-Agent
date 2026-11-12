@@ -153,6 +153,10 @@ def _extract_receipt(output):
     raise ValueError("no memory_review receipt found")
 
 
+class InvalidReviewReceipt(Conflict):
+    code = "review_invalid_receipt"
+
+
 def outcome(home, session, output):
     """A completed run is not proof that memory was written, or even reviewed."""
     try:
@@ -161,7 +165,7 @@ def outcome(home, session, output):
         if kind not in {"updated", "no_change"} or not isinstance(reason, str) or not reason.strip():
             raise ValueError("invalid receipt")
     except (ValueError, TypeError, KeyError, AttributeError) as error:
-        raise Conflict("Memory review has no valid completion receipt") from error
+        raise InvalidReviewReceipt("Memory review has no valid completion receipt") from error
     writes = successful_writes(home, session)
     last_content = _last_write_content(home, session)
     if last_content is not None:
@@ -171,9 +175,9 @@ def outcome(home, session, output):
         except (ValueError, TypeError, AttributeError):
             succeeded = False
         if not succeeded:
-            raise Conflict('Memory review ended with an unresolved native write failure')
+            raise InvalidReviewReceipt('Memory review ended with an unresolved native write failure')
     if kind == "updated" and not writes:
-        raise Conflict("Memory review claimed an update without a successful native write")
+        raise InvalidReviewReceipt("Memory review claimed an update without a successful native write")
     return {"outcome": "updated" if writes else "no_change", "reason": reason[:500],
             "native_writes": writes, "completed_at": time.time()}
 
@@ -573,7 +577,7 @@ STALLED_REVIEW = "review_read_loop"
 
 def handle_failed_run(store, table, job, snapshot):
     error = snapshot.get("error") or "Native review failed"
-    if error == STALLED_REVIEW or not retry_completed(store, table, job, error):
+    if error in (STALLED_REVIEW, InvalidReviewReceipt.code) or not retry_completed(store, table, job, error):
         raise Conflict(str(error))
 
 

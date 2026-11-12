@@ -234,8 +234,42 @@ class MemoryReviewTests(unittest.TestCase):
                 output = gateway._call_configured_llm_memory_review(session, "review", heartbeat=progress)
                 self.assertEqual(review.outcome(self.data / "hermes", session, output)["outcome"], "no_change")
                 self.assertEqual(model.call_count, 21)
-                self.assertEqual(progress.call_count, 21)
+                self.assertEqual(progress.call_count, 41)
         self.assertFalse(ContextService.review_timed_out({"first_attempt": 10, "replay_before": 400}, {"updated_at": 3999}, 4000))
+
+    def test_unverified_update_can_finish_its_write_in_the_same_run(self):
+        from superagent_gateway import SuperAgentGateway
+        gateway = SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data = self.data
+        session = "momo-review-correct-update"
+        updated = json.dumps({"memory_review": {"outcome": "updated", "reason": "已整理笔记"}})
+        write = {"id": "write", "function": {"name": "notebook", "arguments": json.dumps({
+            "action": "write", "path": "projects/receipt.md", "content": "# 已核对",
+        })}}
+        def reply(message):
+            return {"choices": [{"message": message}]}
+        def completion(*, messages, **kwargs):
+            if messages[-1]["role"] == "tool":
+                self.assertTrue(json.loads(messages[-1]["content"])["success"])
+                return reply({"content": updated})
+            if len(messages) == 2:
+                return reply({"content": updated})
+            self.assertEqual(messages[-2]["content"], updated)
+            self.assertIn("without a successful native write", messages[-1]["content"])
+            return reply({"tool_calls": [write]})
+        with patch("superagent_gateway.resolve_superagent_llm", return_value={"dsh_provider":"antigravity","model_id":"mock"}):
+            with patch("antigravity_bridge.run_antigravity_completion", side_effect=completion) as model:
+                output = gateway._call_configured_llm_memory_review(session, "review")
+                self.assertEqual(model.call_count, 3)
+                self.assertEqual(review.outcome(self.data/"hermes", session, output)["native_writes"], 1)
+            with patch("antigravity_bridge.run_antigravity_completion", return_value=reply({"content": updated})) as model:
+                with self.assertRaises(review.InvalidReviewReceipt):
+                    gateway._call_configured_llm_memory_review("momo-review-no-write", "review")
+                self.assertEqual(model.call_count, 2)
+        job, _ = review.enqueue_manual_dream(self.store, self.data)
+        with self.assertRaises(Conflict):
+            review.handle_failed_run(self.store, "memory_reviews", job, {"error": review.InvalidReviewReceipt.code})
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM memory_reviews").fetchone()[0], 1)
 
     def test_stalled_or_unverified_batch_keeps_evidence_and_creates_no_retry(self):
         self.source()

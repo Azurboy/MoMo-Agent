@@ -35,7 +35,7 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
-from memory_review import STALLED_REVIEW
+from memory_review import InvalidReviewReceipt, STALLED_REVIEW, outcome as verify_review_receipt
 from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
@@ -2066,6 +2066,8 @@ class SuperAgentGateway:
             err_code = notice["short_error"] if notice else "execution_failed"
             if isinstance(exc, RepeatedToolRead):
                 err_code = STALLED_REVIEW
+            elif isinstance(exc, InvalidReviewReceipt):
+                err_code = InvalidReviewReceipt.code
             with self.bridge.db:
                 self.bridge.db.execute(
                     "UPDATE api_runs SET status='failed', error_text=?, updated_at=? WHERE run_id=?",
@@ -2587,7 +2589,10 @@ class SuperAgentGateway:
 
         def execute_tool(name, args):
             check_active()
-            return run_tool(name, args)
+            result = run_tool(name, args)
+            if heartbeat is not None:
+                heartbeat()
+            return result
 
         def check_round():
             check_active()
@@ -2600,6 +2605,31 @@ class SuperAgentGateway:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ]
+
+        correction_requested = False
+
+        def verified_output(raw_text):
+            nonlocal correction_requested
+            check_active()
+            output = self._finalize_memory_review_output(session_id, raw_text)
+            try:
+                verify_review_receipt(self.data / "hermes", session_id, output)
+            except InvalidReviewReceipt as error:
+                if correction_requested:
+                    raise
+                correction_requested = True
+                messages.extend([
+                    {"role": "assistant", "content": raw_text or "(empty response)"},
+                    {"role": "user", "content": (
+                        f"The runtime could not verify your completion receipt: {error}. "
+                        "Continue from the evidence and tool results already in this session. "
+                        "If a change is needed, complete it with the appropriate tool and check its result. "
+                        "Keep successful writes. If the material genuinely needs no change, explain why. "
+                        "Then return the requested memory_review JSON receipt."
+                    )},
+                ])
+                return None
+            return output
 
         if provider == "antigravity":
             from antigravity_bridge import run_antigravity_completion
@@ -2617,7 +2647,10 @@ class SuperAgentGateway:
                 msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
-                    return self._finalize_memory_review_output(session_id, str(msg.get("content") or "").strip())
+                    output = verified_output(str(msg.get("content") or "").strip())
+                    if output is not None:
+                        return output
+                    continue
                 messages.append(
                     {
                         "role": "assistant",
@@ -2661,7 +2694,10 @@ class SuperAgentGateway:
                     text_blocks = [getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text"]
                     tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
                     if not tool_uses:
-                        return self._finalize_memory_review_output(session_id, "".join(text_blocks).strip())
+                        output = verified_output("".join(text_blocks).strip())
+                        if output is not None:
+                            return output
+                        continue
                     messages.append(
                         {
                             "role": "assistant",
@@ -2719,7 +2755,10 @@ class SuperAgentGateway:
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None) or []
                 if not tool_calls:
-                    return self._finalize_memory_review_output(session_id, (getattr(msg, "content", None) or "").strip())
+                    output = verified_output((getattr(msg, "content", None) or "").strip())
+                    if output is not None:
+                        return output
+                    continue
                 messages.append(
                     {
                         "role": "assistant",
