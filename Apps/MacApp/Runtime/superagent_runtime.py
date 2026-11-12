@@ -294,6 +294,8 @@ MOMO_PROMPT_CONFIG = {
         "runtime/handoff/worker": {
             "text": (
                 "- **显式对话工单（非 `Proactively accepted`）**：确需用户拍板唯一关键决策时，把可直接发给用户的完整操作写进 `human_action`：若要选身份，说清可用选项、各自能读什么、用户在当前聊天应回复什么；若要登录，说清 iPhone 和 Mac 上分别从哪里点、确认什么、完成后如何继续。通过 `orchestrator_report` 传 `human_action`（附引发该问题的 `question_for_trigger_id`）；当收到用户的具体追问，将可直接交付的回答写进 summary，并用 `reply_to_trigger_id` 对应这条消息；若仍需此人确认，可用同一个 `question_for_trigger_id` 在 blocked 报告中一次说清。解决后传 `human_action=null` 或上报 `ready` 清除。\n"
+                "- 用户在 MoMo 聊天里等你办事。受阻时先自己查原工单、已有授权、工具状态与可安全重试的步骤。不要让用户看工单、找日志、复制命令或自行核对结果。遇到身份边界不要绕过。\n"
+                "- 排除技术问题后，需要用户提供事实或选择时，在 human_action 里写一条能直接发到原聊天的消息：先讲已核实的结果、目前缺什么，再问一个用户用文字就能回答的问题。涉及权限时讲清作用范围；用户在聊天里的选择不代替服务商要求的本人同意。若无需用户决定，使用 reply_to_trigger_id 把已知结果与限制报给原消息，别制造确认。\n"
                 "- **主动规则工单（`Proactively accepted under ...` / `strength=inferred`）**：**严禁传 `human_action`，也严禁上报 `state='blocked'` 向用户追问**！确定性修改工单若发现前置文件缺失或方向未定则静默 `dropped`；探索调研工单若存在多种合理方向，应在 `.html` / `.md` 方案文稿中客观对比各路径的优劣与推荐建议供用户审阅，若毫无实质可交付增量则直接调用 `orchestrator_report(state='dropped', summary='说明核查经过与静默关闭原因')` 结案。\n"
                 "- 上报成功后无需在最终纯文本回复中重复粘贴报告全文。"
             )
@@ -302,7 +304,8 @@ MOMO_PROMPT_CONFIG = {
             "text": (
                 "- 仅当显式工单（`strength=explicit`）存在活跃的 `ticket.attention` 时，用 `orchestrator_reply(purpose='attention', ticket_id=..., human_action=ticket.attention.question, text=...)` 从报告读取用户所问的操作说明，在同一条消息内回答追问并保留完整问题和已验证的入口。\n"
                 "- 当 worker_report 含 `answer_to` 时，读取报告后用 purpose='answer' 回复该 trigger 的问题。\n"
-                "- 没有结构化 `ticket.attention` 的 `blocked` / `failed` / `dropped` 报告（以及任何 `strength=inferred` 主动工单的非 `ready` 报告）均不属于打扰用户的理由，严禁自行编造追问或发送报错消息。"
+                "- 用户主动发来的任务若 blocked / failed 且缺少结构化问题，先读 ticket/<id>/result，尽量用已确认事实自行排除。需要补充时用 orchestrator_ticket_note 告诉 Worker 缺哪项事实，让它通过 human_action 提出一个可在原聊天回答的问题；无需人操作时让它用 reply_to_trigger_id 报出可交付的部分答复。收到问题或答复立即通过聊天交给用户。用户用短句回答时结合最近待答问题接着办，只有指向不明才追问。\n"
+                "- 主动观察工单（strength=inferred）的非 ready 报告和静默 dropped 继续留在内部。"
             )
         },
     },

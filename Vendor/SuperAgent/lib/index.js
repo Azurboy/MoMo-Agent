@@ -1568,7 +1568,8 @@ var Replies = class extends EnginePart {
 			channel,
 			text,
 			kind: "reply",
-			...ticket ? { ticketId: ticket.id } : {}
+			...ticket ? { ticketId: ticket.id } : {},
+			...attention ? { attentionId: attention.id } : {}
 		});
 		if (request.purpose === "answer" && ticket && trigger && ticket.answers?.includes(trigger.id)) {
 			ticket.answers = ticket.answers.filter((item) => item !== trigger.id);
@@ -10730,6 +10731,10 @@ function executorTools(host, ticket) {
 			execute: async (args, signal) => {
 				const current = host.store.tickets.get(ticketId);
 				if (!current || !liveTicket(current)) throw new Error("Ticket ended (PR was closed or work finished); do not resume it");
+				if (current.mandate.strength === "explicit" && (args.state === "blocked" || args.state === "failed") && !args.human_action && !(current.attention && args.human_action === void 0) && !args.reply_to_trigger_id) {
+					const origin = host.store.triggers.get(current.origin.triggerId);
+					if (origin?.human && origin.channel?.source === "momo" && origin.channel.address.stream === "chat") throw new Error(`The person is waiting in chat. Diagnose what you can. If you need their input, put one question they can answer here in human_action. If no input is needed, give the verified partial result and blocker in summary with reply_to_trigger_id=${origin.id}.`);
+				}
 				const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : void 0;
 				return host.store.atomic(() => {
 					const refused = pull && claimPull(host.github, ticketId, pull);

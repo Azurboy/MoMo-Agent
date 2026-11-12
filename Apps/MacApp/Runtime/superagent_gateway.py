@@ -1320,6 +1320,28 @@ class SuperAgentGateway:
             and relay_h.get("state") == "ready"
             and relay_h.get("detail") == "Nothing waiting"
         )
+        # Older gateways stored a delivered question as a completed reply. Match the exact
+        # receipt so another turn on the same ticket, or a later actual result, stays settled.
+        for ticket in tickets_by_id.values():
+            attention = ticket.get("attention")
+            if ticket.get("ended") or not isinstance(attention, dict) or not attention.get("id"):
+                continue
+            key = json.dumps(["attention-reply", attention["id"]], ensure_ascii=False, separators=(",", ":"))
+            receipt = hashlib.sha256(key.encode()).hexdigest()[:32]
+            question = self.store.db.execute(
+                """SELECT q.run_id FROM messages q WHERE q.source_key=?
+                   AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.run_id=q.run_id
+                       AND m.role='assistant' AND m.seq>q.seq)""", (f"superagent:{receipt}",),
+            ).fetchone()
+            if question:
+                with self.bridge.db:
+                    self.bridge.db.execute(
+                        """UPDATE chat_runs SET status='waiting_for_input', wait_reason='clarify',
+                           error=NULL, cancellable=1, updated_at=?
+                           WHERE run_id=? AND ticket_id=? AND status IN ('completed','failed')""",
+                        (now, question["run_id"], ticket["id"]),
+                    )
+
         # Reopen previously failed chat_runs if their open ticket was manually or automatically resumed.
         failed_with_ticket = self.bridge.db.execute(
             "SELECT run_id, ticket_id FROM chat_runs WHERE status='failed' AND ticket_id IS NOT NULL"
@@ -1374,6 +1396,10 @@ class SuperAgentGateway:
                 if ticket.get("attention"):
                     new_status = "waiting_for_input"
                     wait_reason = "clarify"
+                    err = None
+                elif row["status"] == "waiting_for_input" and t_action in ("running", "starting") and not ended_info:
+                    new_status = "started"
+                    wait_reason = None
                 elif ended_outcome in ("stopped", "canceled", "cancelled") or t_state in ("stopped", "canceled", "cancelled"):
                     new_status = "cancelled"
                     wait_reason = None
@@ -4782,6 +4808,7 @@ class SuperAgentGateway:
             ).fetchone()
 
         is_ack = kind == "acknowledgement"
+        is_question = kind == "reply" and bool(body.get("attention_id"))
         if is_ack and (not chat_channel or linked_run["status"] not in ("queued", "started")):
             # Proactive work is silent until delivery. A late ack must not reopen a settled turn.
             with self.bridge.db:
@@ -4850,6 +4877,13 @@ class SuperAgentGateway:
                     "UPDATE chat_runs SET status='started', ticket_id=coalesce(?, ticket_id), updated_at=? WHERE run_id=?",
                     (ticket_id, now, run_id),
                 )
+            elif is_question:
+                self.bridge.db.execute(
+                    """UPDATE chat_runs SET status='waiting_for_input', ticket_id=coalesce(?, ticket_id),
+                       wait_reason='clarify', error=NULL, cancellable=1, updated_at=?
+                       WHERE run_id=? AND status IN ('queued','started','waiting_for_input','failed')""",
+                    (ticket_id, now, run_id),
+                )
             else:
                 self.bridge.db.execute(
                     """UPDATE chat_runs
@@ -4861,7 +4895,8 @@ class SuperAgentGateway:
         self._emit_run_stream(run_id, event)
         if not is_ack:
             self.push.emit(f"terminal:superagent:{out_id}", "final", run_id=run_id, message=event["message"], historical=False)
-            self._finish_run_stream(run_id, "completed")
+            if not is_question:
+                self._finish_run_stream(run_id, "completed")
         self.publish_live_state()
         return web.json_response({"status": "sent", "message_id": msg_id})
 

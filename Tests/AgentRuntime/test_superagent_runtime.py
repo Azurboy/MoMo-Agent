@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -225,6 +226,48 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
                     (first["run_id"], "我去核对会议记录。"), (second["run_id"], "我来看看今天的安排。"),
                     (second["run_id"], "下午三点有评审。"), (first["run_id"], "会议记录核对好了。"),
                 ])
+
+    async def test_blocker_question_accepts_an_answer_in_chat_and_stays_open_until_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "Agent"
+            gateway = SuperAgentGateway(data, momo_agent.initialize(data, 19830), python_executable=Path(sys.executable),
+                                        base_env=momo_agent.child_environment(data), manage_dsh=False)
+            async with TestClient(TestServer(gateway.create_app())) as client:
+                auth = {"Authorization": f"Bearer {gateway.api_key}"}
+                path = "/momo/v1/conversation/messages"
+                turn = await (await client.post(path, headers=auth, json={
+                    "operation_id": str(uuid.uuid4()), "content": "复查群里的进展",
+                })).json()
+                gateway.bridge_secret = "fixture"
+                question_receipt = hashlib.sha256(b'["attention-reply","question"]').hexdigest()[:32]
+                out = {"id": question_receipt, "kind": "reply", "ticket_id": "ticket", "attention_id": "question",
+                       "text": "可以沿用原身份只读吗？", "channel": {"source": "momo", "thread": "chat:" + turn["work_id"]}}
+                async def deliver(message):
+                    response = await client.post("/momo/internal/superagent/outbound", json=message,
+                                                 headers={"x-momo-bridge": gateway.bridge_secret})
+                    self.assertEqual(response.status, 200)
+                await deliver(out)
+                await deliver(out)
+                def state():
+                    return gateway.bridge.db.execute("SELECT status FROM chat_runs WHERE run_id=?", (turn["run_id"],)).fetchone()[0]
+                self.assertEqual(state(), "waiting_for_input")
+                # Simulate an older gateway's on-disk state when upgrading with a question pending.
+                with gateway.bridge.db:
+                    gateway.bridge.db.execute("UPDATE chat_runs SET status='completed' WHERE run_id=?", (turn["run_id"],))
+                pending = [{"id": "ticket", "state": "open", "action": "answer", "attention": {"id": "question"}}]
+                gateway._apply_dsh_projections({}, pending, [])
+                self.assertEqual(state(), "waiting_for_input")
+                reply = await client.post(path, headers=auth, json={
+                    "operation_id": str(uuid.uuid4()), "content": "可以，只读", "intent": "steer",
+                    "target_run_id": turn["run_id"], "execution_generation": 1, "work_id": turn["work_id"],
+                })
+                self.assertEqual(reply.status, 200, await reply.text())
+                await deliver({**out, "id": "result", "attention_id": None, "text": "已复查。"})
+                self.assertEqual(state(), "completed")
+                gateway._apply_dsh_projections({}, pending, [])
+                self.assertEqual(state(), "completed")
+                history = await (await client.get(path, headers=auth)).json()
+                self.assertEqual([m["content"] for m in history["data"]], ["复查群里的进展", "可以沿用原身份只读吗？", "可以，只读", "已复查。"])
 
     async def test_routed_followup_waits_for_its_own_reply(self):
         with tempfile.TemporaryDirectory() as tmp:

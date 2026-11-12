@@ -228,11 +228,12 @@ describe('momoKind policy and loopback bridge', () => {
         id: 'reply-1',
         kind: 'reply',
         ticketId: 'ticket-1',
-        text: '已为您整理好周报草稿。',
+        attentionId: 'question-1',
+        text: '周报要覆盖上周吗？',
         channel: ingested[0]!.channel!,
       })
       expect(sent).toBe('sent')
-      expect(outboundReceived).toEqual([expect.objectContaining({ id: 'reply-1', ticket_id: 'ticket-1', text: '已为您整理好周报草稿。' })])
+      expect(outboundReceived).toEqual([expect.objectContaining({ id: 'reply-1', ticket_id: 'ticket-1', attention_id: 'question-1', text: '周报要覆盖上周吗？' })])
       expect(seenHeaders.every(value => value === 'bridge-secret-123')).toBe(true)
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
