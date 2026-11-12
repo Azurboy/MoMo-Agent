@@ -38,13 +38,14 @@ public struct ConversationMessage: Codable, Sendable, Equatable, Identifiable {
     public let createdAt: Double
     public let operationID: UUID?
     public let runID: String?
+    var sourceKey: String? = nil
     public var sourceSession: String? = nil
     public var deliveryState: String? = nil
     public var attachments: [AgentAttachment]? = nil
     enum CodingKeys: String, CodingKey {
         case id, seq, role, content
         case createdAt = "created_at", operationID = "operation_id", runID = "run_id", sourceSession = "source_session"
-        case deliveryState = "delivery_state", attachments
+        case sourceKey = "source_key", deliveryState = "delivery_state", attachments
     }
 }
 

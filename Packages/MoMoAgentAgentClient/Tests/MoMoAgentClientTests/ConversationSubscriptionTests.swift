@@ -201,6 +201,35 @@ import XCTest
         let requests = await wire.requests
         XCTAssertFalse(requests.contains { $0.httpMethod == "POST" })
     }
+    func testReconnectingLegacyJournalAcceptsRevisedDreamBriefingOnly() async throws {
+        for briefing in [true, false] {
+            let (wire, store, file, client) = try fixture()
+            await wire.appendMessage("current text", sourceKey: briefing ? "dream-briefing:updated" : nil)
+            store.foreground()
+            try await eventually { store.messages.count == 1 }
+            store.background()
+            var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+            var rows = try XCTUnwrap(saved["messages"] as? [[String: Any]])
+            rows[0]["content"] = "previous text"
+            rows[0].removeValue(forKey: "source_key")
+            saved["messages"] = rows
+            saved.removeValue(forKey: "eventCursor")
+            try JSONSerialization.data(withJSONObject: saved).write(to: file)
+            let restored = try RemoteTaskStore(file: file, connection: store.connection, client: client)
+            restored.foreground()
+            defer { restored.background() }
+            if briefing {
+                try await eventually { restored.messages.first?.content == "current text" && restored.connectionState == .ready }
+                XCTAssertEqual(restored.messages.map(\.id), store.messages.map(\.id))
+                let reopened = try RemoteTaskStore(file: file, connection: store.connection, client: client)
+                XCTAssertEqual(reopened.messages, restored.messages)
+            } else {
+                try await eventually { restored.connectionState == .unavailable }
+                XCTAssertEqual(restored.messages.first?.content, "previous text")
+            }
+        }
+    }
+
     func testSnapshotRecoveryFillsGapEvenWhenOlderRowsAreAlreadyCached() async throws {
         let (wire, store, file, client) = try fixture()
         await wire.seed(5)
@@ -486,8 +515,9 @@ private actor LiveWire: AgentTransport {
     func rejectPostOnce() { postRejection = 503 }
     func heartbeat() { for stream in streams.values { stream.yield(frame(["conversation_id":conversationID,"kind":"heartbeat"])) } }
     func seed(_ count: Int) async { for n in 0..<count { appendMessage("history \(n)") } }
-    func appendMessage(_ content: String, role: String = "assistant", run: String? = nil, operation: String? = nil) {
+    func appendMessage(_ content: String, role: String = "assistant", run: String? = nil, operation: String? = nil, sourceKey: String? = nil) {
         var message: [String: Any] = ["id":UUID().uuidString, "seq":messages.count+1, "role":role, "content":content, "created_at":1]
+        message["source_key"] = sourceKey
         message["run_id"] = run; message["operation_id"] = operation
         messages.append(message); emit("message.created", ["message":message])
     }

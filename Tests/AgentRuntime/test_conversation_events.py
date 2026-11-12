@@ -1,5 +1,6 @@
 """Durable replay over a single paired HTTP stream, including idle revocation."""
 import asyncio
+import gzip
 import json
 from pathlib import Path
 import sys
@@ -33,6 +34,9 @@ class ConversationEventsTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({'run_id':row['run_id'], 'status':'queued'})
         app = web.Application(); app.router.add_get('/momo/v1/conversation/subscribe', subscribe)
         app.router.add_post('/momo/v1/conversation/messages', submit)
+        async def snapshot(request):
+            return web.json_response({'history': 'conversation' * 10_000})
+        app.router.add_get('/momo/v1/conversation/snapshot', snapshot)
         self.native = TestServer(app); await self.native.start_server()
         self.session = ClientSession()
         service = AccessService.__new__(AccessService); service.tunnel = SimpleNamespace(enabled=True)
@@ -56,6 +60,19 @@ class ConversationEventsTests(unittest.IsolatedAsyncioTestCase):
                 if line.startswith(b'data:'):
                     value=json.loads(line[5:])
                     if kind is None or value['kind']==kind:return value
+
+    async def test_snapshot_compression_preserves_history_for_both_clients(self):
+        url = self.public.make_url('/momo/v1/conversation/snapshot')
+        async with ClientSession(auto_decompress=False) as client:
+            async with client.get(url, headers={**self.headers, 'Accept-Encoding': 'identity'}) as plain:
+                self.assertEqual(plain.status, 200)
+                self.assertNotIn('Content-Encoding', plain.headers)
+                original = await plain.read()
+            async with client.get(url, headers={**self.headers, 'Accept-Encoding': 'gzip'}) as compressed:
+                self.assertEqual(compressed.headers['Content-Encoding'], 'gzip')
+                body = await compressed.read()
+                self.assertLess(len(body), len(original))
+                self.assertEqual(gzip.decompress(body), original)
 
     async def test_two_independent_posts_and_background_reply_share_one_subscription(self):
         async with self.session.get(self.public.make_url('/momo/v1/conversation/subscribe?after=0'),headers=self.headers) as stream:

@@ -1022,12 +1022,21 @@ public final class RemoteTaskStore {
         loadOlderMessages()
     }
 
-    private func mergeConversationMessages(_ incoming: [ConversationMessage]) throws {
+    private func mergeConversationMessages(_ incoming: [ConversationMessage], fromHistory: Bool) throws {
         for message in incoming {
             guard message.seq > 0, !message.id.isEmpty, ["user", "assistant"].contains(message.role) else { throw StoreError.invalidResponse }
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
                 let saved = messages[index]
-                guard saved.seq == message.seq, saved.role == message.role, saved.content == message.content else { throw StoreError.invalidResponse }
+                guard saved.seq == message.seq, saved.role == message.role else { throw StoreError.invalidResponse }
+                if saved.content != message.content {
+                    // Dream rewrites the same briefing row. A replayed creation event can still contain its old text.
+                    guard message.role == "assistant", message.sourceKey?.hasPrefix("dream-briefing:") == true,
+                          saved.sourceKey?.hasPrefix("dream-briefing:") != false,
+                          saved.createdAt == message.createdAt, saved.runID == nil, message.runID == nil,
+                          saved.operationID == nil, message.operationID == nil else { throw StoreError.invalidResponse }
+                    if fromHistory { messages[index] = message }
+                    continue
+                }
                 if saved.runID != message.runID || saved.operationID != message.operationID || saved.deliveryState != message.deliveryState || (message.attachments != nil && saved.attachments != message.attachments) {
                     messages[index] = message
                 }
@@ -1087,7 +1096,7 @@ public final class RemoteTaskStore {
         let oldReplies = sharedRunReplies
         let oldCursor = eventCursor, oldMessageCursor = messageCursor, oldBefore = olderMessagesBefore
         do {
-            try mergeConversationMessages(value.messages.data)
+            try mergeConversationMessages(value.messages.data, fromHistory: true)
             sharedRuns.removeAll { !$0.isTerminal }
             for run in value.runs { try applyLiveRun(run) }
             applyLiveWork(value.backgroundWork, states: value.messageStates, notice: value.providerNotice)
@@ -1124,7 +1133,7 @@ public final class RemoteTaskStore {
             switch value.kind {
             case "message.created":
                 guard let message = value.message else { throw StoreError.invalidResponse }
-                try mergeConversationMessages([message])
+                try mergeConversationMessages([message], fromHistory: false)
                 if message.role == "assistant", let index = tasks.firstIndex(where: { $0.run?.runID == message.runID }), tasks[index].firstCommittedTextAt == nil {
                     tasks[index].firstCommittedTextAt = now()
                 }
@@ -1183,7 +1192,7 @@ public final class RemoteTaskStore {
                     try Task.checkCancellation()
                     guard page.data.allSatisfy({ $0.seq < before }),
                           !page.hasMore || page.nextCursor < before && !page.data.isEmpty else { throw StoreError.invalidResponse }
-                    try self.mergeConversationMessages(page.data)
+                    try self.mergeConversationMessages(page.data, fromHistory: true)
                     self.olderMessagesBefore = page.hasMore ? page.nextCursor : nil
                     try self.persist(tasks: self.tasks, draft: self.draft)
                 }

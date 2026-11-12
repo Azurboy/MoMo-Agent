@@ -129,9 +129,14 @@ class AccessService:
         body = await request.read() if request.method == 'POST' else None
         async with await self.upstream(request.method, target, body, context, headers) as response:
             data = await response.read()
-            return web.Response(status=response.status, body=data, content_type=response.content_type,
+            outgoing = web.Response(status=response.status, body=data, content_type=response.content_type,
+                zlib_executor_size=64 * 1024,
                 headers={'Cache-Control': response.headers.get('Cache-Control', 'no-store'),
                          **({'Retry-After':response.headers['Retry-After']} if 'Retry-After' in response.headers else {})})
+            if target == '/momo/v1/conversation/snapshot' and response.status == 200:
+                outgoing.headers['Vary'] = 'Accept-Encoding'
+                outgoing.enable_compression()
+            return outgoing
 
     async def desktop_frames(self, request):
         feed = DesktopFrameFeed(self.desktop, self.token(request))
