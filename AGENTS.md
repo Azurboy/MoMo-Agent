@@ -1,5 +1,7 @@
 # MoMo Agent 项目规则
 
+三端界面、品牌组件与宣发原图的使用方式见[设计指南](design.md)。
+
 ## 当前品牌（2026-10-30）
 
 用户确认产品名称为 **MoMo Agent**。2026-10-30 用户要求应用图标全部改为现有 MoMo Avatar 的正面、双眼睁开姿态，不再使用 M。手机、手表、Mac、菜单栏、应用内品牌入口与 README 图标统一从同一角色模型导出，源图及规则见 [品牌资源](docs/design/brand/momo-agent.md)。助手角色的昵称仍为 MoMo，产品字标继续使用既有 Pebble 字形；动态 Avatar 保留原来的表情与动作。此决定覆盖下方「原图标保持不变」、M 图标及旧显示名称约定；Beta 显示为 MoMo Agent Beta。不要改动 Bundle ID、Keychain、配对协议标识或用户数据目录。
