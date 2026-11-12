@@ -401,8 +401,19 @@ final class EmbeddedTailnet {
         await close()
     }
 
+    private func owns(_ pool: URLSession) -> Bool {
+        pool === session || pool === interactiveSession || pool === desktopControlSession || pool === desktopMediaSession
+    }
+
+    func dataTask(for request: URLRequest, using pool: URLSession) throws -> URLSessionDataTask {
+        // Foundation raises an Objective-C exception if a task is created after invalidation.
+        // Check ownership and create the task together on the same actor that retires pools.
+        guard owns(pool) else { throw URLError(.networkConnectionLost) }
+        return pool.dataTask(with: request)
+    }
+
     func failedRequest(_ error: Error, session failedSession: URLSession) {
-        guard failedSession === session || failedSession === interactiveSession || failedSession === desktopControlSession || failedSession === desktopMediaSession else { return }
+        guard owns(failedSession) else { return }
         guard !AgentTransportFailure.isCancelled(error) else { return }
         let nsError = error as NSError
         let shouldInvalidate: Bool

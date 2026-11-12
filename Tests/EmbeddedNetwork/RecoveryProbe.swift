@@ -23,8 +23,8 @@ import TailscaleKit
                 guard passed else { throw Check.failed(message) }
             }
             @Sendable func read(_ session: URLSession) async throws {
-                let (_, response) = try await session.data(from: url)
-                try check((response as? HTTPURLResponse)?.statusCode == 200, "Private HTTP failed")
+                let response = try await TailnetChunkStream.read(URLRequest(url: url), session: session, network: client, limit: 1024)
+                try check(response.status == 200, "Private HTTP failed")
             }
             let original = try await client.connectedSession(peer: address)
             let missingPeer = Task { try await client.connectedSession(peer: "100.127.255.254") }
@@ -68,7 +68,7 @@ import TailscaleKit
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 2
                 do {
-                    _ = try await current.data(for: request)
+                    _ = try await TailnetChunkStream.read(request, session: current, network: client, limit: 1024)
                     throw Check.failed("Offline Mac accepted a request")
                 } catch let error as URLError {
                     client.failedRequest(error, session: current)
@@ -90,6 +90,10 @@ import TailscaleKit
             try check(recovered !== original && client.generation != generation, "Dead local proxy was not rebuilt")
             try check(client.address == addressBefore, "Recovery changed the paired node address")
             try await read(recovered)
+            do {
+                try await read(original)
+                throw Check.failed("A late request ran on a retired pool")
+            } catch let error as URLError where error.code == .networkConnectionLost {}
             let recoveredGeneration = client.generation
             client.failedRequest(URLError(.timedOut), session: original)
             let retained = try await client.connectedSession()
@@ -99,7 +103,7 @@ import TailscaleKit
                 _ = try await client.connectedSession()
                 throw Check.failed("Logout was undone by a network request")
             } catch TailnetError.loginRequired { }
-            print("PASS: unmapped peer waits and cancels; 40 foreground reads reuse the node/session; unmapped peer and eight offline Mac requests preserve chat; HTTP resumes on the original node; dead proxy rebuilds with same address; stale failures ignored; logout stays logged out")
+            print("PASS: unmapped peer waits and cancels; 40 foreground reads reuse the node/session; unmapped peer and eight offline Mac requests preserve chat; HTTP resumes on the original node; dead proxy rebuilds with same address; late requests on retired pools fail safely; stale failures ignored; logout stays logged out")
         } catch {
             await client.close(); try? await server.close()
             throw error

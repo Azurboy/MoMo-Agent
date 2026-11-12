@@ -185,6 +185,11 @@ import MoMoAgentClient
         network.failedRequest(URLError(.badURL), session: current)
         let repairedPool = try await network.connectedSession()
         let preservedPool = try await network.connectedSession(interactive: true)
+        do {
+            let stale = URLRequest(url: URL(string: "http://100.64.0.2:8767/")!)
+            _ = try await TailnetChunkStream.open(stale, session: current, network: network)
+            preconditionFailure("A late request must not start on a retired pool")
+        } catch let error as URLError where error.code == .networkConnectionLost {}
         precondition(repairedPool !== current, "A healthy probe must not retain a failed URLSession pool")
         precondition(preservedPool === otherPool && Probe.counts.0 == nodesBefore, "Repair only the failed pool, not the node or active chat")
         let control = try await network.connectedSession(desktopControl: true)
