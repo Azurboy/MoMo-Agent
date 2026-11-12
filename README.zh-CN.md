@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/readme-icon-rounded.png" width="96" height="96" alt="MoMo Agent Icon" />
+<img src="docs/assets/readme-cover.jpg" width="100%" alt="炭灰色画面中央是白色 MoMo Agent 字标，四周画着咖啡杯、钥匙、车票和腕表。" />
 
 # MoMo Agent
 

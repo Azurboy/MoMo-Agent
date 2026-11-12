@@ -6,7 +6,7 @@
 
 - `avatar-front.svg`：当前完整图标母版，沿用动态 Avatar 深色外观的 `#171717` 底色与 `#F4F4F4` 角色。
 - `avatar-front-template.svg`：同一正面轮廓与透明眼睛，用于 Mac 菜单栏模板。
-- README 使用 `docs/assets/readme-icon-rounded.png`：同一矢量母版的透明圆角导出，避免 GitHub 直接展示方形底板。从仓库根目录运行 `swift docs/design/brand/export-readme-icon.swift` 可重新生成；平台应用图标仍交给系统施加遮罩。
+- 中英文 README 首图共用 `docs/assets/readme-cover.jpg`（03E「炭纸夜绘」）。原圆角图标 `docs/assets/readme-icon-rounded.png` 由同一矢量母版导出。从仓库根目录运行 `swift docs/design/brand/export-readme-icon.swift` 可重新生成；平台应用图标仍交给系统施加遮罩。
 - iPhone、Watch：同源 1024 × 1024 不透明 PNG，由系统施加平台遮罩。
 - Mac：使用 Icon Composer 原生矢量包 `MacAppIcon.icon`（`#171717` 满版底色 + `#F4F4F4` 角色矢量前景），由 `actool` 同时编译 macOS Tahoe Liquid Glass 无灰框满版图标栈与向下兼容的 `MacAppIcon.icns`；菜单栏使用透明模板。
 - 应用内品牌入口、任务状态图、README 的 `app-icon.png` 与 `momo-avatar.png` 同步更新。Pebble 字标、Avatar 的动态表情、Bundle ID 与用户数据保持现有行为。

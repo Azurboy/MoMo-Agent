@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/readme-icon-rounded.png" width="96" height="96" alt="MoMo Agent Icon" />
+<img src="docs/assets/readme-cover.jpg" width="100%" alt="MoMo Agent in white on charcoal, surrounded by sketches of a coffee cup, keys, a ticket, and a wristwatch." />
 
 # MoMo Agent
 
