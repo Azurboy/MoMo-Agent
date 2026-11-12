@@ -34,8 +34,10 @@ it.runIf(!!process.env.MOMO_DESKTOP_E2E)('operates the real AppKit fixture throu
   const text = 'SuperAgent 原生电脑工具 E2E 通过'
   expect((await call('computer_action', { ref: ref(tree, '测试内容'), action: 'set_value', text })).ok).toBe(true)
   tree = await snapshot()
+  expect((await call('computer_action', { ref: ref(tree, '启用测试选项'), action: 'toggle' })).ok).toBe(true)
+  tree = await snapshot()
   expect((await call('computer_action', { ref: ref(tree, '保存测试内容'), action: 'click' })).ok).toBe(true)
-  await expect.poll(async () => JSON.parse(await readFile(join(output, 'fixture-state.json'), 'utf8'))).toEqual({ saves: 3, text, checked: true })
+  await expect.poll(async () => JSON.parse(await readFile(join(output, 'fixture-state.json'), 'utf8'))).toEqual({ saves: 1, text, checked: true })
   expect(JSON.stringify(await snapshot())).toContain(text)
   ticket = { ...ticket, assignments: [] }
   await expect(call('computer_snapshot', { app: 'MoMo Desktop Fixture' })).rejects.toThrow('not running')

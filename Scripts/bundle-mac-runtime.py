@@ -28,6 +28,11 @@ def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 
+# MoMo reuses provider, web-tool and packaging libraries from this upstream.
+# Its standalone launchers and agent loop are not part of the Mac runtime.
+RETIRED_ENTRY_POINTS = {'cli.py', 'run_agent.py', 'gateway/run.py', 'hermes_cli/main.py'}
+
+
 def copy_sources(destination):
     paths = run('git', '-C', ROOT, 'ls-files', '-z', 'Apps/MacApp/Runtime', 'Apps/MacApp/Access',
                 'Apps/MacApp/Context', 'Vendor/HermesAgent', 'Vendor/HermesAgent.UPSTREAM.json',
@@ -36,8 +41,10 @@ def copy_sources(destination):
         if not raw:
             continue
         relative = Path(os.fsdecode(raw))
-        if relative.parts[:2] == ('Vendor', 'HermesAgent') and any(p in EXCLUDED for p in relative.parts[2:]):
-            continue
+        if relative.parts[:2] == ('Vendor', 'HermesAgent'):
+            upstream_path = relative.relative_to('Vendor/HermesAgent')
+            if upstream_path.as_posix() in RETIRED_ENTRY_POINTS or any(p in EXCLUDED for p in upstream_path.parts):
+                continue
         source = ROOT / relative
         if source.name == '.env' or source.is_symlink():
             raise ValueError(f'Unexpected runtime source: {relative}')

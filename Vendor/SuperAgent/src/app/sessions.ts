@@ -8,7 +8,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
-import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
+import { isCreatorRequest, mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
@@ -26,7 +26,7 @@ import type { RegisterTool, Tool } from './tools/tool.ts'
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
-  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
@@ -181,7 +181,7 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? this.workerPreset(ticketId) : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -190,6 +190,11 @@ export class Sessions {
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
+  }
+  private workerPreset(ticketId: string | undefined): string {
+    const ticket = ticketId ? this.host.store.tickets.get(ticketId) : undefined
+    const origin = ticket && this.host.store.triggers.get(ticket.origin.triggerId)
+    return isCreatorRequest(origin) ? 'cordis' : WORKER_PRESET
   }
   private effectiveRoleModel(role: 'orchestrator' | 'worker'): RoleModel | null {
     const settings = this.host.store.settings()
@@ -224,7 +229,7 @@ export class Sessions {
       const workspace = await ctx.workspaceRegistry.create(cwd)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
+        agentPreset: role === 'worker' ? this.workerPreset(ticketOfSession(id)) : ROUTER_PRESET })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
@@ -334,7 +339,9 @@ export class Sessions {
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
       const mandate = current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : ''
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${momoMemoryPromptBlock()}`
+      const creator = current && this.workerPreset(current.id) === 'cordis'
+        ? '\nThe owner selected Creator mode. For customization requests, use the Harness plugin development skill and plugin_manager. Keep extension sources under $MOMO_DATA_DIR/extensions, install from that local directory and verify activation. For tools needed in ordinary MoMo tasks, register in the worker agent scope. Report what actually runs and any restart or setup still needed. Publish only if explicitly requested.' : ''
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${creator}${momoMemoryPromptBlock()}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -353,7 +360,7 @@ export class Sessions {
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      binding.disposers.push(...this.workOnly(agent, ticket!.id, this.workerPreset(ticket!.id) === 'cordis'))
     }
   }
   /**
@@ -375,10 +382,11 @@ export class Sessions {
    * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
    * misses preset tools; the agent's own view also includes local tools such as subagent, which restrict refuses to name.
    */
-  private workOnly(agent: Agent, ticketId: string): (() => void)[] {
+  private workOnly(agent: Agent, ticketId: string, creator = false): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+    const candidates = creator ? [...WORK_TOOLS, 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query'] : WORK_TOOLS
+    const allow = candidates.filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined

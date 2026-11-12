@@ -144,11 +144,11 @@ final class RemoteContextSyncTests: XCTestCase {
     func testNativeMemoryCacheSurvivesRestartAndFailedDeleteIsNotQueued() async throws {
         let (sync, root, archive, connection) = try fixture()
         await sync.refresh()
-        XCTAssertNil(sync.failure); XCTAssertEqual(sync.memories.first?.basis, "hermes")
+        XCTAssertNil(sync.failure); XCTAssertEqual(sync.memories.first?.basis, "momo")
         let memory = try XCTUnwrap(sync.memories.first)
         await sync.forget(memory)
         XCTAssertNotNil(sync.failure); XCTAssertEqual(sync.memories.count, 1)
-        XCTAssertFalse(sync.hasLegacyChanges, "This version edits Hermes online, without a second offline mutation engine")
+        XCTAssertFalse(sync.hasLegacyChanges, "This version edits MoMo memory online, without a second offline mutation engine")
         let restored = try PhoneContextSync(directory: root, archive: archive, deviceID: UUID(), connection: connection, key: "fixture", configuration: configuration())
         XCTAssertEqual(restored.memories.first?.id, memory.id)
         XCTAssertNotNil(restored.lastSourcesSent)
@@ -321,7 +321,7 @@ private final class MemoryResponses: @unchecked Sendable {
                 return (200, "{\"id\":\"summary-fixture\",\"revision\":\"\(revision)\",\"state\":\"done\",\"text\":\"团队决定周五交付。\"}")
             }
             if request.url?.path == "/v1/status" {
-                return (200, "{\"workspace_id\":\"\(workspace)\",\"source_sync\":true,\"memory_writer\":\"Hermes\"}")
+                return (200, "{\"workspace_id\":\"\(workspace)\",\"source_sync\":true,\"memory_writer\":\"SuperAgent\"}")
             }
             if request.url?.path == "/v1/sources", rejected { return (503, "{}") }
             if request.url?.path == "/v1/sources", request.httpMethod == "POST",
@@ -339,7 +339,7 @@ private final class MemoryResponses: @unchecked Sendable {
             }
             if request.url?.path == "/v1/memories" {
                 if memoriesRejected { return (503, "{}") }
-                return (200, #"{"revision":1,"next_cursor":null,"items":[{"id":"hermes-memory-fixture","text":"下周五发方案","kind":"memory","basis":"hermes","status":"current","revision":1,"evidence":[]}]}"#)
+                return (200, #"{"revision":1,"next_cursor":null,"items":[{"id":"momo-memory-fixture","text":"下周五发方案","kind":"memory","basis":"momo","status":"current","revision":1,"evidence":[]}]}"#)
             }
             return (503, "{}")
         }

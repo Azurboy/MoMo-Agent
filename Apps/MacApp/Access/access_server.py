@@ -61,7 +61,7 @@ class AccessService:
     async def upstream(self, method, path, body=None, context=False, headers=None, streaming=False):
         url = self.connection['data_url' if context else 'base_url'] + path
         h = {'Authorization': 'Bearer ' + self.key, 'Content-Type': 'application/json',
-             'X-Hermes-Session-Key': 'momo:' + self.connection['assistant_id']}
+             'X-MoMo-Session-Key': 'momo:' + self.connection['assistant_id']}
         h.update(headers or {})
         timeout = ClientTimeout(total=None, sock_connect=10, sock_read=45) if streaming else ClientTimeout(total=60, sock_connect=10)
         return await self.session.request(method, url, data=body, headers=h, allow_redirects=False, timeout=timeout)

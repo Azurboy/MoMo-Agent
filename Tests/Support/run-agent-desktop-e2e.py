@@ -13,7 +13,6 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-from types import SimpleNamespace
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,21 +22,6 @@ from desktop_control import DesktopLease, native_request
 
 def require(value, reason):
     if not value: raise AssertionError(reason)
-
-
-def nodes(value):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values(): yield from nodes(child)
-    elif isinstance(value, list):
-        for child in value: yield from nodes(child)
-
-
-def reference(snapshot, label):
-    require(snapshot.get('ok'), json.dumps(snapshot, ensure_ascii=False))
-    matches = [node for node in nodes(snapshot['data']) if label in (node.get('name'), node.get('label'), node.get('description')) and node.get('ref_id')]
-    require(len(matches) == 1, f'Expected exactly one control named {label}: {matches}')
-    return matches[0]['ref_id']
 
 
 def prepare(args):
@@ -63,7 +47,7 @@ def prepare(args):
     subprocess.run(['codesign','--force','--sign','-',str(fixture.parent)],check=True,capture_output=True,timeout=20)
     data=output/'data'
     initialize(data,18465)
-    write_engine_config(data,engine='hermes',proactive_mode='off')
+    write_engine_config(data, proactive_mode='off')
     venv=data/'runtime/venv'
     if not venv.exists(): venv.symlink_to(Path(sys.executable).parent.parent,target_is_directory=True)
     (output/'fixture-state.json').unlink(missing_ok=True)
@@ -87,21 +71,12 @@ async def stop_access_child(data):
 
 
 async def run(args):
-    from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
-    from personal_agent import PersonalAgent, ProductStore
-    from hermes_state import SessionDB
-    from hermes_state_runtime import begin_runtime_epoch, admit_session_input, claim_session_input
-
     output = args.output.resolve(); data = output / 'data'
     require((output/'.desktop-e2e-owned').read_text() == 'MoMo disposable desktop E2E\n', 'Output is not an owned test directory')
     report = {'kind': 'local-native-gui-e2e', 'model': 'none', 'checks': [], 'status': 'running'}
     lease = DesktopLease(data)
     with lease.locked():
         previous=lease.read(); lease.write({'owner':'agent','epoch':previous['epoch']+1})
-    agent = None
-    db = None
-    store = None
     started = []
     logs = []
     info=plistlib.loads((args.app/'Contents/Info.plist').read_bytes())
@@ -130,74 +105,6 @@ async def run(args):
             await asyncio.sleep(.1)
         require((output / 'fixture-state.json').exists(), 'Fixture did not start')
 
-        store = ProductStore(data / 'e2e-product.sqlite', json.loads((data/'connection.json').read_text()))
-        db = SessionDB(db_path=data / 'e2e-hermes.sqlite')
-        epoch = begin_runtime_epoch(db, instance_id='desktop-e2e')
-        accepted = store.accept(str(uuid.uuid4()), 'Only operate MoMo Desktop Fixture', 'e2e')
-        sid = store.db.execute('SELECT native_root FROM works WHERE id=?', (accepted['work_id'],)).fetchone()[0]
-        db.create_session(sid, source='api_server')
-        admit_session_input(db, epoch=epoch, principal_id='api', session_id=sid, request_id=accepted['run_id'], payload={'text':'GUI fixture E2E','api_turn_v1':{'history':None,'settings':{}}})
-        claim = claim_session_input(db, epoch=epoch, session_id=sid)
-        authority = SimpleNamespace(db=db, logical_owner=lambda value: value)
-        product = PersonalAgent.__new__(PersonalAgent)
-        product.store=store; product.data=data; product.loop=asyncio.get_running_loop(); product.authority=lambda: authority
-        agent = SimpleNamespace(_interrupt_requested=False)
-        product.bind_computer_gate(agent, (authority, sid, claim['generation']))
-        lease = DesktopLease(data)
-        params = StdioServerParameters(command=sys.executable, args=[str(ROOT/'Apps/MacApp/Runtime/desktop_mcp.py')], env={**os.environ, 'MOMO_AGENT_DIRECTORY':str(data), 'PYTHONDONTWRITEBYTECODE':'1'})
-        loop = asyncio.get_running_loop()
-        with (output/'mcp.log').open('w') as mcp_log:
-            async with stdio_client(params, errlog=mcp_log) as (reader, writer):
-                async with ClientSession(reader, writer) as session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    require({'computer_snapshot','computer_action'} <= {t.name for t in tools.tools}, 'MCP tools missing')
-                    async def tool(name, arguments):
-                        def execute(bound):
-                            return asyncio.run_coroutine_threadsafe(session.call_tool(name, bound), loop).result(timeout=25)
-                        result = await asyncio.to_thread(agent._product_computer_gate, 'mcp__momo_computer__'+name, arguments, str(uuid.uuid4()), execute)
-                        if isinstance(result, str): return json.loads(result)
-                        require(not result.is_error, str(result.content))
-                        if result.structured_content is not None: return result.structured_content
-                        return json.loads(next(c.text for c in result.content if c.type == 'text'))
-                    async def snapshot():
-                        tree = await tool('computer_snapshot', {'app': 'MoMo Desktop Fixture'})
-                        (output/'last-snapshot.json').write_text(json.dumps(tree, ensure_ascii=False, indent=2))
-                        return tree
-                    tree = await snapshot()
-                    report['checks'].append('Hermes ComputerGate → MCP stdio → Unix IPC → signed native FFI snapshot')
-                    text = 'MoMo 本地 E2E — 已验证中文输入'
-                    result = await tool('computer_action', dict(ref=reference(tree,'测试内容'), action='set_value', text=text))
-                    require(result.get('ok'), str(result))
-                    tree = await snapshot()
-                    result = await tool('computer_action', dict(ref=reference(tree,'启用测试选项'), action='toggle'))
-                    require(result.get('ok'), str(result))
-                    tree = await snapshot()
-                    save_ref = reference(tree,'保存测试内容')
-                    require((await tool('computer_action', dict(ref=save_ref, action='click'))).get('ok'), 'Save failed')
-                    await asyncio.sleep(.2)
-                    saved = json.loads((output/'fixture-state.json').read_text())
-                    require(saved == dict(saves=1, text=text, checked=True), f'Actual form state mismatch: {saved}')
-                    tree = await snapshot()
-                    require(text in json.dumps(tree,ensure_ascii=False), 'Saved UI was not re-observed')
-                    report['checks'].append('Actual AppKit text replacement, checkbox and save; UI + independent fixture state agree')
-                    human = lease.acquire('e2e-phone', str(uuid.uuid4()))
-                    pending = asyncio.create_task(tool('computer_action', dict(ref=save_ref, action='click')))
-                    await asyncio.sleep(.35)
-                    require(not pending.done(), 'Hermes did not wait for human control')
-                    require(json.loads((output/'fixture-state.json').read_text())['saves']==1, 'Action replayed during takeover')
-                    lease.release('e2e-phone', human['session'])
-                    refused = await asyncio.wait_for(pending, 3)
-                    require(refused.get('error')=='desktop_changed', f'Stale post-takeover action was not refused: {refused}')
-                    require(json.loads((output/'fixture-state.json').read_text())['saves']==1, 'Old action replayed after return')
-                    tree = await snapshot()
-                    require((await tool('computer_action', dict(ref=reference(tree,'保存测试内容'), action='click'))).get('ok'), 'Fresh action failed')
-                    require(json.loads((output/'fixture-state.json').read_text())['saves']==2, 'Fresh action did not execute exactly once')
-                    report['checks'].append('Human takeover waits; return refuses old action; fresh snapshot permits exactly one action')
-        # Release the real Hermes claim before testing another engine.
-        with lease.locked():
-            current=lease.read(); current.pop('agent_work',None); current.pop('observed_epoch',None); current['epoch']+=1; lease.write(current)
-        db.close(); store.db.close(); db=None; store=None
         from aiohttp import web, ClientSession as HTTPClient
         from aiohttp.test_utils import TestServer
         from superagent_gateway import SuperAgentGateway
@@ -233,7 +140,7 @@ async def run(args):
                 ticket['state']='ended'
                 response=await client.post(endpoint,json=payload,headers=headers)
                 require(response.status == 409, 'Ended ticket reached native driver')
-                require(json.loads((output/'fixture-state.json').read_text())['saves']==3, 'Unexpected extra save')
+                require(json.loads((output/'fixture-state.json').read_text())['saves']==1, 'Unexpected extra save')
             report['checks'].append('SuperAgent bridge refuses missing credentials, human takeover and ended ticket')
         gateway.bridge.close(); gateway.store.db.close()
         await asyncio.sleep(.3)
@@ -244,9 +151,6 @@ async def run(args):
         report['status']='failed'; report['error']=str(error) or type(error).__name__
         raise
     finally:
-        if agent is not None: agent._interrupt_requested=True
-        if db is not None: db.close()
-        if store is not None: store.db.close()
         for process in reversed(started):
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)

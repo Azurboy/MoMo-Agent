@@ -3579,7 +3579,7 @@ async function candidateCard(host, candidate) {
 		...relatedTickets(candidate.tickets),
 		...delivered.length ? { delivered_to: delivered } : {},
 		...referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {},
-		next_action: candidate.strength === "explicit" ? "Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore." : "Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide."
+		next_action: isCreatorRequest(primary) ? "The owner selected Creator mode. For a customization request, accept a fresh ticket with orchestrator_route so its Creator worker can build and install the extension locally." : candidate.strength === "explicit" ? "Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore." : "Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide."
 	};
 }
 //#endregion
@@ -5256,6 +5256,9 @@ const capped = (text, limit, read) => text.length <= limit ? { text } : {
 	chars: text.length,
 	read
 };
+function isCreatorRequest(trigger) {
+	return trigger?.source === "momo" && trigger.meta.stream === "chat" && trigger.meta.chatMode === "creator" && trigger.actor.id === "owner" && trigger.human && trigger.addressed === "direct";
+}
 /**
 * Formats a Trigger for worker delivery: author, thread, timestamp, text up to `TRIGGER_CHARS`, source message link,
 * optional routing note, and a preview of the replied-to message when the worker has not yet seen it.
@@ -9397,7 +9400,7 @@ var Sessions = class {
 		ctx.inject(["agentPresets"], (child) => {
 			child.on("agent-preset/selected", (sessionId, preset) => {
 				const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId);
-				const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : void 0;
+				const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? this.workerPreset(ticketId) : void 0;
 				if (!ours || preset === ours || !agent) return;
 				child.get("agentPresets").select(agent, ours).catch(() => {});
 			});
@@ -9408,6 +9411,10 @@ var Sessions = class {
 				this.updateModelHealth();
 			}
 		});
+	}
+	workerPreset(ticketId) {
+		const ticket = ticketId ? this.host.store.tickets.get(ticketId) : void 0;
+		return isCreatorRequest(ticket && this.host.store.triggers.get(ticket.origin.triggerId)) ? "cordis" : WORKER_PRESET;
 	}
 	effectiveRoleModel(role) {
 		const settings = this.host.store.settings();
@@ -9442,7 +9449,7 @@ var Sessions = class {
 			await ctx.sessionController.create({
 				sessionId: id,
 				workspaceId: workspace.id,
-				agentPreset: role === "worker" ? WORKER_PRESET : ROUTER_PRESET
+				agentPreset: role === "worker" ? this.workerPreset(ticketOfSession(id)) : ROUTER_PRESET
 			});
 			result = await ctx.sessionController.resolveAgent(id);
 		}
@@ -9597,7 +9604,8 @@ var Sessions = class {
 				const current = ticket && host.store.tickets.get(ticket.id);
 				const composed = host.prompts.compose(version.config, master ? "orchestrator" : "worker", current ? host.environment(current) : void 0);
 				const mandate = current ? mandateInstructions(current.mandate, host.store.settings().policy.rules) : "";
-				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${momoMemoryPromptBlock()}`;
+				const creator = current && this.workerPreset(current.id) === "cordis" ? "\nThe owner selected Creator mode. For customization requests, use the Harness plugin development skill and plugin_manager. Keep extension sources under $MOMO_DATA_DIR/extensions, install from that local directory and verify activation. For tools needed in ordinary MoMo tasks, register in the worker agent scope. Report what actually runs and any restart or setup still needed. Publish only if explicitly requested." : "";
+				return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${mandate}${creator}${momoMemoryPromptBlock()}`;
 			},
 			...master ? { complete: true } : {}
 		}));
@@ -9624,7 +9632,7 @@ var Sessions = class {
 			"job_list",
 			"job_kill"
 		] }), agent.ctx.tools.guard((execution) => noWait(execution, () => this.routed(agent))));
-		else binding.disposers.push(...this.workOnly(agent, ticket.id));
+		else binding.disposers.push(...this.workOnly(agent, ticket.id, this.workerPreset(ticket.id) === "cordis"));
 	}
 	/**
 	* Whether a Session runs the router preset: as DSH's preset registry last selected it, read through the session projection
@@ -9645,10 +9653,15 @@ var Sessions = class {
 	* (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
 	* misses preset tools; the agent's own view also includes local tools such as subagent, which restrict refuses to name.
 	*/
-	workOnly(agent, ticketId) {
+	workOnly(agent, ticketId, creator = false) {
 		const store = this.host.store;
 		const parent = scopeParentOf(agent);
-		const allow = WORK_TOOLS.filter((name) => agent.ctx.tools.get(name, parent));
+		const allow = (creator ? [
+			...WORK_TOOLS,
+			"plugin_manager",
+			"cordis_inspect_list",
+			"cordis_inspect_query"
+		] : WORK_TOOLS).filter((name) => agent.ctx.tools.get(name, parent));
 		return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
 			const current = store.tickets.get(ticketId);
 			return !current || !liveTicket(current) ? "Ticket ended; new work needs a new authorized ticket" : void 0;
@@ -9904,10 +9917,15 @@ function route(host, item, decided) {
 				triggerIds: decision.triggerIds
 			};
 		}
-		case "attach": return {
-			reason: "Attached: the ticket follows the trigger's thread and receives the trigger",
-			ticketId: host.quietly(() => host.engine.attach(item.ticket_id, item.trigger_id, item.note ?? void 0)).id
-		};
+		case "attach": {
+			const destination = host.store.tickets.get(item.ticket_id);
+			const incoming = host.store.triggers.get(item.trigger_id);
+			if (destination && incoming && isCreatorRequest(incoming) !== isCreatorRequest(host.store.triggers.get(destination.origin.triggerId))) return { refused: "This ticket uses a different chat mode. Accept a new ticket for this request." };
+			return {
+				reason: "Attached: the ticket follows the trigger's thread and receives the trigger",
+				ticketId: host.quietly(() => host.engine.attach(item.ticket_id, item.trigger_id, item.note ?? void 0)).id
+			};
+		}
 		case "stop": {
 			const decision = host.engine.decide(item.trigger_id, {
 				kind: "stop",

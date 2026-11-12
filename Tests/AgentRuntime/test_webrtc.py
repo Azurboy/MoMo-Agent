@@ -97,13 +97,13 @@ class RTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
         body = await request.read()
         self.requests.append((request.method, request.path, dict(request.headers), body))
         self.assertEqual('Bearer ' + 'r' * 64, request.headers.get('Authorization'))
-        self.assertEqual('momo:' + self.service.connection['assistant_id'], request.headers.get('X-Hermes-Session-Key'))
+        self.assertEqual('momo:' + self.service.connection['assistant_id'], request.headers.get('X-MoMo-Session-Key'))
         if request.path.endswith('/capabilities'):
             return web.json_response({'features': {'run_submission': True, 'runs_idempotency': {'supported': True, 'durable': True}}})
         if request.path == '/momo/v1/conversation/push':
             return web.json_response({},status=503,headers={'Retry-After':'17'})
         if request.path == '/context/v1/status':
-            return web.json_response(dict(workspace_id=self.service.connection['workspace_id'], source_sync=True, memory_writer='Hermes'))
+            return web.json_response(dict(workspace_id=self.service.connection['workspace_id'], source_sync=True, memory_writer='SuperAgent'))
         if request.path.startswith('/context/v1/life-illustrations/assets/'):
             return web.Response(body=b'\x89PNG\r\n\x1a\nfixture', content_type='image/png', headers={'Cache-Control': 'private, no-store'})
         if request.path == '/v1/runs' and request.method == 'POST':

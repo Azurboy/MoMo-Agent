@@ -22,7 +22,7 @@ async def serve(r):
  if r.headers.get('Authorization')!='Bearer synthetic-local-only-fixture-credential':return web.json_response({'error':{'code':'auth','message':'fixture credential required'}},status=401)
  if p=='/transport/v1/config':return web.json_response(dict(enabled=False))
  if p=='/v1/capabilities':return web.json_response(dict(features=dict(run_submission=True,runs_idempotency=dict(supported=True,durable=True,retention_seconds=86400))))
- if p=='/context/v1/status':return web.json_response(dict(workspace_id=ids['workspace_id'],source_sync=True,memory_writer='Hermes',memory_pending=0,memory_needs_review=0))
+ if p=='/context/v1/status':return web.json_response(dict(workspace_id=ids['workspace_id'],source_sync=True,memory_writer='SuperAgent',memory_pending=0,memory_needs_review=0))
  if p=='/context/v1/memories':return web.json_response(dict(revision=1,items=memories,next_cursor=None))
  if p=='/context/v1/sources':return web.json_response(dict(items=[],next_cursor=None))
  if p=='/v1/runs' and r.method=='POST':

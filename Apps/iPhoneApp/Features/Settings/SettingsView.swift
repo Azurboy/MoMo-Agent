@@ -26,6 +26,10 @@ struct SettingsView: View {
                             PhoneSettingsLinkRow(title: "Mac 连接", symbol: "desktopcomputer",
                                                  value: remoteAgent.connection == nil ? "尚未配对" : "已配对")
                         }.accessibilityIdentifier("settings.mac")
+                        if let store = remoteAgent.store {
+                            rowDivider
+                            ChatModeSettings(store: store).padding(.horizontal, 18).padding(.vertical, 12)
+                        }
                         if remoteAgent.connection != nil {
                             rowDivider
                             NavigationLink { PhoneNotificationSettings(notifications: remoteAgent.notifications) } label: {

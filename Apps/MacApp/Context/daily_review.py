@@ -3,6 +3,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 
+from momo_memory import memory_home
 from context_store import Conflict, canonical, digest
 import memory_review as review
 import transcript_ingestion as ingestion
@@ -35,7 +36,7 @@ def enqueue(store, data, now, manual=False):
         # messages in the new combined review before any subsequent messages.
         chat = review.chat_batch(store, data, cursor, through)
         jobs = store.db.execute("SELECT * FROM jobs WHERE state='pending' AND first_attempt IS NULL ORDER BY rowid").fetchall()
-        stamp = review.signature(Path(data) / "hermes", cursor, store.revision)
+        stamp = review.signature(memory_home(Path(data)), cursor, store.revision)
         last = review.state(store, "dream", {})
         if not manual and not chat and not jobs:
             if last.get("signature") == stamp:

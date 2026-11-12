@@ -1,4 +1,4 @@
-"""Source tools only. Hermes uses its own memory tool and session history."""
+"""Source tools for the MoMo context service."""
 import os
 from mcp.server import MCPServer
 from context_store import ContextStore

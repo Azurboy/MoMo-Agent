@@ -14,7 +14,7 @@
 
 ## Mac Tailscale 与代理（2026-10-28）
 
-**设置 → 通用 → 网络代理 → Tailscale**，默认「跟随系统」。只有需要覆盖系统设置时才选「手动」，填写 HTTP/HTTPS 代理地址和端口后应用；「不使用代理」是用户显式选择。该项管理内嵌 Tailscale 的控制与中继连接，不更改全系统代理或已运行 Hermes 的模型代理。
+**设置 → 通用 → 网络代理 → Tailscale**，默认「跟随系统」。只有需要覆盖系统设置时才选「手动」，填写 HTTP/HTTPS 代理地址和端口后应用；「不使用代理」是用户显式选择。该项管理内嵌 Tailscale 的控制与中继连接，不更改全系统代理或MoMo 的模型代理。
 
 本次 1.39.1 登录超时的根因是启动环境残留：系统代理在 `127.0.0.1:7890` 正常工作，App 却带着已关闭的 `7897`。日志包含 `proxyconnect tcp: socks connect ... connection refused`，表明正确的 HTTP 代理外面又被套了一层旧 SOCKS 代理。清理磁盘未删除运行依赖，Agent 服务本身在线。
 
@@ -82,7 +82,7 @@ xcrun devicectl device info ddiServices --device "$momo_watch_id" \
 
 ## Mac 更新
 
-在 Mac「设置 → 通用 → 应用更新 → 获取更新」打开[最新安装包](https://github.com/Miri-Labs/MoMo-Agent/releases/latest)。Python、Hermes 和连接依赖随 App 一起升级，无需单独下载或更新运行环境。
+在 Mac「设置 → 通用 → 应用更新 → 获取更新」打开[最新安装包](https://github.com/Miri-Labs/MoMo-Agent/releases/latest)。Mac App 管理 DeepSeek Harness 和 Python 连接服务的版本，首次准备时会安装所需依赖。
 
 退出 MoMo Agent，等后台退出后，用新包替换「应用程序」中的 MoMo Agent，再打开。保留 `~/Library/Application Support/MoMoAgent`，不要删除聊天、配对或模型配置。当前公开版本保持 0.0.1，下载页用发布日期和内部构建号区分更新。Apple Silicon 包不能用于 Intel Mac；签名和公证状态以该次下载页为准。
 
@@ -90,7 +90,7 @@ xcrun devicectl device info ddiServices --device "$momo_watch_id" \
 
 本轮从桌面 Beta 切到正式版，重点是延续原 Mac 身份，而不是重新创建一个空 Agent：
 
-- 先确认旧 App 和 Agent 没有在写数据，再将 `Application Support/MoMoAgent Beta` 中的完整数据迁到 `Application Support/MoMoAgent`。保留连接配置、API key、配对库、Tailscale 节点状态、聊天与 Hermes 记忆；不只复制界面设置。
+- 先确认旧 App 和 Agent 没有在写数据，再将 `Application Support/MoMoAgent Beta` 中的完整数据迁到 `Application Support/MoMoAgent`。保留连接配置、API key、配对库、Tailscale 节点状态、聊天与个人记忆；不只复制界面设置。
 - 迁移已有 onboarding / 自动恢复设置，并为旧目录保留兼容符号链接，因为既有 Python 环境可能仍引用旧路径。**这是本次迁移措施，不是日常重连步骤；不要在服务运行中重复搬目录或删除旧路径链接。**
 - 启动正式 App 后，实际核对 `agent_online=true`、内嵌 Tailscale `state=connected`，以及已配对设备的近期请求。本轮这些检查通过，才移走旧 Beta 应用。
 - 保持稳定的 Apple 签名身份，避免每次更新都改变权限识别依据；不同 Bundle ID 的系统授权仍需实际核对，不能靠复制数据继承。手机正式版和 Beta 的 Keychain 身份不同，手机切换身份可能需要重新配对，这与 Mac 开发连接无关。

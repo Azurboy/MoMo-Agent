@@ -35,6 +35,8 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
+from momo_memory import memory_home
+from momo_agent import profile_directory
 from memory_review import InvalidReviewReceipt, STALLED_REVIEW, outcome as verify_review_receipt
 from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
@@ -243,7 +245,13 @@ class BridgeStore:
             self.db.execute("ALTER TABLE triggers ADD COLUMN title TEXT")
         with suppress(sqlite3.OperationalError):
             self.db.execute("ALTER TABLE source_watermarks ADD COLUMN last_recorded_at REAL NOT NULL DEFAULT 0")
+        with suppress(sqlite3.OperationalError):
+            self.db.execute("ALTER TABLE triggers ADD COLUMN chat_mode TEXT")
         path.chmod(0o600)
+
+    def chat_mode(self) -> str:
+        row = self.db.execute("SELECT value FROM meta WHERE key='chat_mode'").fetchone()
+        return "creator" if row and row[0] == "creator" else "standard"
 
     def close(self) -> None:
         self.db.close()
@@ -265,14 +273,15 @@ class BridgeStore:
         title: str | None = None,
         run_id: str | None = None,
         at_iso: str | None = None,
+        chat_mode: str | None = None,
     ) -> dict:
         timestamp = at_iso or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with self.db:
             self.db.execute(
                 """INSERT OR IGNORE INTO triggers(
                        id, kind, thread_id, message_id, source_id, title, actor_id, actor_name,
-                       addressed, human, observed, text, at_iso, run_id
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       addressed, human, observed, text, at_iso, run_id, chat_mode
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trigger_id,
                     kind,
@@ -288,6 +297,7 @@ class BridgeStore:
                     text,
                     timestamp,
                     run_id,
+                    chat_mode,
                 ),
             )
         row = self.db.execute("SELECT * FROM triggers WHERE id=?", (trigger_id,)).fetchone()
@@ -323,6 +333,8 @@ class BridgeStore:
                     "text": row["text"],
                     "reply_allowed": True,
                 }
+                if row["chat_mode"]:
+                    event["chat_mode"] = row["chat_mode"]
                 if row["actor_name"]:
                     event["actor_name"] = row["actor_name"]
                 if row["addressed"]:
@@ -885,7 +897,7 @@ class SuperAgentGateway:
         log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             proc = subprocess.Popen(
-                [str(dsh_bin), "--profile", "momo"],
+                [str(dsh_bin), "--profile", "momo", "--patch", str(instance["state_dir"] / "momo-runtime.patch.yml")],
                 cwd=str(workspace_dir),
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -1161,7 +1173,7 @@ class SuperAgentGateway:
         if self.dsh_provider and self.dsh_provider != "openai":
             return self.dsh_provider
         with suppress(Exception):
-            cfg = json.loads((self.data / "hermes/config.yaml").read_text(encoding="utf-8"))
+            cfg = json.loads((profile_directory(self.data) / "config.yaml").read_text(encoding="utf-8"))
             model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
             if isinstance(model_cfg, dict) and model_cfg.get("provider"):
                 return str(model_cfg["provider"])
@@ -1884,7 +1896,7 @@ class SuperAgentGateway:
         }
         return web.json_response(
             {
-                "object": "hermes.api_server.capabilities",
+                "object": "momo.api_server.capabilities",
                 "platform": "deepseek-superagent",
                 "engine": "superagent",
                 "proactive_mode": cfg["proactive_mode"],
@@ -2092,8 +2104,8 @@ class SuperAgentGateway:
         import memory_review
         from phone_sources import read_phone_sources
 
-        hermes_home = self.data / "hermes"
-        (hermes_home / "memories").mkdir(parents=True, exist_ok=True)
+        notebook_home = memory_home(self.data)
+        (notebook_home / "memories").mkdir(parents=True, exist_ok=True)
         momo_mem = MoMoMemory(self.data)
         with momo_mem.store() as mem_store:
             blocks = [b for t in ("user", "memory") if (b := mem_store.format_for_system_prompt(t))]
@@ -2360,7 +2372,7 @@ class SuperAgentGateway:
                     new_text=args.get("new_text"),
                     operations=args.get("operations"),
                 )
-                memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                 return result_json
 
             if clean_name == "notebook":
@@ -2383,14 +2395,14 @@ class SuperAgentGateway:
                             path=rel_path,
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         if res.get("success") and str(res.get("category") or category or "").lower() == "briefing":
                             self._deliver_briefing_message_if_needed()
                         return result_json
                     elif action == "remove":
                         res = momo_mem.remove_notebook(category, slug, path=rel_path)
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         return result_json
                     elif action == "move":
                         res = momo_mem.move_notebook(
@@ -2403,7 +2415,7 @@ class SuperAgentGateway:
                             overwrite=bool(args.get("overwrite", False)),
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         return result_json
                     else:
                         res = {"success": False, "error": f"Unknown notebook action: {action}"}
@@ -2429,7 +2441,7 @@ class SuperAgentGateway:
                 finally:
                     store.close()
                 result_json = json.dumps(res, ensure_ascii=False)
-                memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                 return result_json
 
             if clean_name == "list_recordings":
@@ -2564,9 +2576,9 @@ class SuperAgentGateway:
             return text
         except Exception:
             pass
-        hermes_home = self.data / "hermes"
-        writes = memory_review.successful_writes(hermes_home, session_id)
-        last_content = memory_review._last_write_content(hermes_home, session_id)
+        notebook_home = memory_home(self.data)
+        writes = memory_review.successful_writes(notebook_home, session_id)
+        last_content = memory_review._last_write_content(notebook_home, session_id)
         last_ok = True
         if last_content is not None:
             try:
@@ -2617,7 +2629,7 @@ class SuperAgentGateway:
             check_active()
             output = self._finalize_memory_review_output(session_id, raw_text)
             try:
-                verify_review_receipt(self.data / "hermes", session_id, output)
+                verify_review_receipt(memory_home(self.data), session_id, output)
             except InvalidReviewReceipt as error:
                 if correction_requested:
                     raise
@@ -3873,10 +3885,18 @@ class SuperAgentGateway:
         }
 
     async def handle_conversation(self, request: web.Request) -> web.Response | web.StreamResponse:
-        if refused := self._check_bearer(request):
+        if (refused := self._check_bearer(request)) is not None:
             return refused
         try:
             suffix = request.match_info["tail"]
+            if suffix == "/mode" and request.method in ("GET", "POST"):
+                if request.method == "POST":
+                    value = await request.json()
+                    if not isinstance(value, dict) or set(value) != {"mode"} or value["mode"] not in ("standard", "creator"):
+                        raise ValueError("Expected standard or creator")
+                    with self.bridge.db:
+                        self.bridge.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chat_mode',?)", (value["mode"],))
+                return web.json_response({"mode": self.bridge.chat_mode()})
             if request.method == "GET" and suffix == "":
                 cfg = read_engine_config(self.data)
                 return web.json_response(
@@ -4008,11 +4028,14 @@ class SuperAgentGateway:
             raise ValueError("Invalid message")
 
         work_id = value.get("work_id")
+        mode = self.bridge.chat_mode()
         if target:
             target_row = self.bridge.db.execute("SELECT * FROM chat_runs WHERE run_id=?", (target,)).fetchone()
             if not target_row or target_row["status"] not in ("queued", "started", "waiting_for_input"):
                 _conflict("stale_target")
             work_id = target_row["work_id"]
+            origin = self.bridge.db.execute("SELECT chat_mode FROM triggers WHERE id=?", (target_row["trigger_id"],)).fetchone()
+            mode = origin["chat_mode"] if origin and origin["chat_mode"] else "standard"
 
         scope = hashlib.sha256(("superagent\0" + self.api_key).encode()).hexdigest()
         row = self.store.accept(
@@ -4088,6 +4111,7 @@ class SuperAgentGateway:
                 observed=False,
                 text=prompt_text,
                 run_id=run_id,
+                chat_mode=mode,
             )
             self._trigger_wakeup.set()
 

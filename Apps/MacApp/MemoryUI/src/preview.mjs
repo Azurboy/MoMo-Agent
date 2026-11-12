@@ -1,5 +1,5 @@
 // Presentation only. The native reader always receives the unchanged memory ID
-// and displays the complete, original Hermes entry.
+// and displays the complete, original memory entry.
 const segments = new Intl.Segmenter('zh', { granularity: 'grapheme' });
 const graphemes = text => Array.from(segments.segment(text), item => item.segment);
 export const isEn = () => typeof window !== 'undefined' && !/^zh\b/i.test(navigator?.language || 'zh');

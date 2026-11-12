@@ -649,6 +649,15 @@ public final class RemoteTaskStore {
         defer { controlsInFlight.remove(id) }
         await cancel(id: id, generation: generation)
     }
+    /// The paired Mac owns the default used when it admits a new chat task.
+    public func chatMode(setting mode: ChatMode? = nil) async throws -> ChatMode {
+        struct Preference: Codable { let mode: ChatMode }
+        let body = try mode.map { try JSONEncoder().encode(Preference(mode: $0)) }
+        let data = try await client.request(path: ["momo", "v1", "conversation", "mode"],
+                                            method: mode == nil ? "GET" : "POST", body: body)
+        return try JSONDecoder().decode(Preference.self, from: data).mode
+    }
+
     public func fetchWorkOverview(limit: Int = 15) async throws -> ConversationWorkOverview {
         guard canContactServer else { throw CancellationError() }
         return try await client.workOverview(limit: limit)
@@ -923,7 +932,7 @@ public final class RemoteTaskStore {
                 guard !Task.isCancelled else { return }
                 self?.flushPendingPersistence()
                 if case AgentClientError.http(401, _, _, _) = error { self?.recordConnectionFailure(error); return }
-                // Events are ephemeral on Hermes restart; status remains authoritative.
+                // Events are ephemeral on gateway restart; status remains authoritative.
                 if case AgentClientError.http(let status, _, _, _) = error, status == 404 {
                     do { try self?.update(id) { if $0.reply == nil { $0.reply = RemoteReply() }; $0.reply?.streamUnavailable = true } }
                     catch { self?.failures[.storage] = error.localizedDescription }
@@ -1331,4 +1340,8 @@ public final class RemoteTaskStore {
             }
         }
     }
+}
+
+public enum ChatMode: String, Codable, Sendable {
+    case standard, creator
 }

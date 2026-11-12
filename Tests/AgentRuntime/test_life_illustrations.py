@@ -686,7 +686,7 @@ class NativeImageStreamTests(unittest.TestCase):
             def responses(self): return self
             def create(self, **kwargs): self.kwargs = kwargs; return Stream()
         generator, client = CodexIllustrationGenerator(Path('/unused')), Client()
-        generator.resolve = lambda: dict(model_id='configured-codex-model')
+        generator.resolve = lambda: dict(dsh_provider='openai-codex', model_id='configured-codex-model')
         generator.client = lambda llm: client
         ids = []
         self.assertEqual(image, generator.generate('真实场景', 'operation', ids.append))

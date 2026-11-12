@@ -9,6 +9,7 @@ import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { workerGitConfig } from '../src/infra/environment.ts'
 import { KV } from '../src/kv.ts'
+import { isCreatorRequest } from '../src/executor/dsh.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { MomoConfigSchema, SOURCE, momoKind, momoThreadContext, momoTrigger, pollMomoOnce, sendMomo } from '../src/sources/momo.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -88,18 +89,21 @@ describe('momoKind policy and loopback bridge', () => {
     const policy = settingsPolicy(settings, sources)
 
     const chatTrigger = momoTrigger({
-      cursor: '1', id: 'msg-1', stream: 'chat', thread_id: 'chat:1',
+      cursor: '1', id: 'msg-1', stream: 'chat', chat_mode: 'creator', thread_id: 'chat:1',
       actor_id: 'owner', actor_name: 'User', human: true, addressed: 'direct',
       at: '2026-10-31T10:00:00.000Z', text: '帮我整理今天的待办', reply_allowed: true,
     }, 'http://127.0.0.1:18787')
+    expect(isCreatorRequest(chatTrigger)).toBe(true)
+    expect(isCreatorRequest({ ...chatTrigger, actor: { source: SOURCE, id: 'guest' } })).toBe(false)
     expect(policy.gate(chatTrigger, emptyThread('chat:1'), [])).toMatchObject({ admissible: true, strength: 'explicit' })
 
     const transcriptTrigger = momoTrigger({
-      cursor: '2', id: 'span-1', stream: 'transcripts', thread_id: 'transcript:rec-1',
+      cursor: '2', id: 'span-1', stream: 'transcripts', chat_mode: 'creator', thread_id: 'transcript:rec-1',
       actor_id: 'owner', actor_name: 'User', human: true,
       at: '2026-10-31T10:05:00.000Z', text: '我一会儿把项目复盘清单整理出来发给大家。',
       source_id: 'rec-1', reply_allowed: true,
     }, 'http://127.0.0.1:18787')
+    expect(isCreatorRequest(transcriptTrigger)).toBe(false)
     expect(policy.gate(transcriptTrigger, emptyThread('transcript:rec-1'), [])).toMatchObject({
       admissible: true,
       strength: 'inferred',

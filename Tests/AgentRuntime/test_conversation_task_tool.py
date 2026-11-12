@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Apps/MacApp/Runtime"))
 from momo_agent import initialize
 
-spec = importlib.util.spec_from_file_location("task_control", ROOT / "Apps/MacApp/Runtime/prompt_plugin/task_control.py")
+spec = importlib.util.spec_from_file_location("task_control", ROOT / "Tests/AgentRuntime/fixtures/legacy_gateway/prompt_plugin/task_control.py")
 tool = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool)
 

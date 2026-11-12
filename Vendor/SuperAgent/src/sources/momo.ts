@@ -40,6 +40,7 @@ export const MomoBridgeEventSchema = z.object({
   cursor: z.string().min(1),
   id: z.string().min(1),
   stream: MomoStreamSchema,
+  chat_mode: z.enum(['standard', 'creator']).optional(),
   thread_id: z.string().min(1),
   actor_id: z.string().min(1),
   actor_name: z.string().optional(),
@@ -112,6 +113,7 @@ export function momoTrigger(event: MomoBridgeEvent, bridgeUrl: string): Trigger 
     ...(event.reply_allowed ? { channel: { source: SOURCE, thread: event.thread_id, address } } : {}),
     meta: {
       stream: event.stream,
+      ...(event.stream === 'chat' && event.chat_mode ? { chatMode: event.chat_mode } : {}),
       messageId: event.id,
       threadId: event.thread_id,
       ...(event.actor_name ? { actorName: event.actor_name } : {}),

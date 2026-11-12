@@ -22,14 +22,14 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(requests.count, 2)
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Idempotency-Key"), operation.uuidString.lowercased())
         XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Idempotency-Key"), requests[0].value(forHTTPHeaderField: "Idempotency-Key"))
-        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "X-Hermes-Session-Key"), "momo:00000000-0000-0000-0000-000000000001")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "X-MoMo-Session-Key"), "momo:00000000-0000-0000-0000-000000000001")
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer test-secret")
         XCTAssertEqual(requests[0].url?.path, "/v1/runs")
         XCTAssertEqual(requests[0].httpMethod, "POST")
     }
 
     func testCapabilitiesAcceptsTheMixedUpstreamFeatureContract() async throws {
-        APIStub.state.reset(status: 200, body: #"{"features":{"run_submission":true,"run_status":true,"run_stop":false,"session_key_header":"X-Hermes-Session-Key","runs_idempotency":{"supported":true,"retention_seconds":86400},"browser_extension_control":{"enabled":false}}}"#)
+        APIStub.state.reset(status: 200, body: #"{"features":{"run_submission":true,"run_status":true,"run_stop":false,"session_key_header":"X-MoMo-Session-Key","runs_idempotency":{"supported":true,"retention_seconds":86400},"browser_extension_control":{"enabled":false}}}"#)
         let features = try await client().capabilities().features
         XCTAssertEqual(features.runSubmission, true)
         XCTAssertEqual(features.runStatus, true)

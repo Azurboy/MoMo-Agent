@@ -10,6 +10,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import patch,AsyncMock
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'Tests/AgentRuntime/fixtures/legacy_gateway'))
 sys.path[:0]=[str(ROOT/'Apps/MacApp/Runtime'),str(ROOT/'Apps/MacApp/Access'),str(ROOT/'Vendor/HermesAgent')]
 from personal_agent import PersonalAgent,ProductStore
 from hermes_state import SessionDB

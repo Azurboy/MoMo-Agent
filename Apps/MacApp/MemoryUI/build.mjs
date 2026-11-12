@@ -20,7 +20,7 @@ await build({
   entryPoints: [path.join(root, 'src/main.tsx')], outfile: path.join(out, 'memory.js'),
   bundle: true, minify: true, jsx: 'automatic', target: 'safari17', format: 'iife',
   nodePaths: [path.join(root, 'node_modules')], define: { 'process.env.NODE_ENV': '"production"' },
-  plugins: [{ name: 'hermes-momo-adapter', setup(plugin) {
+  plugins: [{ name: 'momo-memory-adapter', setup(plugin) {
     plugin.onResolve({ filter: /^(@\/|\.\/node-context-menu$|\.\/share-controls$|momo-memory-)/ }, args => {
       if (adapters[args.path]) return { path: path.join(root, 'src', adapters[args.path]) };
       if (args.path.startsWith('@/')) return { path: path.join(upstream, args.path.slice(2)) + '.ts' };

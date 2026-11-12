@@ -38,7 +38,7 @@ async def serve(request):
     if revoked: return web.json_response({'error': {'code': 'device_revoked', 'message': '配对已失效'}}, status=403)
     if path == '/transport/v1/config': return web.json_response(dict(enabled=False))
     if path == '/v1/capabilities': return web.json_response(dict(features=dict(run_submission=True, runs_idempotency=dict(supported=True, durable=True, retention_seconds=86400))))
-    if path == '/context/v1/status': return web.json_response(dict(**ids, source_sync=True, memory_writer='Hermes', memory_pending=0, memory_needs_review=0))
+    if path == '/context/v1/status': return web.json_response(dict(**ids, source_sync=True, memory_writer='SuperAgent', memory_pending=0, memory_needs_review=0))
     if path == '/context/v1/memories': return web.json_response(dict(revision=1, items=[], next_cursor=None))
     if path == '/context/v1/sources': return web.json_response(dict(items=[], next_cursor=None))
     if path == '/desktop/v1/request': raise web.HTTPBadRequest(reason='A paired phone must not request another host grant')

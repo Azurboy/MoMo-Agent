@@ -18,12 +18,12 @@ declare const MomoConfigSchema: z.ZodObject<{
   readPageSize: z.ZodDefault<z.ZodNumber>;
   chat: z.ZodDefault<z.ZodBoolean>;
   transcripts: z.ZodDefault<z.ZodEnum<{
-    all: "all";
     none: "none";
+    all: "all";
   }>>;
   lifeSignals: z.ZodDefault<z.ZodEnum<{
-    all: "all";
     none: "none";
+    all: "all";
   }>>;
 }, z.core.$strict>;
 type MomoConfig = z.infer<typeof MomoConfigSchema>;
@@ -35,6 +35,10 @@ declare const MomoBridgeEventSchema: z.ZodObject<{
     transcripts: "transcripts";
     life_signals: "life_signals";
   }>;
+  chat_mode: z.ZodOptional<z.ZodEnum<{
+    standard: "standard";
+    creator: "creator";
+  }>>;
   thread_id: z.ZodString;
   actor_id: z.ZodString;
   actor_name: z.ZodOptional<z.ZodString>;

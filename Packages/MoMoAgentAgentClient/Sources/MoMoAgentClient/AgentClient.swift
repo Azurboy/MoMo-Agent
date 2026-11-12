@@ -263,7 +263,7 @@ public struct AgentClient: Sendable {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("momo:\(assistantID.uuidString.lowercased())", forHTTPHeaderField: "X-Hermes-Session-Key")
+        request.setValue("momo:\(assistantID.uuidString.lowercased())", forHTTPHeaderField: "X-MoMo-Session-Key")
         if let operationID {
             request.setValue(operationID.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
         }

@@ -4,7 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'Access'))
+sys.path.insert(0,str(Path(__file__).resolve().parents[4]/'Apps/MacApp/Access'))
 from desktop_control import DesktopLease
 
 COMPUTER_TOOLS={'mcp__momo_computer__computer_screenshot','mcp__momo_computer__computer_input','mcp__momo_computer__computer_snapshot','mcp__momo_computer__computer_action'}

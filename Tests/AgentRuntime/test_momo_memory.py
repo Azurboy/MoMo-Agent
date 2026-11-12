@@ -7,24 +7,24 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/'Apps/MacApp/Context'), str(ROOT/'Vendor/HermesAgent')]
-from hermes_memory import HermesMemory
+from momo_memory import MoMoMemory
 from context_store import Conflict
 
 
-class HermesMemoryTests(unittest.TestCase):
+class MoMoMemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         (self.home/'config.yaml').write_text(json.dumps({'memory':{'memory_enabled':True,'user_profile_enabled':True}}))
-        self.memory = HermesMemory(self.home)
+        self.memory = MoMoMemory(self.home)
 
     def test_native_writes_appear_in_ui_and_ui_delete_updates_native_store(self):
         with self.memory.store() as store:
             self.assertTrue(store.add('memory', '周五给小林发方案。')['success'])
             self.assertTrue(store.add('user', '喜欢清淡的食物。')['success'])
         items = self.memory.list()['items']; item = next(i for i in items if i['kind']=='memory')
-        self.assertEqual('hermes', item['basis']); self.assertEqual([],item['evidence'])
-        self.memory.forget(item['id']); self.memory.forget(item['id'])
+        self.assertEqual('momo', item['basis']); self.assertEqual([],item['evidence'])
+        self.memory.forget(item['id'].replace('momo-', 'hermes-', 1)); self.memory.forget(item['id'])
         with self.memory.store() as store:
             self.assertEqual([],store.memory_entries); self.assertEqual(['喜欢清淡的食物。'],store.user_entries)
 
@@ -47,7 +47,7 @@ class HermesMemoryTests(unittest.TestCase):
     def test_other_home_is_not_read_or_modified(self):
         other = self.home/'other'; other.mkdir()
         with self.memory.store() as store: store.add('user','当前实例的用户。')
-        with HermesMemory(other).store() as store: self.assertEqual([], store.user_entries)
+        with MoMoMemory(other).store() as store: self.assertEqual([], store.user_entries)
         self.assertEqual(1,len(self.memory.list()['items']))
 
     def test_markdown_notebook_briefing_journal_person_and_topic_roundtrip(self):
