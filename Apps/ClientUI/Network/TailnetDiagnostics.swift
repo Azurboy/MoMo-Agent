@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import MoMoAgentClient
 
 /// Bounded, local timing evidence. Never stores addresses, credentials or message content.
 final class TailnetDiagnostics: @unchecked Sendable {
@@ -8,10 +9,66 @@ final class TailnetDiagnostics: @unchecked Sendable {
     private var target: String?
     private var routes: [[String: Any]] = []
     private var requests: [[String: Any]] = []
+    private var chat: [[String: Any]] = []
+    private var needsRestore = true
     private var lastRoutes: [[String: String]] = []
     private var scheduled = false
 
-    init(directory: URL) { file = directory.appendingPathComponent("network-timing.json") }
+    init(directory: URL) {
+        file = directory.appendingPathComponent("network-timing.json")
+        queue.async { self.restore() }
+    }
+
+    private func restore() {
+        guard needsRestore else { return }
+        let data: Data
+        do { data = try Data(contentsOf: file) }
+        catch CocoaError.fileReadNoSuchFile { needsRestore = false; return }
+        catch { return } // The previous history may still be protected before the first unlock.
+        needsRestore = false
+        guard let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            Logger(subsystem: "app.momoagent", category: "network").error("Cannot decode previous network diagnostics")
+            return
+        }
+        routes = Array(((saved["routes"] as? [[String: Any]] ?? []) + routes).suffix(24))
+        lastRoutes = routes.last?["peers"] as? [[String: String]] ?? []
+        requests = Array(((saved["requests"] as? [[String: Any]] ?? []) + requests).suffix(96))
+        chat = Array(((saved["chat"] as? [[String: Any]] ?? []) + chat).suffix(128))
+    }
+
+    func recordChat(_ operation: StaticString, state: RemoteTaskStore.ConnectionState, error: Error?, retryAt: Date?) {
+        queue.sync {
+            // A confirmed response closes an incident, including one from a previous app launch.
+            if error == nil, !needsRestore, chat.last?["error"] == nil { return }
+            var entry: [String: Any] = ["at": Date().timeIntervalSince1970, "operation": operation.description,
+                                        "state": state.rawValue]
+            if let error {
+                let nsError = error as NSError
+                if case AgentClientError.http(let status, _, _, _) = error {
+                    entry["error"] = "HTTP"; entry["code"] = status
+                } else {
+                    entry["error"] = String(reflecting: type(of: error))
+                    entry["code"] = nsError.code
+                    if [NSURLErrorDomain, NSPOSIXErrorDomain, NSCocoaErrorDomain, "kCFErrorDomainCFNetwork"].contains(nsError.domain) {
+                        entry["domain"] = nsError.domain
+                    }
+                }
+            }
+            entry["retryAt"] = retryAt?.timeIntervalSince1970
+            if let last = chat.last, error != nil,
+               last["state"] as? String == state.rawValue, last["operation"] as? String == operation.description,
+               last["error"] as? String == entry["error"] as? String, last["code"] as? Int == entry["code"] as? Int,
+               last["domain"] as? String == entry["domain"] as? String {
+                entry["lastAt"] = entry["at"]
+                entry["at"] = last["at"]
+                entry["count"] = (last["count"] as? Int ?? 1) + 1
+                chat.removeLast()
+            }
+            chat.append(entry)
+            chat = Array(chat.suffix(128))
+            write()
+        }
+    }
 
     func observePeer(_ host: String?) { queue.async { self.target = host } }
 
@@ -125,16 +182,25 @@ final class TailnetDiagnostics: @unchecked Sendable {
         scheduled = true
         queue.asyncAfter(deadline: .now() + 5) {
             self.scheduled = false
-            do {
-                let data = try JSONSerialization.data(withJSONObject: [
-                    "schema": 1, "updatedAt": Date().timeIntervalSince1970,
-                    "routes": self.routes, "requests": self.requests
-                ], options: [.sortedKeys])
-                try data.write(to: self.file, options: [.atomic])
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: self.file.path)
-            } catch {
-                Logger(subsystem: "app.momoagent", category: "network").error("Cannot save network timings")
-            }
+            self.write()
+        }
+    }
+
+    private func write() {
+        restore()
+        guard !needsRestore else { return }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "schema": 2, "updatedAt": Date().timeIntervalSince1970,
+                "routes": routes, "requests": requests, "chat": chat
+            ], options: [.sortedKeys])
+            let manager = FileManager.default
+            try manager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+            try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } catch {
+            Logger(subsystem: "app.momoagent", category: "network").error("Cannot save network diagnostics: \(error as NSError, privacy: .private)")
         }
     }
 }

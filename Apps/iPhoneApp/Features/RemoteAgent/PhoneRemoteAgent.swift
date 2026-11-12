@@ -402,6 +402,7 @@ final class PhoneRemoteAgent {
             sources = nil; sourcesFailure = String(localized: "资料来源暂时无法读取，请解锁后重新打开 App。")
         }
         let tasks = try Self.openTaskStore(file: directory.appendingPathComponent("tasks.json"), connection: connection, client: client)
+        tasks.onConnectionDiagnostic = tailnet.diagnostics.recordChat
         tasks.onAuthenticationRequired = { [weak self, weak sync] in
             sync?.background(); self?.health?.background(); self?.sources?.background(); self?.network?.suspend(); self?.notifications.background()
             self?.lifeIllustrations.stopPolling()

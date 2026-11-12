@@ -55,11 +55,12 @@ public final class RemoteTaskStore {
     }
     /// Background reconciliation remains diagnostic state, not a chat banner.
     public var interactionFailure: String? { [FailureSource.storage, .control].compactMap { failures[$0] }.first }
-    public enum ConnectionState: Equatable, Sendable { case ready, retrying, authenticationRequired, unavailable }
+    public enum ConnectionState: String, Sendable { case ready, retrying, authenticationRequired, unavailable }
     public private(set) var connectionState: ConnectionState = .ready
     public private(set) var nextConnectionAttempt: Date?
     @ObservationIgnored public var onAuthenticationRequired: (() -> Void)?
     @ObservationIgnored public var onConnectionRestored: (() -> Void)?
+    @ObservationIgnored public var onConnectionDiagnostic: ((StaticString, ConnectionState, Error?, Date?) -> Void)?
     @ObservationIgnored private var connectionFailures = 0
     @ObservationIgnored private var connectionConfirmation: UInt64 = 0
     @ObservationIgnored private var absorbedInitialStreamSocketFailure = false
@@ -562,10 +563,10 @@ public final class RemoteTaskStore {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
             refreshConversationOnRecovery = conversation != nil
             if case AgentClientError.http(let status, _, _, _) = error, [404, 405, 501].contains(status) {
-                connectionState = .unavailable
+                markUnavailable(error, operation: #function)
                 failures[.discovery] = StoreError.unsupportedServer.localizedDescription
             } else {
-                if case StoreError.unsupportedServer = error { connectionState = .unavailable }
+                if case StoreError.unsupportedServer = error { markUnavailable(error, operation: #function) }
                 failures[.discovery] = connectionErrorDescription(error)
             }
         }
@@ -1008,12 +1009,15 @@ public final class RemoteTaskStore {
                 if !self.confirmedInCurrentForeground, !self.absorbedInitialStreamSocketFailure,
                    self.connectionState == .ready, AgentTransportFailure.isSocketOrLinkFailure(error) {
                     self.absorbedInitialStreamSocketFailure = true
+                    self.onConnectionDiagnostic?("conversationSubscription", .ready, error, nil)
                     self.failures[.synchronization] = self.connectionErrorDescription(error)
                     return
                 }
-                self.recordConnectionFailure(error)
+                self.recordConnectionFailure(error, operation: "conversationSubscription")
                 self.failures[.synchronization] = self.connectionErrorDescription(error)
-                if error is StoreError || error is DecodingError { self.connectionState = .unavailable }
+                if error is StoreError || error is DecodingError {
+                    self.markUnavailable(error, operation: "conversationSubscription")
+                }
             })
         loadOlderMessages()
     }
@@ -1062,7 +1066,10 @@ public final class RemoteTaskStore {
         }
     }
 
-    private func markConnectionReady() {
+    private func markConnectionReady(operation: StaticString = #function) {
+        if connectionState != .ready || !confirmedInCurrentForeground {
+            onConnectionDiagnostic?(operation, .ready, nil, nil)
+        }
         confirmedInCurrentForeground = true
         connectionState = .ready; connectionFailures = 0; nextConnectionAttempt = nil
         onConnectionRestored?()
@@ -1220,7 +1227,7 @@ public final class RemoteTaskStore {
         } catch { failures[.storage] = error.localizedDescription; throw error }
     }
 
-    private func request<T>(_ operation: () async throws -> T) async throws -> T {
+    private func request<T>(source: StaticString = #function, _ operation: () async throws -> T) async throws -> T {
         guard canContactServer else { throw CancellationError() }
         let generation = lifetime
         let confirmation = connectionConfirmation
@@ -1233,7 +1240,7 @@ public final class RemoteTaskStore {
         } catch {
             guard generation == lifetime else { throw CancellationError() }
             if !AgentTransportFailure.isSocketOrLinkFailure(error) || confirmation == connectionConfirmation {
-                recordConnectionFailure(error)
+                recordConnectionFailure(error, operation: source)
             }
             throw error
         }
@@ -1260,7 +1267,14 @@ public final class RemoteTaskStore {
         AgentTransportFailure.isTransient(error)
     }
 
-    public func recordConnectionFailure(_ error: Error) {
+    private func markUnavailable(_ error: Error, operation: StaticString) {
+        if connectionState != .unavailable {
+            onConnectionDiagnostic?(operation, .unavailable, error, nil)
+        }
+        connectionState = .unavailable
+    }
+
+    public func recordConnectionFailure(_ error: Error, operation: StaticString = #function) {
         if AgentTransportFailure.isCancelled(error) { return }
         var delay: TimeInterval?; var transient = AgentTransportFailure.isSocketOrLinkFailure(error); var serverLimited = false
         if case AgentClientError.invalidResponse = error { transient = true }
@@ -1268,13 +1282,14 @@ public final class RemoteTaskStore {
             if status == 401 {
                 lifetime = UUID()
                 connectionState = .authenticationRequired; nextConnectionAttempt = nil
+                onConnectionDiagnostic?(operation, .authenticationRequired, error, nil)
                 onAuthenticationRequired?()
                 return
             }
             transient = status == 408 || status == 429 || (500...599).contains(status) && status != 501
             delay = retryAfter
             serverLimited = status == 429 || (retryAfter ?? 0) > 0
-            if [403, 405, 426, 501].contains(status) { connectionState = .unavailable; return }
+            if [403, 405, 426, 501].contains(status) { markUnavailable(error, operation: operation); return }
         }
         if transient {
             // Concurrent failures from the stream and polling share one retry window.
@@ -1285,6 +1300,7 @@ public final class RemoteTaskStore {
             if serverLimited, let deadline = nextConnectionAttempt {
                 serverRetryNotBefore = max(serverRetryNotBefore ?? deadline, deadline)
             }
+            onConnectionDiagnostic?(operation, .retrying, error, nextConnectionAttempt)
         }
     }
 

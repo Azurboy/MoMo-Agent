@@ -109,6 +109,12 @@ import XCTest
         await store.refresh()
         store.setDraft("queued while offline")
         try store.enqueue()
+        var transitions: [RemoteTaskStore.ConnectionState] = []
+        var retryDates: [Date?] = []
+        store.onConnectionDiagnostic = { _, state, _, retry in
+            transitions.append(state)
+            retryDates.append(retry)
+        }
         store.recordConnectionFailure(URLError(.networkConnectionLost))
         let deadline = try XCTUnwrap(store.nextConnectionAttempt)
         clock = deadline.addingTimeInterval(-0.1)
@@ -116,6 +122,8 @@ import XCTest
         XCTAssertEqual(store.nextConnectionAttempt, deadline)
         clock = deadline
         await store.refresh()
+        XCTAssertEqual(transitions, [.retrying, .ready])
+        XCTAssertEqual(retryDates, [deadline, nil])
         let sends = await wire.sends
         XCTAssertEqual(sends, 1)
     }
