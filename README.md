@@ -14,6 +14,8 @@
 
 English | [简体中文](./README.zh-CN.md)
 
+MoMo Agent is fully open source, and we thank the people behind every project we’ve built on or learned from and welcome [pull requests](https://github.com/Miri-Labs/MoMo-Agent/compare) from everyone in the community.
+
 </div>
 
 ---

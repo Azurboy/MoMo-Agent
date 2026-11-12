@@ -14,6 +14,8 @@
 
 [English](./README.md) | 简体中文
 
+MoMo Agent 是一个纯开源项目，感谢所有我们借鉴过的项目及其背后的贡献者，也欢迎每一位社区成员[提交 PR](https://github.com/Miri-Labs/MoMo-Agent/compare)。
+
 </div>
 
 ---
