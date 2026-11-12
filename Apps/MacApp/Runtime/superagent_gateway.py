@@ -840,7 +840,7 @@ class SuperAgentGateway:
         )
         with suppress(Exception):
             self.dsh_reaper_proc = subprocess.Popen(
-                [str(self.python_executable), "-I", "-c", reaper_code, str(os.getpid()), str(dsh_pid)],
+                [str(self.python_executable), "-I", "-B", "-c", reaper_code, str(os.getpid()), str(dsh_pid)],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
