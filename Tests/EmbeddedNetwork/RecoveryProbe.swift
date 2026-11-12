@@ -26,6 +26,15 @@ import TailscaleKit
                 let response = try await TailnetChunkStream.read(URLRequest(url: url), session: session, network: client, limit: 1024)
                 try check(response.status == 200, "Private HTTP failed")
             }
+            // The fixture starts with empty credentials. Let its control server enroll the phone
+            // before exercising recovery of an already-paired connection.
+            try await client.start()
+            let enrollmentDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while client.state != "Running" {
+                try check(ContinuousClock.now < enrollmentDeadline, "Fixture client did not finish enrollment")
+                try await Task.sleep(for: .milliseconds(100))
+                await client.refreshStatus()
+            }
             let original = try await client.connectedSession(peer: address)
             let missingPeer = Task { try await client.connectedSession(peer: "100.127.255.254") }
             try await Task.sleep(for: .milliseconds(300))
