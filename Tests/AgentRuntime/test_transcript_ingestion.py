@@ -9,6 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "Apps/MacApp/Context"))
 from context_store import ContextStore, digest, canonical
 from transcript_ingestion import prepare, finish, next_job, MAX_BATCH_BYTES, MAX_PARTS
+from memory_review import AUTOMATIC_INTERVAL
 
 
 class TranscriptIngestionTests(unittest.TestCase):
@@ -79,12 +80,14 @@ class TranscriptIngestionTests(unittest.TestCase):
         self.assertEqual(job["id"], next_job(self.store, 1000, True)["id"])
         self.store.db.execute("UPDATE jobs SET first_attempt=1000,replay_before=5000 WHERE id=?", (job["id"],))
         self.sync(["第一句", "新的句子"])
-        self.assertIsNone(next_job(self.store, 1059, True))
-        retry=next_job(self.store, 1060, True)
+        retry=next_job(self.store, 1001, False)
         self.assertEqual(job["id"], retry["id"])
         self.assertEqual(batch,prepare(self.store,retry))
         self.store.db.execute("UPDATE jobs SET state='running' WHERE id=?", (job["id"],))
         self.assertEqual(job["id"],next_job(self.store,1061,False)["id"])
+        finish(self.store, retry)
+        self.assertIsNone(next_job(self.store, 1000 + AUTOMATIC_INTERVAL - 1, True))
+        self.assertIsNotNone(next_job(self.store, 1000 + AUTOMATIC_INTERVAL, True))
 
 
 if __name__ == "__main__": unittest.main()

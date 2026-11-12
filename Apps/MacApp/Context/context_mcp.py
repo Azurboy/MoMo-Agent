@@ -30,6 +30,18 @@ def read_recording(source_id: str, source_revision: str = "", offset: int = 0, l
     return call("read_source", source_id, source_revision or None, offset, limit)
 
 
+if os.environ.get("MOMO_MEMORY_ONLY") == "1":
+    @server.tool()
+    def read_daily_evidence(review_id: str, page: int) -> dict:
+        """Read the next numbered page of chat or transcript evidence for an active daily Dream."""
+        from daily_review import read_page
+        store = ContextStore(os.environ["MOMO_CONTEXT_DIRECTORY"])
+        try:
+            return read_page(store, review_id, page)
+        finally:
+            store.close()
+
+
 if os.environ.get("MOMO_MEMORY_ONLY") != "1":
     @server.tool()
     def read_life_illustration_status(after: int = 0, limit: int = 50) -> dict:

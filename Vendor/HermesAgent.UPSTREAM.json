@@ -22,7 +22,7 @@
     },
     {
       "file": "gateway/session_execution.py",
-      "reason": "Restrict MoMo transcript, incremental chat-memory and Dream sessions to source reading, native session_search and Hermes memory in the same profile; disable nested background skill review. Separate momo-summary sessions generate derived recording summaries with no tools, memory injection, context files or background review. No second memory engine.",
+      "reason": "Restrict MoMo transcript, incremental chat-memory and Dream sessions to source reading, native session_search and Hermes memory in the same profile; disable nested background skill review. Paged Dream sessions use the native unlimited iteration default for both fresh and cached agents. Separate momo-summary sessions generate derived recording summaries with no tools, memory injection, context files or background review. No second memory engine.",
       "validation": "Transcript ingestion and durable review regressions cover native write receipts, full Unicode cursors, bounded terminal retry, lost admission, legacy recovery and Dream scheduling. Isolated real Codex model validates memory writes, Dream, new-session recall, and a recording summary whose actual agent has zero tools and performs no memory writes."
     },
     {

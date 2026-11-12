@@ -128,6 +128,39 @@ class SharedContextAndMemoryCLITests(unittest.TestCase):
 
 
 class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_antigravity_worker_stops_only_on_unchanged_tool_results(self):
+        from unittest.mock import AsyncMock, Mock, patch
+        from superagent_gateway import SuperAgentGateway
+        gateway = SuperAgentGateway.__new__(SuperAgentGateway)
+        gateway.data = Path(self.id())
+        gateway._check_internal_antigravity_auth = Mock(return_value=None)
+        gateway._clear_provider_notice_if_recovered = Mock()
+        request = Mock()
+        messages = []
+        request.json = AsyncMock(return_value={"model": "mock", "messages": messages})
+        def tool(name, args, result):
+            call_id = str(len(messages))
+            messages.extend([
+                {"role": "assistant", "tool_calls": [{"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}}]},
+                {"role": "tool", "tool_call_id": call_id, "content": result},
+            ])
+        path = {"path": "projects/test.md"}
+        with patch("antigravity_bridge.run_antigravity_completion_async", new_callable=AsyncMock, return_value={"choices": []}) as model:
+            for _ in range(3):
+                tool("read_memory_notebook", path, "original")
+            blocked = await gateway.handle_internal_antigravity_completions(request)
+            self.assertEqual(blocked.status, 422)
+            model.assert_not_awaited()
+            tool("read_memory_notebook", path, "external edit")
+            self.assertEqual((await gateway.handle_internal_antigravity_completions(request)).status, 200)
+            tool("write_memory_notebook", path, '{"success": true}')
+            tool("read_memory_notebook", path, "original")
+            self.assertEqual((await gateway.handle_internal_antigravity_completions(request)).status, 200)
+            messages.append({"role": "user", "content": "核对这篇笔记"})
+            tool("read_memory_notebook", path, "original")
+            self.assertEqual((await gateway.handle_internal_antigravity_completions(request)).status, 200)
+            self.assertEqual(model.await_count, 3)
+
     async def test_gateway_preserves_shared_conversation_and_runs_explicit_plus_proactive_flows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "Agent"

@@ -388,6 +388,7 @@ def build_antigravity_prompt(
             if len(encoded) > head_budget - used_head:
                 clipped = encoded[: max(1024, head_budget - used_head)].decode("utf-8", errors="ignore")
                 head_chunks.append(clipped + "\n...[首轮超长内容已截断]...")
+                used_head += len(head_chunks[-1].encode("utf-8"))
                 break
             head_chunks.append(chunk)
             used_head += len(encoded)
@@ -399,8 +400,11 @@ def build_antigravity_prompt(
             encoded = chunk.encode("utf-8")
             if used_tail + len(encoded) > tail_budget:
                 if not tail_chunks_rev:
-                    clipped = encoded[-tail_budget:].decode("utf-8", errors="ignore")
-                    tail_chunks_rev.append("...[单条超长上下文前段已压缩]...\n" + clipped)
+                    # Page cursors and tool identity precede the potentially large span list.
+                    half = (tail_budget - 128) // 2
+                    start = encoded[:half].decode("utf-8", errors="ignore")
+                    end = encoded[-half:].decode("utf-8", errors="ignore")
+                    tail_chunks_rev.append(start + "\n...[工具结果中段已截断]...\n" + end)
                 break
             tail_chunks_rev.append(chunk)
             used_tail += len(encoded) + 2

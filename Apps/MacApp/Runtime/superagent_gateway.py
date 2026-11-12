@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import quote, unquote
 import urllib.error
@@ -34,6 +35,7 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
+from memory_review import STALLED_REVIEW
 from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
 from conversation_store import ProductStore, collect_deliverable_attachments
@@ -72,6 +74,72 @@ CAPABILITIES = dict(
     conversation_events=True,
     proactive_agent=True,
 )
+
+
+class RepeatedToolRead(RuntimeError):
+    """A tool loop stopped making progress on the current turn."""
+
+
+_EVIDENCE_READS = frozenset({
+    "read_recording", "list_recordings", "search_recordings", "phone_context",
+    "session_search", "read_memory_notebook", "list_memory_notebooks", "read_daily_evidence",
+})
+
+
+def _unchanged_tool_key(call, results):
+    if not isinstance(call, dict) or call.get("id") not in results:
+        return None
+    fn = call.get("function")
+    if not isinstance(fn, dict):
+        return None
+    name = str(fn.get("name") or "").split("__")[-1]
+    args = fn.get("arguments") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    result = results[call["id"]]
+    is_read = name in _EVIDENCE_READS or (name == "notebook" and args.get("action", "list") in ("read", "list"))
+    if not is_read:
+        # A successful mutation allows verification reads. An identical tool
+        # failure, however, cannot move the review forward on its own.
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or not (payload.get("error") or payload.get("success") is False):
+            return None
+    key = json.dumps([name, args, result], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(key.encode()).digest()
+
+
+def check_read_progress(messages: list[dict]) -> None:
+    # Compare completed rounds in this turn, independent of provider call IDs.
+    rounds = []
+    results = {}
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            break
+        if msg.get("role") == "tool":
+            results[msg.get("tool_call_id")] = msg.get("content")
+            continue
+        calls = msg.get("tool_calls")
+        if msg.get("role") != "assistant" or not calls:
+            break
+        keys = {_unchanged_tool_key(call, results) for call in calls}
+        if None in keys:
+            break
+        rounds.append(keys)
+        results.clear()
+        if len(rounds) == 8:
+            break
+    if len(rounds) >= 3:
+        prior = set().union(*rounds[2:])
+        if rounds[1] <= prior and rounds[0] <= prior:
+            raise RepeatedToolRead("工具连续返回相同的读取结果或错误，本次执行已停止。")
 
 
 def _conflict(code: str) -> None:
@@ -497,6 +565,10 @@ class SuperAgentGateway:
         response_format = payload.get("response_format") if isinstance(payload.get("response_format"), dict) else None
         stream_requested = bool(payload.get("stream"))
 
+        try:
+            check_read_progress(messages)
+        except RepeatedToolRead as exc:
+            return web.json_response({"error": {"code": STALLED_REVIEW, "message": str(exc)}}, status=422)
         try:
             completion = await run_antigravity_completion_async(
                 model=model,
@@ -1860,7 +1932,9 @@ class SuperAgentGateway:
                 ex_status = existing["status"]
                 ex_age = now - float(existing["updated_at"] or existing["created_at"] or 0.0)
                 active_sets = getattr(self, "_active_api_runs", set())
-                if ex_status == "failed" or (ex_status in ("started", "queued", "running") and ex_run_id not in active_sets and ex_age > 5.0):
+                if not self._is_memory_review_run(session_id, prompt) and (
+                    ex_status == "failed" or (ex_status in ("started", "queued", "running") and ex_run_id not in active_sets and ex_age > 5.0)
+                ):
                     with self.bridge.db:
                         self.bridge.db.execute(
                             "UPDATE api_runs SET session_id=?, input_text=?, status='started', output_text=NULL, error_text=NULL, updated_at=? WHERE run_id=?",
@@ -1907,6 +1981,7 @@ class SuperAgentGateway:
                     "run_id": row["run_id"],
                     "session_id": row["session_id"],
                     "status": status,
+                    "updated_at": row["updated_at"],
                     "output": row["output_text"],
                     "error": err_text,
                 }
@@ -1958,12 +2033,22 @@ class SuperAgentGateway:
         if not hasattr(self, "_active_api_runs"):
             self._active_api_runs = set()
         self._active_api_runs.add(run_id)
+        stop_review = threading.Event()
         try:
             if self._is_memory_review_run(session_id, prompt):
-                text = await asyncio.wait_for(
-                    asyncio.to_thread(self._call_configured_llm_memory_review, session_id, prompt),
-                    timeout=360.0,
-                )
+                loop = asyncio.get_running_loop()
+                async with asyncio.timeout(360) as idle_timeout:
+                    def heartbeat():
+                        if stop_review.is_set() or idle_timeout.expired():
+                            return
+                        idle_timeout.reschedule(loop.time() + 360)
+                        with self.bridge.db:
+                            self.bridge.db.execute("UPDATE api_runs SET updated_at=? WHERE run_id=? AND status='started'",
+                                                   (time.time(), run_id))
+                    text = await asyncio.to_thread(
+                        self._call_configured_llm_memory_review, session_id, prompt, stop_review,
+                        lambda: loop.call_soon_threadsafe(heartbeat),
+                    )
             else:
                 text = await asyncio.wait_for(
                     asyncio.to_thread(self._call_configured_llm_oneshot, prompt),
@@ -1979,6 +2064,8 @@ class SuperAgentGateway:
             log.warning("Direct /v1/runs execution failed (%s): %s", run_id, exc)
             notice = self._record_provider_issue(exc)
             err_code = notice["short_error"] if notice else "execution_failed"
+            if isinstance(exc, RepeatedToolRead):
+                err_code = STALLED_REVIEW
             with self.bridge.db:
                 self.bridge.db.execute(
                     "UPDATE api_runs SET status='failed', error_text=?, updated_at=? WHERE run_id=?",
@@ -1988,12 +2075,13 @@ class SuperAgentGateway:
                 with suppress(Exception):
                     self.publish_live_state()
         finally:
+            stop_review.set()
             self._active_api_runs.discard(run_id)
 
     def _build_memory_review_session(self, session_id: str) -> tuple[str, list[dict], object]:
         import copy
         from contextlib import closing
-        from context_store import ContextStore, logical_local_date, read_day_start_hour
+        from context_store import Conflict, ContextStore, logical_local_date, read_day_start_hour
         from health_store import read_health
         from momo_memory import MEMORY_SCHEMA, MoMoMemory, execute_memory_tool
         import memory_review
@@ -2228,6 +2316,14 @@ class SuperAgentGateway:
             },
         ]
 
+        if session_id.startswith("momo-review-"):
+            tool_specs.append({
+                "name": "read_daily_evidence",
+                "description": "Read the next page of this daily Dream's frozen chat and recording evidence.",
+                "parameters": {"type": "object", "properties": {"review_id": {"type": "string"}, "page": {"type": "integer"}},
+                               "required": ["review_id", "page"], "additionalProperties": False},
+            })
+
         def execute_tool(name: str, raw_args: str | dict) -> str:
             try:
                 args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args or "{}")
@@ -2237,6 +2333,17 @@ class SuperAgentGateway:
                 return json.dumps({"success": False, "error": f"Invalid tool JSON arguments: {exc}"}, ensure_ascii=False)
 
             clean_name = name[5:] if name.startswith("mcp__") else name
+            if clean_name == "read_daily_evidence":
+                import daily_review
+                if session_id != "momo-review-" + str(args.get("review_id", "")):
+                    return json.dumps({"error": "Page belongs to another review"})
+                store = ContextStore(self.data / "context")
+                try:
+                    return json.dumps(daily_review.read_page(store, args["review_id"], args.get("page")), ensure_ascii=False)
+                except (ValueError, Conflict) as exc:
+                    return json.dumps({"error": str(exc)})
+                finally:
+                    store.close()
             if clean_name == "memory":
                 result_json = execute_memory_tool(
                     mem_store,
@@ -2455,29 +2562,39 @@ class SuperAgentGateway:
         writes = memory_review.successful_writes(hermes_home, session_id)
         last_content = memory_review._last_write_content(hermes_home, session_id)
         last_ok = True
-        exhausted_cap = False
         if last_content is not None:
             try:
                 last_obj = json.loads(last_content)
                 last_ok = isinstance(last_obj, dict) and last_obj.get("success") is True
-                exhausted_cap = isinstance(last_obj, dict) and last_obj.get("done") is True
             except Exception:
                 last_ok = False
-        if writes > 0 and (last_ok or exhausted_cap):
+        if writes > 0 and last_ok:
             reason = text[:350] if text else f"已完成 {writes} 项 Markdown 笔记、记忆或说话人标签更新。"
             return json.dumps({"memory_review": {"outcome": "updated", "reason": reason}}, ensure_ascii=False)
-        if writes == 0 and (last_content is None or exhausted_cap):
-            reason = text[:350] if text else "已审阅近期记录与生活上下文，当前无需新增或修改记忆。"
-            return json.dumps({"memory_review": {"outcome": "no_change", "reason": reason}}, ensure_ascii=False)
         return text
 
-    def _call_configured_llm_memory_review(self, session_id: str, prompt: str) -> str:
+    def _call_configured_llm_memory_review(self, session_id: str, prompt: str, stop: threading.Event | None = None, heartbeat=None) -> str:
         import copy
 
         llm = resolve_superagent_llm(self.data)
         provider = llm["dsh_provider"]
         model_id = llm["model_id"]
-        system_prompt, tool_specs, execute_tool = self._build_memory_review_session(session_id)
+        system_prompt, tool_specs, run_tool = self._build_memory_review_session(session_id)
+
+        def check_active():
+            if stop is not None and stop.is_set():
+                raise TimeoutError("Memory review stopped")
+
+        def execute_tool(name, args):
+            check_active()
+            return run_tool(name, args)
+
+        def check_round():
+            check_active()
+            check_read_progress(messages)
+            if heartbeat is not None:
+                heartbeat()
+
         openai_tools = [{"type": "function", "function": copy.deepcopy(spec)} for spec in tool_specs]
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
@@ -2487,7 +2604,8 @@ class SuperAgentGateway:
         if provider == "antigravity":
             from antigravity_bridge import run_antigravity_completion
 
-            for _ in range(14):
+            while True:
+                check_round()
                 resp = run_antigravity_completion(
                     model=model_id,
                     messages=messages,
@@ -2520,17 +2638,6 @@ class SuperAgentGateway:
                             "content": result_str,
                         }
                     )
-            with suppress(Exception):
-                resp = run_antigravity_completion(
-                    model=model_id,
-                    messages=messages,
-                    data_dir=self.data,
-                    timeout=90.0,
-                    background=True,
-                )
-                msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
-                return self._finalize_memory_review_output(session_id, str(msg.get("content") or "").strip())
-            return self._finalize_memory_review_output(session_id, "")
 
         if provider == "anthropic":
             from agent.anthropic_adapter import build_anthropic_client, build_anthropic_kwargs, create_anthropic_message
@@ -2539,7 +2646,8 @@ class SuperAgentGateway:
             token = llm["env"].get("ANTHROPIC_OAUTH_TOKEN") or llm["env"]["MOMO_LLM_API_KEY"]
             is_oauth = _is_oauth_token(token)
             with build_anthropic_client(token, llm["base_url"], timeout=120) as client:
-                for _ in range(14):
+                while True:
+                    check_round()
                     kwargs = build_anthropic_kwargs(
                         model=model_id,
                         messages=messages,
@@ -2581,20 +2689,6 @@ class SuperAgentGateway:
                                 "content": result_str,
                             }
                         )
-                kwargs = build_anthropic_kwargs(
-                    model=model_id,
-                    messages=messages,
-                    tools=None,
-                    max_tokens=4096,
-                    reasoning_config={"enabled": False},
-                    is_oauth=is_oauth,
-                    base_url=llm["base_url"],
-                )
-                resp = create_anthropic_message(client, kwargs)
-                return self._finalize_memory_review_output(
-                    session_id,
-                    "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text").strip(),
-                )
 
         from openai import OpenAI
 
@@ -2619,7 +2713,8 @@ class SuperAgentGateway:
                 if provider == "openai-codex"
                 else client.chat.completions
             )
-            for _ in range(14):
+            while True:
+                check_round()
                 resp = completions.create(model=model_id, messages=messages, tools=openai_tools, timeout=120)
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None) or []
@@ -2652,13 +2747,6 @@ class SuperAgentGateway:
                             "content": result_str,
                         }
                     )
-            with suppress(Exception):
-                resp = completions.create(model=model_id, messages=messages, timeout=90)
-                return self._finalize_memory_review_output(
-                    session_id,
-                    (getattr(resp.choices[0].message, "content", None) or "").strip(),
-                )
-            return self._finalize_memory_review_output(session_id, "")
 
     def _call_configured_llm_oneshot(self, prompt: str) -> str:
         llm = resolve_superagent_llm(self.data)

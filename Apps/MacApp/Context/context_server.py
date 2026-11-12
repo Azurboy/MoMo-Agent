@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from context_store import ContextStore, Conflict
 from momo_memory import MoMoMemory
+import daily_review
 import transcript_ingestion
 import memory_review
 import recording_summary
@@ -27,7 +28,7 @@ class ContextService:
         self.key = (self.data / "api-key").read_text().strip()
         self.memory = MoMoMemory(self.data)
         self.stopped = threading.Event()
-        self.next_dispatch = time.monotonic() + transcript_ingestion.INTERVAL
+        self.next_dispatch = time.monotonic() + 60
         store = ContextStore(self.directory); store.close()
         illustrations = LifeIllustrations(self.data); illustrations.recover(); illustrations.close()
         service = self
@@ -212,33 +213,45 @@ class ContextService:
 
         threading.Thread(target=_ping, daemon=True).start()
 
+    def background_quota_exhausted(self, now):
+        from provider_notice import canonical_provider, read_provider_notice
+        from model_setup import load_config
+        notice = read_provider_notice(self.data, now=now)
+        if not notice or notice['kind'] != 'quota':
+            return False
+        model = load_config(self.data).get('model') or {}
+        return isinstance(model, dict) and notice['provider'] == canonical_provider(model.get('provider'))
+
     def dispatch(self):
         # Only durable admission/reconciliation. Active runtime owns model calls, tools and execution.
         while not self.stopped.wait(2):
             store = ContextStore(self.directory)
             try:
                 review = store.db.execute(
-                    "SELECT * FROM memory_reviews WHERE state='running' OR (state='pending' AND (first_attempt IS NOT NULL OR json_extract(input, '$.manual_requested_at') IS NOT NULL)) ORDER BY rowid LIMIT 1"
+                    "SELECT * FROM memory_reviews WHERE state='running' OR (state='pending' AND first_attempt IS NOT NULL) ORDER BY rowid LIMIT 1"
                 ).fetchone()
                 if review:
                     self.advance_review(store, review)
                     continue
                 now = time.time()
-                admit = time.monotonic() >= self.next_dispatch and memory_review.chat_idle(self.data, now)
                 job = transcript_ingestion.next_job(store, now, False)
-                if not job and admit:
+                if job:
+                    self.advance_job(store, job)
+                    continue
+                manual = store.db.execute(
+                    "SELECT * FROM memory_reviews WHERE state='pending' AND json_extract(input,'$.manual_requested_at') IS NOT NULL ORDER BY rowid LIMIT 1"
+                ).fetchone()
+                if manual:
+                    self.advance_review(store, manual)
+                    continue
+                if time.monotonic() >= self.next_dispatch and memory_review.chat_idle(self.data, now):
+                    self.next_dispatch = time.monotonic() + 60
+                    if self.background_quota_exhausted(now):
+                        continue
                     memory_review.recover_empty_legacy(store, self.data / 'hermes')
                     review = memory_review.next_review(store, self.data, now)
-                    # A due Dream gets a turn even with continuous recording arrivals.
-                    job = transcript_ingestion.next_job(store, now, True)
                     if review:
-                        self.next_dispatch = time.monotonic() + transcript_ingestion.INTERVAL
                         self.advance_review(store, review)
-                        continue
-                if job:
-                    if job["state"] == "pending":
-                        self.next_dispatch = time.monotonic() + transcript_ingestion.INTERVAL
-                    self.advance_job(store, job)
             except Exception as error:
                 logging.error("MoMo memory dispatch transaction failed: %s", type(error).__name__)
             finally:
@@ -266,7 +279,7 @@ class ContextService:
                 generator = CodexIllustrationGenerator(self.data)
                 if generator.availability()['supported']:
                     illustrations.scan(store)
-                    while not self.stopped.is_set() and memory_review.chat_idle(self.data, time.time()):
+                    while not self.stopped.is_set() and memory_review.chat_idle(self.data, time.time(), idle_seconds=60):
                         if not illustrations.advance(generator, store):
                             break
                 else:
@@ -275,6 +288,14 @@ class ContextService:
                 logging.error('MoMo illustration dispatch failed: %s', type(error).__name__)
             finally:
                 illustrations.close(); store.close()
+
+    @staticmethod
+    def review_timed_out(job, snapshot, now):
+        if snapshot.get("updated_at"):
+            return now - float(snapshot["updated_at"]) > 420
+        # Older gateways do not publish tool-round progress.
+        return ((job["first_attempt"] and now - job["first_attempt"] > 420)
+                or (job["replay_before"] and now >= job["replay_before"]))
 
     def advance_job(self, store, job):
         try:
@@ -306,17 +327,13 @@ class ContextService:
                 raise Conflict("Memory task identity mismatch")
             status = snapshot["status"]
             if status == "completed":
-                try:
-                    receipt = memory_review.outcome(self.data / 'hermes', snapshot['session_id'], snapshot.get('output'))
-                except Conflict as error:
-                    if memory_review.retry_completed(store, 'jobs', job, error): return
-                    raise
+                receipt = memory_review.outcome(self.data / 'hermes', snapshot['session_id'], snapshot.get('output'))
                 transcript_ingestion.finish(store, job, receipt)
-            elif status == 'failed' and memory_review.retry_completed(store, 'jobs', job, 'Native review failed'):
-                return
+            elif status == 'failed':
+                memory_review.handle_failed_run(store, 'jobs', job, snapshot)
             elif status in {"started", "queued", "running", "stopping"}:
                 now_ts = time.time()
-                if (job["first_attempt"] and now_ts - float(job["first_attempt"]) > 420) or (job["replay_before"] and now_ts >= float(job["replay_before"])):
+                if self.review_timed_out(job, snapshot, now_ts):
                     if memory_review.retry_completed(store, 'jobs', job, 'Memory run timed out'):
                         return
                     raise Conflict("Memory execution timed out")
@@ -346,23 +363,20 @@ class ContextService:
                     store.db.execute("UPDATE memory_reviews SET first_attempt=?,replay_before=? WHERE id=?", (first,deadline,job['id']))
                 if time.time() >= deadline:
                     raise Conflict('Memory review admission receipt expired; inspect the original run')
-                snapshot = self.request('/v1/runs', {'input': memory_review.prompt(job), 'session_id': session}, job['id'])
+                prompt = daily_review.prompt(store, job) if json.loads(job['input']).get('daily') else memory_review.prompt(job)
+                snapshot = self.request('/v1/runs', {'input': prompt, 'session_id': session}, job['id'])
                 store.db.execute("UPDATE memory_reviews SET run_id=?,state='running',error=NULL WHERE id=?", (snapshot['run_id'],job['id']))
                 snapshot = self.request('/v1/runs/' + urllib.parse.quote(snapshot['run_id'], safe=''))
             if snapshot.get('session_id') != session or not snapshot.get('run_id') or (job['run_id'] and snapshot['run_id'] != job['run_id']):
                 raise Conflict('Memory review identity mismatch')
             if snapshot['status'] == 'completed':
-                try:
-                    receipt = memory_review.outcome(self.data / 'hermes', session, snapshot.get('output'))
-                except Conflict as error:
-                    if memory_review.retry_completed(store, 'memory_reviews', job, error): return
-                    raise
+                receipt = memory_review.outcome(self.data / 'hermes', session, snapshot.get('output'))
                 memory_review.finish(store, job, receipt, self.data / 'hermes')
-            elif snapshot['status'] == 'failed' and memory_review.retry_completed(store, 'memory_reviews', job, 'Native review failed'):
-                return
+            elif snapshot['status'] == 'failed':
+                memory_review.handle_failed_run(store, 'memory_reviews', job, snapshot)
             elif snapshot['status'] in {'started','queued','running','stopping'}:
                 now_ts = time.time()
-                if (job['first_attempt'] and now_ts - float(job['first_attempt']) > 420) or (job['replay_before'] and now_ts >= float(job['replay_before'])):
+                if self.review_timed_out(job, snapshot, now_ts):
                     if memory_review.retry_completed(store, 'memory_reviews', job, 'Memory review timed out'):
                         return
                     raise Conflict('Memory review timed out')

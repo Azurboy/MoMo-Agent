@@ -398,6 +398,19 @@ class ModelSetupTests(unittest.TestCase):
             setup.verify_and_save(self.data, 'antigravity', 'gemini-4-carbon-low')
         self.assertIsNone(pn.read_provider_notice(self.data, now=1705.0))
 
+    def test_oversize_latest_recording_page_keeps_cursor_and_tool_identity(self):
+        from antigravity_bridge import build_antigravity_prompt, MAX_PROMPT_UTF8_BYTES
+        messages = [
+            {"role": "user", "content": "read pages"},
+            {"role": "assistant", "tool_calls": [{"id": "page", "function": {"name": "read_recording"}}]},
+            {"role": "tool", "tool_call_id": "page", "name": "read_recording",
+             "content": json.dumps({"next_offset": 12000, "spans": "x" * (MAX_PROMPT_UTF8_BYTES * 2), "end": "last-span"})},
+        ]
+        prompt, _, _ = build_antigravity_prompt(messages)
+        self.assertIn("name='read_recording'", prompt)
+        self.assertIn('"next_offset": 12000', prompt)
+        self.assertIn('last-span', prompt)
+
     def test_antigravity_prompt_compaction_preserves_instructions_tools_and_endpoints(self):
         import antigravity_bridge as ab
 

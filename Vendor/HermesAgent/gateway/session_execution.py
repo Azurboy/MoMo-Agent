@@ -203,6 +203,10 @@ class GatewaySessionAgentMixin:
         hits) or build a fresh one. Returns (agent, reused_cached_agent)."""
         ctx = self._ctx
         runner = self._runner
+        if ctx.user_config.get("momo_transcript_memory") and str(ctx.source.chat_id).startswith(("momo-transcript-", "momo-review-")):
+            # Match AIAgent's default unlimited tool iterations for a paginated Dream.
+            import sys
+            max_iterations = sys.maxsize
         skip_context_files = self._skip_context_files(platform_key)
         sig = runner._agent_config_signature(
             turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
