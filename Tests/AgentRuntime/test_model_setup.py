@@ -33,8 +33,9 @@ class ModelSetupTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.data = Path(self.temporary.name) / 'agent'
         runtime.initialize(self.data, 8775)
-        self.file = self.data / 'hermes/config.yaml'
+        self.file = self.data / 'profile/config.yaml'
         config = json.loads(self.file.read_text())
+        config['memory'] = {'user_profile_enabled': True}  # Existing profile with user-owned settings.
         config['model'] = {'provider': 'custom', 'base_url': 'https://old-provider.invalid/v1', 'default': 'old-model'}
         self.file.write_text(json.dumps(config))
         self.original = self.file.read_bytes()

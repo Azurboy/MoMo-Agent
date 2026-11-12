@@ -1,6 +1,6 @@
 """Durable product inbox, visible messages, completion receipts and notification outbox.
 
-Hermes SessionDB remains the only execution authority and memory store.
+DeepSeek Harness owns execution sessions.
 """
 import base64
 import hashlib
@@ -404,7 +404,7 @@ class ProductStore:
                                            (f'interim:{admission}:%', run_id, content)).fetchone()
             if previous is not None and previous['content'] == content:
                 # Preserve already-rendered IDs and cursor positions when upgrading or
-                # when Hermes persists an interim callback as a native assistant row.
+                # when the runtime persists an interim callback as a native assistant row.
                 if attachments_json and not previous['attachments_json']:
                     self.db.execute('UPDATE messages SET source_key=?, attachments_json=? WHERE id=?', (key, attachments_json, previous['id']))
                 else:

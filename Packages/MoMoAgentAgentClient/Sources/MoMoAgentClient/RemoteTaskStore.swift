@@ -923,7 +923,7 @@ public final class RemoteTaskStore {
                 guard !Task.isCancelled else { return }
                 self?.flushPendingPersistence()
                 if case AgentClientError.http(401, _, _, _) = error { self?.recordConnectionFailure(error); return }
-                // Events are ephemeral on Hermes restart; status remains authoritative.
+                // Events are ephemeral on gateway restart; status remains authoritative.
                 if case AgentClientError.http(let status, _, _, _) = error, status == 404 {
                     do { try self?.update(id) { if $0.reply == nil { $0.reply = RemoteReply() }; $0.reply?.streamUnavailable = true } }
                     catch { self?.failures[.storage] = error.localizedDescription }

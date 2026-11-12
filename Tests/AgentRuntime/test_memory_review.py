@@ -60,7 +60,7 @@ class MemoryReviewTests(unittest.TestCase):
         evidence = self.store.db.execute("SELECT evidence FROM daily_review_pages WHERE review_id=?", (job['id'],)).fetchone()
         self.assertEqual([2, 0], json.loads(evidence[0])['cursor'])
         self.native.execute("INSERT INTO session_admissions VALUES('momo-work-live','queued')");self.native.commit()
-        self.assertFalse(review.chat_idle(self.data,800))
+        self.assertTrue(review.chat_idle(self.data,800), 'A retired engine cannot hold active admission')
 
     def test_long_unicode_chat_drains_exactly_and_restart_retains_cursor(self):
         text='偏好与背景' * 14000;self.message(1,text)

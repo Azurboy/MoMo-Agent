@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 p = argparse.ArgumentParser(); p.add_argument('--data-dir', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True); p.add_argument('--public', action='store_true')
 args = p.parse_args(); data = args.data_dir.resolve()
-model_keys = [line for line in (data / 'hermes/.env').read_text().splitlines() if line.startswith('OPENAI_API_KEY=')]
+model_keys = [line for line in (data / 'profile/.env').read_text().splitlines() if line.startswith('OPENAI_API_KEY=')]
 assert model_keys == ['OPENAI_API_KEY=synthetic-local-only']
 connection = json.loads((data / 'connection.json').read_text())
 key = (data / 'api-key').read_text().strip()

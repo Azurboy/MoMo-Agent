@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def render(directory):
     sections = [
-        ("product", "01 · MoMo 产品规则全文", (ROOT / "Apps/MacApp/Runtime/prompt_plugin/policy.md").read_text()),
+        ("product", "01 · MoMo 产品规则全文", (ROOT / "Tests/AgentRuntime/fixtures/legacy_gateway/prompt_plugin/policy.md").read_text()),
         ("system", "02 · 完整 system prompt · 实际装配示例", (directory / "system-prompt.txt").read_text()),
         ("turn", "03 · 本轮用户输入 + 近期转录资料 · 实际请求", (directory / "current-turn.txt").read_text()),
         ("ingestion", "04 · 独立的转录记忆整理 prompt", (directory / "transcript-ingestion.txt").read_text()),

@@ -4,7 +4,7 @@ import { memoryGraph, memoryID } from './adapter.mjs';
 import { memoryPreview, wrapText, ellipsize, previewLayout, previewContains } from './preview.mjs';
 
 const ctx = { measureText: text => ({ width: [...new Intl.Segmenter('zh', { granularity: 'grapheme' }).segment(text)].length * 15 }) };
-const entry = text => ({ id: 'native-id', text, basis: 'hermes', kind: 'memory', status: 'current', evidence: [] });
+const entry = text => ({ id: 'native-id', text, basis: 'momo', kind: 'memory', status: 'current', evidence: [] });
 
 test('Chinese without spaces and long IDs wrap within the reading card', () => {
   const text = '这是一段没有任何英文空格的很长很长的中文记忆。'.repeat(5) + 'f7dfb896-7c69-4f6f-80be-78ed4f0b1f2b';

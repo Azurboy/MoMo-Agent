@@ -1,6 +1,6 @@
 import Foundation
 
-/// Hermes' existing session transcript API, also consumed by its desktop and WebUI clients.
+/// MoMo session transcript API.
 public struct AgentSessionMessages: Decodable, Sendable {
     public struct Message: Decodable, Sendable {
         public let id: Int

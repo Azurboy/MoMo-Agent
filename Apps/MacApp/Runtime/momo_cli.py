@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """MoMo personal context & memory CLI for DeepSeek SuperAgent worker sessions.
 
-Invoked via $DSH_SUPERAGENT_MOMO_CLI inside isolated SuperAgent tickets so
-Hermes Agent and DeepSeek SuperAgent share the exact same ContextStore
-(recordings, calendar, reminders, visits, health) and HermesMemory (MEMORY.md / USER.md).
+Workers use the shared MoMo context store and Markdown memory notebook.
 """
 from __future__ import annotations
 
@@ -429,17 +427,14 @@ def _stdlib_fetch_extract(urls: list[str], char_limit: int) -> dict:
     return {"results": results}
 
 
-def _configure_hermes_env(data: Path) -> None:
-    default_agent_hermes = Path.home() / "Library/Application Support/MoMoAgent/Agent/hermes"
-    if (data / "hermes").is_dir() or not default_agent_hermes.is_dir():
-        os.environ.setdefault("HERMES_HOME", str(data / "hermes"))
-    else:
-        os.environ.setdefault("HERMES_HOME", str(default_agent_hermes))
+def _configure_provider_env(data: Path) -> None:
+    from momo_agent import credentials_directory
+    os.environ.setdefault("HERMES_HOME", str(credentials_directory(data)))
 
 
 def _cmd_web_search(data: Path, args: argparse.Namespace) -> dict:
     limit = max(1, min(int(args.limit), 20))
-    _configure_hermes_env(data)
+    _configure_provider_env(data)
     try:
         with contextlib.redirect_stdout(sys.stderr):
             from tools import web_tools
@@ -475,7 +470,7 @@ def _cmd_web_search(data: Path, args: argparse.Namespace) -> dict:
 def _cmd_web_extract(data: Path, args: argparse.Namespace) -> dict:
     urls = [str(u).strip() for u in (args.urls or ()) if str(u).strip()][:8]
     char_limit = max(1000, min(int(args.char_limit), 60_000))
-    _configure_hermes_env(data)
+    _configure_provider_env(data)
     parsed: dict | None = None
     try:
         with contextlib.redirect_stdout(sys.stderr):
@@ -590,7 +585,7 @@ def main() -> int:
     conv = sub.add_parser("conversation", help="Read recent MoMo chat history")
     conv.add_argument("--limit", type=int, default=20)
 
-    wsearch = sub.add_parser("web-search", help="Search the public web via configured or keyless Hermes backends")
+    wsearch = sub.add_parser("web-search", help="Search the public web via configured or keyless search providers")
     wsearch.add_argument("query")
     wsearch.add_argument("--limit", type=int, default=5)
 

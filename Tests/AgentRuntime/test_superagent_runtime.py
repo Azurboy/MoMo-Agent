@@ -1,4 +1,4 @@
-"""Unit & integration tests for pluggable runtime engine (Hermes <-> DeepSeek SuperAgent) and proactive bridge."""
+"""Unit & integration tests for the DeepSeek Harness runtime and proactive bridge."""
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -47,7 +48,7 @@ def make_source_payload(title: str, texts: list[str], *, session_id: str | None 
         "spans": spans,
     }
 from conversation_store import ProductStore
-from hermes_memory import HermesMemory
+from momo_memory import MoMoMemory
 from rtc_transport import permitted_route
 from runtime_engine import engine_config_path, read_engine_config, write_engine_config
 from superagent_gateway import SuperAgentGateway
@@ -61,13 +62,16 @@ class RuntimeEngineConfigTests(unittest.TestCase):
             self.assertFalse(engine_config_path(data).exists())
             self.assertEqual(read_engine_config(data), {"engine": "superagent", "proactive_mode": "auto"})
 
-            updated = write_engine_config(data, engine="hermes", proactive_mode="observe")
-            self.assertEqual(updated, {"engine": "hermes", "proactive_mode": "observe"})
+            engine_config_path(data).write_text('{"engine":"hermes","proactive_mode":"observe"}')
+            self.assertEqual(read_engine_config(data), {"engine": "superagent", "proactive_mode": "observe"})
+            with patch.object(momo_agent, "_prepare_base_python"), patch("superagent_runtime.prepare_superagent") as prepare:
+                momo_agent.prepare(data)
+                self.assertEqual(prepare.call_args.args[0], data)
+            with self.assertRaises(ValueError):
+                write_engine_config(data, engine="hermes")
+            updated = write_engine_config(data, proactive_mode="off")
+            self.assertEqual(updated, {"engine": "superagent", "proactive_mode": "off"})
             self.assertEqual(engine_config_path(data).stat().st_mode & 0o777, 0o600)
-            self.assertEqual(read_engine_config(data), {"engine": "hermes", "proactive_mode": "observe"})
-
-            reverted = write_engine_config(data, engine="superagent")
-            self.assertEqual(reverted, {"engine": "superagent", "proactive_mode": "observe"})
 
             with self.assertRaises(ValueError):
                 write_engine_config(data, engine="invalid")
@@ -94,7 +98,7 @@ class RuntimeEngineConfigTests(unittest.TestCase):
 
 
 class SharedContextAndMemoryCLITests(unittest.TestCase):
-    def test_momo_cli_shares_recordings_and_hermes_memories(self) -> None:
+    def test_momo_cli_shares_recordings_and_momo_memories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "Agent"
             momo_agent.initialize(data, 19820)
@@ -121,10 +125,10 @@ class SharedContextAndMemoryCLITests(unittest.TestCase):
             )
             self.assertTrue(add_out.get("success"))
 
-            # Verify HermesMemory sees the exact entry written by SuperAgent's momo-cli!
-            hermes_items = HermesMemory(data / "hermes").list()["items"]
-            self.assertEqual(len(hermes_items), 1)
-            self.assertIn("三段式精简纪要", hermes_items[0]["text"])
+            # Verify the CLI and shared notebook see the same entry.
+            notebook_items = MoMoMemory(data).list()["items"]
+            self.assertEqual(len(notebook_items), 1)
+            self.assertIn("三段式精简纪要", notebook_items[0]["text"])
 
 
 class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -203,9 +207,9 @@ class SuperAgentGatewayBridgeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "Agent"
             conn = momo_agent.initialize(data, 19830)
-            cfg = json.loads((data / "hermes/config.yaml").read_text(encoding="utf-8"))
+            cfg = json.loads((data / "profile/config.yaml").read_text(encoding="utf-8"))
             cfg["model"] = {"provider": "custom", "default": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"}
-            momo_agent.atomic_private(data / "hermes/config.yaml", json.dumps(cfg) + "\n")
+            momo_agent.atomic_private(data / "profile/config.yaml", json.dumps(cfg) + "\n")
 
             # Seed an existing message while engine is Hermes, then switch to SuperAgent.
             hermes_store = ProductStore(data / "runtime/conversation.sqlite", conn)

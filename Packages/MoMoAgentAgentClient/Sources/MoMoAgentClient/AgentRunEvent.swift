@@ -84,7 +84,7 @@ public struct RemoteReply: Codable, Sendable, Equatable {
         switch event.event {
         case "message.delta": partial += event.delta ?? ""; phase = "writing"
         case "message.interim":
-            // Hermes sends the whole interim text even if deltas already streamed it.
+            // The gateway sends the whole interim text even if deltas already streamed it.
             let text = event.text ?? partial
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { messages.append(text) }
             partial = ""

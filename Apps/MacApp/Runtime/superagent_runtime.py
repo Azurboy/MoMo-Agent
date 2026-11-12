@@ -493,6 +493,7 @@ def resolve_superagent_llm(data: Path) -> dict:
         _sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
     if str(REPOSITORY / "Apps/MacApp/Runtime") not in _sys.path:
         _sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Runtime"))
+    from momo_agent import credentials_directory, profile_directory
     from model_setup import load_config, resolve_credentials
 
     config = load_config(data)
@@ -500,18 +501,11 @@ def resolve_superagent_llm(data: Path) -> dict:
     provider = str(model_cfg.get("provider") or "").strip()
     model_id = str(model_cfg.get("default") or "").strip()
     if not provider or not model_id:
-        raise ValueError("Configure an explicit model and provider in hermes/config.yaml before serving")
+        raise ValueError("Configure an explicit model and provider in model settings before serving")
 
-    dotenv = _parse_dotenv(data / "hermes/.env")
-    # Point HERMES_HOME at <data>/hermes while allowing fallback to user's MoMoAgent/Codex login if needed.
-    old_hermes_home = os.environ.get("HERMES_HOME")
-    default_agent_hermes = Path.home() / "Library/Application Support/MoMoAgent/Agent/hermes"
-    if (data / "hermes/auth.json").is_file():
-        os.environ["HERMES_HOME"] = str(data / "hermes")
-    elif (default_agent_hermes / "auth.json").is_file():
-        os.environ["HERMES_HOME"] = str(default_agent_hermes)
-    else:
-        os.environ["HERMES_HOME"] = str(data / "hermes")
+    dotenv = _parse_dotenv(profile_directory(data) / ".env")
+    old_profile = os.environ.get("HERMES_HOME")
+    os.environ["HERMES_HOME"] = str(credentials_directory(data))
     try:
         if provider == "openai-codex":
             creds = resolve_credentials("codex", model_id)
@@ -620,10 +614,10 @@ def resolve_superagent_llm(data: Path) -> dict:
             },
         }
     finally:
-        if old_hermes_home is None:
+        if old_profile is None:
             os.environ.pop("HERMES_HOME", None)
         else:
-            os.environ["HERMES_HOME"] = old_hermes_home
+            os.environ["HERMES_HOME"] = old_profile
 
 
 def prepare_dsh_instance(

@@ -10,6 +10,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'Tests/AgentRuntime/fixtures/legacy_gateway'))
 sys.path.insert(0, str(ROOT / 'Apps/MacApp/Runtime'))
 sys.path.insert(0, str(ROOT / 'Vendor/HermesAgent'))
 from personal_agent import ProductStore, PersonalAgent

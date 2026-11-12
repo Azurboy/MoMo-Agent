@@ -1,4 +1,4 @@
-# Hermes memory UI adapter
+# MoMo memory UI adapter
 
 The Mac app embeds the actual StarMap from the vendored Hermes Desktop source
 (`Vendor/HermesAgent/apps/desktop/src/app/starmap`, upstream `cf4f3a7`).

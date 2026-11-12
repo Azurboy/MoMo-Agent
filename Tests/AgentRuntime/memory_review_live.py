@@ -1,4 +1,4 @@
-"""Opt-in real-model acceptance in an isolated Hermes home, using synthetic evidence only.
+"""Opt-in real-model acceptance in an isolated MoMo profile, using synthetic evidence only.
 
 Uses the existing subscription without printing credentials. Never writes test facts to the
 user profile. Run with the prepared Python and --live-data pointing to that profile's owner.
@@ -39,11 +39,13 @@ def main(args):
     connection=momo_agent.initialize(data,port)
     (data/'runtime/venv').symlink_to(args.live_data/'runtime/venv',target_is_directory=True)
     momo_agent.write_private(data/'runtime/prepared.json',json.dumps(momo_agent.fingerprint()))
-    config=json.loads((data/'hermes/config.yaml').read_text())
-    live=json.loads((args.live_data/'hermes/config.yaml').read_text())
+    profile = momo_agent.profile_directory(data)
+    live_profile = momo_agent.profile_directory(args.live_data)
+    config=json.loads((profile/'config.yaml').read_text())
+    live=json.loads((live_profile/'config.yaml').read_text())
     config['model']=live['model'];config['auxiliary']={'background_review':{'enabled':False}}
-    (data/'hermes/config.yaml').write_text(json.dumps(config))
-    auth=data/'hermes/auth.json';shutil.copy2(args.live_data/'hermes/auth.json',auth);auth.chmod(0o600)
+    (profile/'config.yaml').write_text(json.dumps(config))
+    auth=profile/'auth.json';shutil.copy2(live_profile/'auth.json',auth);auth.chmod(0o600)
     env=momo_agent.child_environment(data)
     env.update(API_SERVER_ENABLED='true',API_SERVER_HOST='127.0.0.1',API_SERVER_PORT=str(port),
                API_SERVER_KEY=(data/'api-key').read_text().strip())
@@ -86,7 +88,7 @@ def main(args):
         job=store.db.execute("SELECT * FROM jobs WHERE state='pending'").fetchone()
         done=settle('jobs',job['id'],service.advance_job)
         check('unknown-speaker project context can be retained',json.loads(done['result'])['native_writes']>0)
-        job=memory_review.enqueue(store,'dream',{'signature':memory_review.signature(store,data/'hermes'),'source_revision':store.revision,'chat_cursor':[2,0]})
+        job=memory_review.enqueue(store,'dream',{'signature':memory_review.signature(profile, memory_review.state(store, 'chat_cursor', [0, 0]), store.revision),'source_revision':store.revision,'chat_cursor':[2,0]})
         done=settle('memory_reviews',job['id'],service.advance_review)
         check('Dream produces a verified receipt',json.loads(done['result'])['outcome'] in {'updated','no_change'})
         recall=service.request('/v1/runs',{'session_id':'memory-acceptance-'+str(uuid.uuid4()),'input':'只按已有记忆回答：我叫什么、喜欢什么回答方式、溪流项目先做什么？不要调用工具。'},str(uuid.uuid4()))
@@ -98,7 +100,7 @@ def main(args):
         output=snapshot.get('output','')
         assert snapshot['status']=='completed','Recall did not complete before the deadline'
         check('new native session recalls saved personal context',all(s in output for s in ['小岚','结论','录音']))
-        files='\n'.join(p.read_text() for p in (data/'hermes/memories').glob('*.md'))
+        files='\n'.join(p.read_text() for p in (profile/'memories').glob('*.md'))
         check('third party sleep comment is not written as user health',not any(s in files for s in ['小岚失眠','用户失眠','用户患']))
         (args.output/'result.json').write_text(json.dumps({'passed':True,'model':config['model']['default'],'synthetic_evidence':True,'checks':checks,'recall':output,'memories':files},ensure_ascii=False,indent=2))
     finally:

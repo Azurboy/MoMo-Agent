@@ -1,4 +1,4 @@
-"""SuperAgent calls share the native desktop lease with Hermes and the paired phone.
+"""SuperAgent calls share the native desktop lease with the paired phone.
 
 A ticket holds the desktop only for a single tool call, never while waiting for
 human input. Observations are bound to its assignment and the takeover epoch.

@@ -9,7 +9,7 @@ public enum AgentMessageReceipt: String, Sendable {
               serverConfirmed || !runs.isEmpty else { return nil }
         if messageState == "applied" { return .read }
         if runs.contains(where: { run in
-            // Steering may own a generation before Hermes actually consumes the input.
+            // Steering may own a generation before the agent consumes the input.
             if let state = run.deliveryState {
                 if state == "applied" { return true }
                 if ["pending", "steering"].contains(state) { return false }

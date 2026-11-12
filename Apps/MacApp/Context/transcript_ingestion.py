@@ -1,4 +1,4 @@
-"""Bounded source delivery to Hermes, not a second memory implementation."""
+"""Bounded source delivery to the MoMo memory worker."""
 import json
 import time
 import uuid

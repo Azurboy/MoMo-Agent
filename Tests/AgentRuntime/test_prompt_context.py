@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Apps/MacApp/Context"))
 from context_store import ContextStore, digest
 
-spec = importlib.util.spec_from_file_location("momo_prompt", ROOT / "Apps/MacApp/Runtime/prompt_plugin/__init__.py")
+spec = importlib.util.spec_from_file_location("momo_prompt", ROOT / "Tests/AgentRuntime/fixtures/legacy_gateway/prompt_plugin/__init__.py")
 prompt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prompt)
 NOW = 1_800_000_000

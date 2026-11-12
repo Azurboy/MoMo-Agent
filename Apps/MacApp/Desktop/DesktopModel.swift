@@ -25,18 +25,6 @@ struct AccessStatus: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey { case agentOnline = "agent_online"; case pairedDeviceID = "paired_device_id"; case tunnel, devices, invitation }
 }
 
-enum DesktopAgentEngine: String, CaseIterable, Identifiable {
-    case superagent
-    case hermes
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .superagent: "DeepSeek SuperAgent"
-        case .hermes: "Hermes Agent"
-        }
-    }
-}
-
 struct DesktopProactiveSnapshot: Sendable, Equatable {
     let dshReady: Bool
     let activeTickets: Int
@@ -104,7 +92,6 @@ final class DesktopModel {
     var providerURL = ""
     var modelName = ""
     var providerKey = ""
-    var runtimeEngine = DesktopAgentEngine.superagent
     var dayStartHour = DayStartBoundary.defaultHour
     var proactiveSnapshot: DesktopProactiveSnapshot?
     var taskStore: RemoteTaskStore?
@@ -175,8 +162,7 @@ final class DesktopModel {
                 try await reclaimStaleRuntimeProcesses()
                 try loadConnection()
                 let pythonPath = runtimePython.path
-                let needsSuperAgentPrep = runtimeEngine == .superagent
-                    && !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("runtime/superagent/prepared.json").path)
+                let needsSuperAgentPrep = !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("runtime/superagent/prepared.json").path)
                 if hasBundledRuntime || !FileManager.default.isExecutableFile(atPath: pythonPath) || needsSuperAgentPrep {
                     try await prepareRuntime()
                 }
@@ -314,21 +300,20 @@ final class DesktopModel {
         return values.isEmpty ? nil : values
     }
 
-    private func readHermesConfiguration(from file: URL) async -> [String: Any] {
-        let fallback: [String: Any] = [
-            "memory": ["memory_enabled": true, "user_profile_enabled": true],
-            "updates": ["check": false],
-            "agent": ["max_turns": 20],
-            "platform_toolsets": ["api_server": ["terminal", "file", "memory"]],
-            "terminal": ["cwd": dataDirectory.appendingPathComponent("workspace").path],
-        ]
+    private var profileDirectory: URL {
+        let current = dataDirectory.appendingPathComponent("profile")
+        let legacy = dataDirectory.appendingPathComponent("hermes")
+        return !FileManager.default.fileExists(atPath: current.path) && FileManager.default.fileExists(atPath: legacy.path) ? legacy : current
+    }
+
+    private func readProfileConfiguration(from file: URL) async -> [String: Any] {
+        let fallback: [String: Any] = [:]
         if let raw = try? Data(contentsOf: file),
            let parsed = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] {
             return parsed
         }
         let python = runtimePython
         let bundled = hasBundledRuntime
-        let hermesRoot = repository.appendingPathComponent("Vendor/HermesAgent").path
         guard FileManager.default.isExecutableFile(atPath: python.path),
               FileManager.default.fileExists(atPath: file.path) else { return fallback }
         let loadedData = await Task.detached { () -> Data? in
@@ -338,8 +323,7 @@ final class DesktopModel {
             let script = """
             import json, sys
             from pathlib import Path
-            sys.path.insert(0, sys.argv[1])
-            raw = Path(sys.argv[2]).read_text(encoding="utf-8")
+            raw = Path(sys.argv[1]).read_text(encoding="utf-8")
             data = None
             for kind in ("yaml", "ruamel"):
                 try:
@@ -354,7 +338,7 @@ final class DesktopModel {
                     pass
             print(json.dumps(dict(data) if isinstance(data, dict) else {}))
             """
-            p.arguments = isolation + ["-c", script, hermesRoot, file.path]
+            p.arguments = isolation + ["-c", script, file.path]
             let out = Pipe()
             p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
             guard (try? p.run()) != nil else { return nil }
@@ -378,9 +362,8 @@ final class DesktopModel {
             lifeIllustrations.configure(client: try dataClient(for: connection, url: url), scope: connection.workspaceID.uuidString)
         }
         prepareDesktop()
-        loadEngineConfiguration()
         loadDayBoundaryConfiguration()
-        if let model = Self.readModelConfiguration(from: dataDirectory.appendingPathComponent("hermes/config.yaml")),
+        if let model = Self.readModelConfiguration(from: profileDirectory.appendingPathComponent("config.yaml")),
            let name = model["default"], !name.isEmpty {
             modelProvider = switch model["provider"] {
             case "openai-codex", "codex": .codex
@@ -457,13 +440,13 @@ final class DesktopModel {
                       let url = URL(string: providerURL), url.user == nil, url.password == nil, url.query == nil, url.fragment == nil, url.host != nil,
                       url.scheme == "https" || (url.scheme == "http" && url.host == "127.0.0.1") else { throw DesktopError.message(String(localized: "请先填写模型名称与 HTTPS API 地址。")) }
                 guard !providerKey.contains(where: { $0.isNewline || $0 == "\"" || $0 == "'" }) else { throw DesktopError.message(String(localized: "API 密钥格式不正确。")) }
-                let file = dataDirectory.appendingPathComponent("hermes/config.yaml")
-                var config = await readHermesConfiguration(from: file)
+                let file = profileDirectory.appendingPathComponent("config.yaml")
+                var config = await readProfileConfiguration(from: file)
                 config["model"] = ["provider": "custom", "default": modelName, "base_url": providerURL, "context_length": 128000]
                 try await verifyModel(url: url)
                 try privateWrite(try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]), to: file)
                 if !providerKey.isEmpty {
-                    let envFile = dataDirectory.appendingPathComponent("hermes/.env")
+                    let envFile = profileDirectory.appendingPathComponent(".env")
                     let previous = try String(contentsOf: envFile, encoding: .utf8)
                     let lines = previous.components(separatedBy: .newlines).filter { !$0.hasPrefix("OPENAI_API_KEY=") }
                     try privateWrite(Data((lines.joined(separator: "\n") + "\nOPENAI_API_KEY=" + providerKey + "\n").utf8), to: envFile); providerKey = ""
@@ -491,7 +474,7 @@ final class DesktopModel {
     private func verifyModel(url: URL) async throws {
         var credential = providerKey
         if credential.isEmpty {
-            let env = try String(contentsOf: dataDirectory.appendingPathComponent("hermes/.env"), encoding: .utf8)
+            let env = try String(contentsOf: profileDirectory.appendingPathComponent(".env"), encoding: .utf8)
             credential = env.components(separatedBy: .newlines).first(where: { $0.hasPrefix("OPENAI_API_KEY=") }).map { String($0.dropFirst(15)) } ?? ""
         }
         guard !credential.isEmpty, !credential.contains(where: { $0.isNewline }) else { throw DesktopError.message(String(localized: "请填写模型 API 密钥。")) }
@@ -714,7 +697,7 @@ final class DesktopModel {
             if status?.agentOnline == true {
                 Task { [weak self] in await self?.lifeIllustrations.refresh(minimumInterval: 15) }
             }
-            if runtimeEngine == .superagent, status?.agentOnline == true {
+            if status?.agentOnline == true {
                 if Date().timeIntervalSince(lastProactiveRefreshAt) >= 12 || proactiveSnapshot == nil {
                     lastProactiveRefreshAt = Date()
                     await refreshProactiveSnapshot()
@@ -735,7 +718,7 @@ final class DesktopModel {
         let defaults = UserDefaults.standard
         // An explicit stop always wins. Older installs may have only the data directory.
         if defaults.object(forKey: resumeKey) == nil,
-           let config = Self.readModelConfiguration(from: dataDirectory.appendingPathComponent("hermes/config.yaml")),
+           let config = Self.readModelConfiguration(from: profileDirectory.appendingPathComponent("config.yaml")),
            let provider = config["provider"], !provider.isEmpty,
            let model = config["default"], !model.isEmpty {
             defaults.set(true, forKey: resumeKey)
@@ -1091,59 +1074,6 @@ final class DesktopModel {
         }
         if connection != nil {
             Task { await loadContext(silent: true) }
-        }
-    }
-
-    func loadEngineConfiguration() {
-        let file = dataDirectory.appendingPathComponent("runtime/engine.json")
-        guard let raw = try? Data(contentsOf: file),
-              let parsed = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
-            runtimeEngine = .superagent
-            return
-        }
-        if let eng = parsed["engine"] as? String, let resolved = DesktopAgentEngine(rawValue: eng) {
-            runtimeEngine = resolved
-        } else {
-            runtimeEngine = .superagent
-        }
-    }
-
-    private func writeEngineConfiguration(engine: DesktopAgentEngine) throws {
-        let file = dataDirectory.appendingPathComponent("runtime/engine.json")
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let payload: [String: String] = ["engine": engine.rawValue, "proactive_mode": "auto"]
-        let encoded = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try privateWrite(encoded, to: file)
-    }
-
-    func switchRuntimeEngine(_ target: DesktopAgentEngine) async {
-        guard busy == nil, target != runtimeEngine else { return }
-        let wasRunning = status?.agentOnline == true || agentProcess?.isRunning == true
-        busy = String(localized: "正在切换智能体引擎…")
-        failure = nil
-        preparationPhase = .agent
-        defer { busy = nil; preparationPhase = nil; preparationDownload = nil }
-        do {
-            if wasRunning {
-                agentProcess?.terminate()
-                for _ in 0..<80 {
-                    if agentProcess == nil { break }
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-            }
-            try writeEngineConfiguration(engine: target)
-            runtimeEngine = target
-            proactiveSnapshot = nil
-            try await prepareRuntime()
-            if wasRunning {
-                try startAccess()
-                try launchAgent()
-                UserDefaults.standard.set(true, forKey: resumeKey)
-            }
-            await refresh()
-        } catch {
-            loadEngineConfiguration()
-            failure = error.localizedDescription
         }
     }
 

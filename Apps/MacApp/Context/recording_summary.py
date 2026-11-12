@@ -1,4 +1,4 @@
-"""Derived recording summaries. Durable queue; inference stays in native Hermes."""
+"""Derived recording summaries. Durable queue; inference stays in the agent runtime."""
 import json
 import re
 import time
@@ -120,7 +120,7 @@ def advance(store, job, request):
             if job['first_attempt'] is None:
                 guarantee = request('/v1/capabilities')['features']['runs_idempotency']
                 if not guarantee.get('durable') or not guarantee.get('supported') or guarantee.get('retention_seconds', 0) <= 120:
-                    raise Conflict('Hermes lacks durable summary admission')
+                    raise Conflict('Gateway lacks durable summary admission')
                 first = time.time(); deadline = first + guarantee['retention_seconds'] - 60
                 claimed = store.db.execute("UPDATE recording_summaries SET first_attempt=?,replay_before=? WHERE id=? AND state='pending' AND first_attempt IS NULL",
                                            (first, deadline, job['id'])).rowcount

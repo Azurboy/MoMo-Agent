@@ -3,7 +3,7 @@ import Observation
 import MoMoAgentClient
 import MoMoArchive
 
-/// Phone delivers original transcripts. Hermes owns memory; the phone only caches its current view.
+/// Phone delivers original transcripts. The Mac owns memory; the phone only caches its current view.
 @MainActor @Observable
 final class PhoneContextSync {
     var configurationFingerprint: String?
@@ -72,7 +72,9 @@ final class PhoneContextSync {
             state = try JSONDecoder().decode(State.self, from: Data(contentsOf: file))
             guard state.libraryID == archive.libraryInstanceID, state.connection.hasSameIdentity(as: connection) else { throw SyncError.identity }
         } else { state = State(libraryID: archive.libraryInstanceID, connection: connection) }
-        memories = state.memoryBackend == "Hermes" ? state.memories : []; lastSynced = state.memoryBackend == "Hermes" ? state.lastSynced : nil
+        // Migrate the marker used by older phone builds for the same Mac notebook.
+        if state.memoryBackend == "Hermes" { state.memoryBackend = "SuperAgent" }
+        memories = state.memoryBackend == "SuperAgent" ? state.memories : []; lastSynced = state.memoryBackend == "SuperAgent" ? state.lastSynced : nil
         do { recordingSummaries = try PhoneRecordingSummaries(directory: directory, archive: archive, connection: connection, client: client) }
         catch {
             recordingSummaries = nil
@@ -307,7 +309,7 @@ final class PhoneContextSync {
     private func synchronizeArchive(includeMemories: Bool) async throws -> Error? {
         let status = try await client.contextStatus()
         guard status.workspaceId == state.connection.workspaceID, status.sourceSync,
-              ["Hermes", "SuperAgent"].contains(status.memoryWriter) else { throw SyncError.identity }
+              status.memoryWriter == "SuperAgent" else { throw SyncError.identity }
         memoryPending = status.memoryPending ?? 0; memoryNeedsReview = status.memoryNeedsReview ?? 0
         memoryReview = status.memoryReview
         var uploadError = await applySpeakerCorrections(status)
@@ -430,13 +432,13 @@ final class PhoneContextSync {
             revision = page.revision; items += page.items; after = page.nextCursor
             if let after, !seen.insert(after).inserted { throw SyncError.invalidPagination }
         } while after != nil
-        var updated = state; updated.memories = items; updated.memoryBackend = "Hermes"; updated.lastSynced = Date(); try commit(updated)
+        var updated = state; updated.memories = items; updated.memoryBackend = "SuperAgent"; updated.lastSynced = Date(); try commit(updated)
     }
     private func commit(_ updated: State) throws {
         try JSONEncoder().encode(updated).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         state = updated
-        memories = updated.memoryBackend == "Hermes" ? updated.memories : []
-        lastSynced = updated.memoryBackend == "Hermes" ? updated.lastSynced : nil
+        memories = updated.memoryBackend == "SuperAgent" ? updated.memories : []
+        lastSynced = updated.memoryBackend == "SuperAgent" ? updated.lastSynced : nil
     }
     enum SyncError: LocalizedError {
         case unavailable, identity, missingSourceTime, sourceChanged, invalidPagination

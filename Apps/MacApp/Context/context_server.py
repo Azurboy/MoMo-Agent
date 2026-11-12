@@ -1,4 +1,4 @@
-"""Authenticated source sync plus restricted transcript runs in the native Hermes profile."""
+"""Authenticated source sync and transcript processing through DeepSeek Harness."""
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from context_store import ContextStore, Conflict
-from momo_memory import MoMoMemory
+from momo_memory import MoMoMemory, memory_home
 import daily_review
 import transcript_ingestion
 import memory_review
@@ -133,11 +133,10 @@ class ContextService:
                         source_limit = min(int(query.get("limit", ["12000"])[0]), 24_000)
                         result = store.read_source(query["source_id"][0], query["revision"][0], int(query.get("offset", ["0"])[0]), source_limit)
                     elif url.path == "/v1/status":
-                        engine = service.active_engine()
                         result = {"application": "MoMoAgent", "workspace_id": connection["workspace_id"],
-                                  "engine": engine,
+                                  "engine": "superagent",
                                   "revision": store.revision, "source_sync": True,
-                                  "memory_writer": "SuperAgent" if engine == "superagent" else "Hermes",
+                                  "memory_writer": "SuperAgent",
                                   "memory_pending": store.db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('pending','running')").fetchone()[0],
                                   "memory_needs_review": store.db.execute("SELECT COUNT(*) FROM jobs WHERE state='needs_review'").fetchone()[0]}
                         result['memory_review'] = memory_review.status(store)
@@ -186,7 +185,7 @@ class ContextService:
 
     def request(self, path, body=None, operation=None):
         headers = {"Authorization": "Bearer " + self.key, "Content-Type": "application/json",
-                   "X-Hermes-Session-Key": "momo-memory:" + self.connection["assistant_id"]}
+                   "X-MoMo-Session-Key": "momo-memory:" + self.connection["assistant_id"]}
         if operation:
             headers["Idempotency-Key"] = operation
         request = urllib.request.Request(self.connection["base_url"] + path,
@@ -195,20 +194,7 @@ class ContextService:
         with opener.open(request, timeout=5) as response:
             return json.load(response)
 
-    def active_engine(self) -> str:
-        path = self.data / "runtime/engine.json"
-        if not path.is_file():
-            return "superagent"
-        try:
-            value = json.loads(path.read_text(encoding="utf-8")).get("engine")
-            return "hermes" if value == "hermes" else "superagent"
-        except Exception:
-            return "superagent"
-
     def notify_proactive_ingest(self) -> None:
-        if self.active_engine() != "superagent":
-            return
-
         def _ping() -> None:
             try:
                 self.request("/momo/v1/proactive/ingest", {"origin": "source_sync"})
@@ -252,7 +238,7 @@ class ContextService:
                     self.next_dispatch = time.monotonic() + 60
                     if self.background_quota_exhausted(now):
                         continue
-                    memory_review.recover_empty_legacy(store, self.data / 'hermes')
+                    memory_review.recover_empty_legacy(store, memory_home(self.data))
                     review = memory_review.next_review(store, self.data, now)
                     if review:
                         self.advance_review(store, review)
@@ -314,7 +300,7 @@ class ContextService:
                 if first is None:
                     guarantee = self.request("/v1/capabilities")["features"]["runs_idempotency"]
                     if not guarantee.get("durable") or not guarantee.get("supported") or guarantee.get("retention_seconds", 0) <= 120:
-                        raise Conflict("Hermes lacks durable transcript admission")
+                        raise Conflict("Gateway lacks durable transcript admission")
                     first = time.time(); deadline = first + guarantee["retention_seconds"] - 60
                     claimed = store.db.execute("UPDATE jobs SET first_attempt=?,replay_before=? WHERE id=? AND state='pending'",
                                                (first, deadline, job["id"])).rowcount
@@ -331,7 +317,7 @@ class ContextService:
                 raise Conflict("Memory task identity mismatch")
             status = snapshot["status"]
             if status == "completed":
-                receipt = memory_review.outcome(self.data / 'hermes', snapshot['session_id'], snapshot.get('output'))
+                receipt = memory_review.outcome(memory_home(self.data), snapshot['session_id'], snapshot.get('output'))
                 transcript_ingestion.finish(store, job, receipt)
             elif status == 'failed':
                 memory_review.handle_failed_run(store, 'jobs', job, snapshot)
@@ -362,7 +348,7 @@ class ContextService:
                 if job['first_attempt'] is None:
                     guarantee = self.request('/v1/capabilities')['features']['runs_idempotency']
                     if not guarantee.get('durable') or not guarantee.get('supported') or guarantee.get('retention_seconds', 0) <= 120:
-                        raise Conflict('Hermes lacks durable memory admission')
+                        raise Conflict('Gateway lacks durable memory admission')
                     first = time.time(); deadline = first + guarantee['retention_seconds'] - 60
                     store.db.execute("UPDATE memory_reviews SET first_attempt=?,replay_before=? WHERE id=?", (first,deadline,job['id']))
                 if time.time() >= deadline:
@@ -374,8 +360,8 @@ class ContextService:
             if snapshot.get('session_id') != session or not snapshot.get('run_id') or (job['run_id'] and snapshot['run_id'] != job['run_id']):
                 raise Conflict('Memory review identity mismatch')
             if snapshot['status'] == 'completed':
-                receipt = memory_review.outcome(self.data / 'hermes', session, snapshot.get('output'))
-                memory_review.finish(store, job, receipt, self.data / 'hermes')
+                receipt = memory_review.outcome(memory_home(self.data), session, snapshot.get('output'))
+                memory_review.finish(store, job, receipt, memory_home(self.data))
             elif snapshot['status'] == 'failed':
                 memory_review.handle_failed_run(store, 'memory_reviews', job, snapshot)
             elif snapshot['status'] in {'started','queued','running','stopping'}:

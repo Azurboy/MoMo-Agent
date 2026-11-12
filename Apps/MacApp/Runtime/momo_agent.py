@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MoMo Agent's source-owned Hermes runtime. No dependency on a global Hermes install."""
+"""Launch MoMo's DeepSeek Harness runtime and its local Python services."""
 from __future__ import annotations
 
 import argparse
@@ -34,6 +34,21 @@ def write_private(path: Path, value: str) -> None:
         stream.write(value)
 
 
+def profile_directory(data: Path) -> Path:
+    """Existing installations keep their original model settings and credentials."""
+    current = data / "profile"
+    legacy = data / "hermes"
+    return legacy if legacy.is_dir() and not current.exists() else current
+
+
+def credentials_directory(data: Path) -> Path:
+    profile = profile_directory(data)
+    default = profile_directory(DEFAULT_DATA)
+    if not (profile / "auth.json").is_file() and (default / "auth.json").is_file():
+        return default
+    return profile
+
+
 def read_connection(data: Path) -> dict:
     value = json.loads((data / "connection.json").read_text(encoding="utf-8"))
     if value.get("schema_version") != 1 or value.get("application") != "MoMoAgent":
@@ -50,7 +65,7 @@ def read_connection(data: Path) -> dict:
         raise ValueError("api-key must be a private regular file (mode 0600)")
     if len(token_path.read_text(encoding="utf-8").strip()) < 32:
         raise ValueError("Missing or invalid runtime API credential")
-    if not (data / "hermes/config.yaml").is_file():
+    if not (profile_directory(data) / "config.yaml").is_file():
         raise ValueError("Missing runtime config; initialization is incomplete")
     return value
 
@@ -67,7 +82,7 @@ def initialize(data: Path, port: int) -> dict:
         raise ValueError("Refusing to initialize a nonempty directory without a MoMo identity")
     data.mkdir(parents=True, exist_ok=True, mode=0o700)
     data.chmod(0o700)
-    for name in ("hermes", "runtime", "workspace"):
+    for name in ("profile", "runtime", "workspace"):
         (data / name).mkdir(mode=0o700)
     connection = {
         "schema_version": 1, "application": "MoMoAgent", "assistant_name": "MoMo",
@@ -75,25 +90,17 @@ def initialize(data: Path, port: int) -> dict:
         "instance_id": str(uuid.uuid4()), "port": port,
         "base_url": f"http://127.0.0.1:{port}", "data_url": f"http://127.0.0.1:{port + 1}",
     }
-    config = {
-        "model": {"provider": "custom", "default": "", "base_url": ""},
-        "memory": {"memory_enabled": True, "user_profile_enabled": True},
-        "updates": {"check": False},
-        "agent": {"max_turns": 20},
-        "platform_toolsets": {"api_server": ["terminal", "file", "memory"]},
-        "terminal": {"cwd": str(data / "workspace")},
-    }
+    config = {"model": {"provider": "custom", "default": "", "base_url": ""}}
     write_private(data / "api-key", secrets.token_urlsafe(36) + "\n")
-    write_private(data / "hermes/config.yaml", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    write_private(data / "hermes/.env", "# Model credentials for this MoMo instance only.\n")
-    write_private(data / "hermes/SOUL.md", default_soul())
+    write_private(profile_directory(data) / "config.yaml", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    write_private(profile_directory(data) / ".env", "# Model credentials for this MoMo instance only.\n")
     # This marker is last: a partial initialization must never look usable.
     write_private(data / "connection.json", json.dumps(connection, indent=2) + "\n")
     return read_connection(data)
 
 
 def system_proxy_environment() -> dict[str, str]:
-    """Export macOS's configured HTTP proxy for Hermes' env-only LLM transport."""
+    """Export macOS's configured HTTP proxy for provider requests."""
     if sys.platform != "darwin": return {}
     from urllib.request import getproxies_macosx_sysconf
     from _scproxy import _get_proxy_settings
@@ -125,7 +132,7 @@ def child_environment(data: Path) -> dict[str, str]:
     if "*" not in entries: entries += [host for host in ("127.0.0.1", "localhost", "::1") if host not in entries]
     environment["NO_PROXY"] = environment["no_proxy"] = ",".join(entries)
     environment.update({
-        "HERMES_HOME": str(data / "hermes"),
+        "HERMES_HOME": str(profile_directory(data)),
         "HERMES_RUNTIME_DIR": str(data / "runtime/tools"),
         "PYTHONUNBUFFERED": "1",
         "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode"),
@@ -169,24 +176,18 @@ def prepared_python(data: Path) -> Path:
 
 
 def dependency_identity(record: dict) -> dict:
-    # The project is deliberately NOT installed into the venv. Hermes code is
-    # loaded from this release's SOURCE, so its location is provenance, not a
-    # dependency. Renaming/moving the app or shipping a new release directory
-    # must not invalidate an otherwise identical pinned environment.
+    # The vendored provider helpers are loaded from this release, so their
+    # location may change without invalidating the pinned environment.
     return {key: value for key, value in record.items() if key != "source"}
 
 
 def prepare(data: Path, progress: Callable[[str], None] = lambda phase: None) -> None:
     if str(RUNTIME_DIR) not in sys.path:
         sys.path.insert(0, str(RUNTIME_DIR))
-    from runtime_engine import read_engine_config
     from superagent_runtime import prepare_superagent
 
-    engine = read_engine_config(data)["engine"]
-    base_progress = progress if engine == "hermes" else (lambda phase: progress(phase) if phase != "ready" else None)
-    _prepare_base_python(data, base_progress)
-    if engine == "superagent":
-        prepare_superagent(data, child_environment(data), progress=progress)
+    _prepare_base_python(data, lambda phase: progress(phase) if phase != "ready" else None)
+    prepare_superagent(data, child_environment(data), progress=progress)
 
 
 def _prepare_base_python(data: Path, progress: Callable[[str], None] = lambda phase: None) -> None:
@@ -234,7 +235,7 @@ def _prepare_base_python(data: Path, progress: Callable[[str], None] = lambda ph
     prepare_access(data)
     write_private(marker, json.dumps(fingerprint(), indent=2) + "\n")
     progress("ready")
-    print("Prepared dependencies; application code is loaded from Vendor/HermesAgent")
+    print("Prepared MoMo Python dependencies")
 
 
 def prepare_access(data: Path) -> None:
@@ -251,14 +252,9 @@ def prepare_access(data: Path) -> None:
 
 
 def serve(data: Path) -> None:
-    connection = read_connection(data)
+    read_connection(data)
     executable = prepared_python(data)
     environment = child_environment(data)
-    environment.update({
-        "API_SERVER_ENABLED": "true", "API_SERVER_HOST": "127.0.0.1",
-        "API_SERVER_PORT": str(connection["port"]),
-        "API_SERVER_KEY": (data / "api-key").read_text(encoding="utf-8").strip(),
-    })
     command = [str(executable), "-I", "-X", f"pycache_prefix={data / 'runtime/bytecode'}",
                str(Path(__file__).resolve()), "_gateway", "--data-dir", str(data)]
     os.chdir(data / "workspace")
@@ -282,137 +278,10 @@ def gateway(data: Path) -> None:
 def run_gateway(data: Path) -> None:
     if str(RUNTIME_DIR) not in sys.path:
         sys.path.insert(0, str(RUNTIME_DIR))
-    from runtime_engine import read_engine_config
+    from superagent_gateway import run_superagent_gateway
 
-    if read_engine_config(data)["engine"] == "superagent":
-        from superagent_gateway import run_superagent_gateway
-
-        run_superagent_gateway(
-            data,
-            read_connection(data),
-            python_executable=Path(sys.executable),
-            base_env=child_environment(data),
-        )
-        return
-
-    sys.path.insert(0, str(SOURCE))
-    import hermes_yaml
-
-    config = hermes_yaml.safe_load((data / "hermes/config.yaml").read_text(encoding="utf-8"))
-    model = config.get("model", {}) if isinstance(config, dict) else {}
-    if not isinstance(model, dict) or not model.get("default") or not model.get("provider"):
-        raise ValueError("Configure an explicit model and provider in hermes/config.yaml before serving")
-    if model["provider"] == "custom" and not model.get("base_url"):
-        raise ValueError("A custom provider requires model.base_url")
-    configure_context(data, config, hermes_yaml)
-    sys.path.insert(0, str(REPOSITORY / "Apps/MacApp/Context"))
-    from context_server import ContextService
-    context = ContextService(data, read_connection(data))
-    import gateway.run
-    if str(RUNTIME_DIR) not in sys.path:
-        sys.path.insert(0, str(RUNTIME_DIR))
-    from personal_agent import install
-    install(data, read_connection(data))
-
-    actual_source = Path(gateway.run.__file__).resolve()
-    if not actual_source.is_relative_to(SOURCE):
-        raise RuntimeError("Refusing to run an external Hermes installation")
-    print(json.dumps({"application": "MoMoAgent", "runtime_source": str(actual_source),
-                      "data_directory": str(data), "upstream_commit": fingerprint()["upstream_commit"]}), flush=True)
-    sys.argv = ["momo-agent-gateway"]
-    context.start()
-    try:
-        gateway.run.main()
-    finally:
-        context.close()
-
-
-def configure_context(data: Path, config: dict, yaml) -> None:
-    """MoMo exposes source transcripts; Hermes owns its native memory and session lifecycle."""
-    connection = read_connection(data)
-    expected = f"http://127.0.0.1:{connection['port'] + 1}"
-    if connection.get("data_url", expected) != expected:
-        raise ValueError("Development context service must bind to its loopback port")
-    if "data_url" not in connection:
-        connection["data_url"] = expected
-        atomic_private(data / "connection.json", json.dumps(connection, indent=2) + "\n")
-    executable = prepared_python(data)
-    server = {
-        "command": str(executable),
-        "args": [str(REPOSITORY / "Apps/MacApp/Context/context_mcp.py")],
-        "env": {"MOMO_CONTEXT_DIRECTORY": str(data / "context"), "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode")},
-    }
-    config.setdefault("gateway", {})["multiplex_profiles"] = False
-    # Keep Hermes' normal retry loop; chat must not silently spend minutes in its extra recovery ladder.
-    config.setdefault("agent", {}).setdefault("auto_recovery_cycles", 0)
-    config["momo_transcript_memory"] = True
-    config.setdefault("memory", {}).update(memory_enabled=True, user_profile_enabled=True)
-    config["memory"].pop("provider", None)  # This product version uses Hermes' built-in store.
-    config.setdefault("mcp_servers", {})["momo_context"] = server
-    config["mcp_servers"]["momo_recordings"] = {**server, "env": {**server["env"], "MOMO_MEMORY_ONLY": "1"}}
-    config["mcp_servers"]["momo_computer"] = {
-        "command": str(executable), "args": [str(REPOSITORY / "Apps/MacApp/Runtime/desktop_mcp.py")],
-        "env": {"MOMO_AGENT_DIRECTORY": str(data), "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode")},
-    }
-    config["mcp_servers"]["momo_pim"] = {
-        "command": str(executable), "args": [str(REPOSITORY / "Apps/MacApp/Runtime/pim_mcp.py")],
-        "env": {"MOMO_AGENT_DIRECTORY": str(data), "PYTHONPYCACHEPREFIX": str(data / "runtime/bytecode")},
-    }
-    toolsets = config.setdefault("platform_toolsets", {}).setdefault("api_server", ["terminal", "file"])
-    for name in ("momo_context", "momo_recordings", "memory", "session_search", "momo_computer", "momo_pim", "delegation", "momoagent_tasks"):
-        if name not in toolsets:
-            toolsets.append(name)
-    config.setdefault("terminal", {})["cwd"] = str(data / "workspace")
-    install_prompt(data, config)
-    atomic_private(data / "hermes/config.yaml", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-
-
-def default_soul() -> str:
-    # Keep upstream's complete behavior spec, changing only the product identity sentence.
-    upstream = (SOURCE / "SOUL.md").read_text().strip()
-    identity, separator, behavior = upstream.partition(". ")
-    if identity != "You are Hermes Agent, built by Nous Research" or not separator:
-        raise ValueError("Review the upstream SOUL identity before updating the MoMo persona")
-    return "你是 Momo，运行在用户的 Mac 上（执行引擎为 Hermes）。你的名字就是 Momo，不要自称“Momo 的 AI 助手”或“MoMo Agent 的助手”。\n\n" + behavior + "\n"
-
-
-def install_prompt(data: Path, config: dict) -> None:
-    """Install our native Hermes plugin and migrate only MoMo-owned SOUL paragraphs."""
-    destination = data / "hermes/plugins/momoagent"
-    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name in ("__init__.py", "plugin.yaml", "policy.md", "task_control.py"):
-        atomic_private(destination / name, (REPOSITORY / "Apps/MacApp/Runtime/prompt_plugin" / name).read_text())
-    enabled = config.setdefault("plugins", {}).setdefault("enabled", [])
-    if "momoagent" not in enabled:
-        enabled.append("momoagent")
-    soul = data / "hermes/SOUL.md"
-    text = soul.read_text()
-    for name, prefix in (("sources", ""), ("reply before action", "用户交代任务时，"),
-                         ("nonblocking conversation", "主会话持续和用户交流。")):
-        marker, end_marker = f"<!-- MoMo {name} -->", f"<!-- /MoMo {name} -->"
-        if marker not in text:
-            continue
-        before, _, generated = text.partition(marker)
-        if end_marker in generated:
-            text = before + generated.partition(end_marker)[2]
-        else:
-            paragraph, _, remaining = generated.lstrip("\n").partition("\n")
-            if not prefix or paragraph.startswith(prefix):
-                text = before + remaining
-    old_identity = "你是 MoMo，MoMoAgent 的私人助手。用明确的来源和真实执行结果提供帮助；资料或执行状态未知时直接说明。"
-    if text.startswith(old_identity):
-        text = default_soul() + text[len(old_identity):]
-    # Rename only our exact generated openings; keep the user's remaining SOUL unchanged.
-    for previous_brand in (
-        "你是 MoMo，MoMoAgent 的私人助手，运行在 Hermes 引擎上。",
-        "你是 MoMo，MoMo Agent 的私人助手，运行在 Hermes 引擎上。",
-    ):
-        if text.startswith(previous_brand + "\n"):
-            text = default_soul().split("\n", 1)[0] + text[len(previous_brand):]
-            break
-    # User-authored identities and text outside managed paragraphs are preserved verbatim.
-    if soul.read_text() != text:
-        atomic_private(soul, text)
+    run_superagent_gateway(data, read_connection(data), python_executable=Path(sys.executable),
+                           base_env=child_environment(data))
 
 
 def atomic_private(path: Path, text: str) -> None:
@@ -448,19 +317,13 @@ def engine_command(data: Path, *, set_engine: str | None = None, proactive: str 
 
     read_connection(data)
     cfg = write_engine_config(data, engine=set_engine, proactive_mode=proactive) if (set_engine or proactive) else read_engine_config(data)
-    hermes_ok = False
     superagent_ok = False
-    try:
-        prepared_python(data)
-        hermes_ok = True
-    except Exception:
-        hermes_ok = False
     try:
         prepared_dsh_binary(data)
         superagent_ok = True
     except Exception:
         superagent_ok = False
-    print(json.dumps({**cfg, "hermes_prepared": hermes_ok, "superagent_prepared": superagent_ok},
+    print(json.dumps({**cfg, "superagent_prepared": superagent_ok},
                      ensure_ascii=False, indent=2))
 
 
@@ -470,7 +333,7 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--port", type=int, default=8765, help="Local API port for init")
     parser.add_argument("--progress", action="store_true", help="Emit preparation phase events for the desktop app")
-    parser.add_argument("--engine", choices=["hermes", "superagent"], default=None, help="Select active agent engine")
+    parser.add_argument("--engine", choices=["superagent"], default=None, help="Select active agent engine")
     parser.add_argument("--proactive", choices=["auto", "observe", "off"], default=None, help="SuperAgent proactive mode")
     args = parser.parse_args()
     data = args.data_dir.expanduser().resolve()

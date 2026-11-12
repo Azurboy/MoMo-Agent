@@ -35,6 +35,8 @@ if str(REPOSITORY / "Apps/MacApp/Context") not in sys.path:
 if str(REPOSITORY / "Vendor/HermesAgent") not in sys.path:
     sys.path.insert(0, str(REPOSITORY / "Vendor/HermesAgent"))
 
+from momo_memory import memory_home
+from momo_agent import profile_directory
 from memory_review import InvalidReviewReceipt, STALLED_REVIEW, outcome as verify_review_receipt
 from apple_pim import ApplePIM
 from context_store import logical_local_date, read_day_start_hour
@@ -1161,7 +1163,7 @@ class SuperAgentGateway:
         if self.dsh_provider and self.dsh_provider != "openai":
             return self.dsh_provider
         with suppress(Exception):
-            cfg = json.loads((self.data / "hermes/config.yaml").read_text(encoding="utf-8"))
+            cfg = json.loads((profile_directory(self.data) / "config.yaml").read_text(encoding="utf-8"))
             model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
             if isinstance(model_cfg, dict) and model_cfg.get("provider"):
                 return str(model_cfg["provider"])
@@ -1884,7 +1886,7 @@ class SuperAgentGateway:
         }
         return web.json_response(
             {
-                "object": "hermes.api_server.capabilities",
+                "object": "momo.api_server.capabilities",
                 "platform": "deepseek-superagent",
                 "engine": "superagent",
                 "proactive_mode": cfg["proactive_mode"],
@@ -2092,8 +2094,8 @@ class SuperAgentGateway:
         import memory_review
         from phone_sources import read_phone_sources
 
-        hermes_home = self.data / "hermes"
-        (hermes_home / "memories").mkdir(parents=True, exist_ok=True)
+        notebook_home = memory_home(self.data)
+        (notebook_home / "memories").mkdir(parents=True, exist_ok=True)
         momo_mem = MoMoMemory(self.data)
         with momo_mem.store() as mem_store:
             blocks = [b for t in ("user", "memory") if (b := mem_store.format_for_system_prompt(t))]
@@ -2360,7 +2362,7 @@ class SuperAgentGateway:
                     new_text=args.get("new_text"),
                     operations=args.get("operations"),
                 )
-                memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                 return result_json
 
             if clean_name == "notebook":
@@ -2383,14 +2385,14 @@ class SuperAgentGateway:
                             path=rel_path,
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         if res.get("success") and str(res.get("category") or category or "").lower() == "briefing":
                             self._deliver_briefing_message_if_needed()
                         return result_json
                     elif action == "remove":
                         res = momo_mem.remove_notebook(category, slug, path=rel_path)
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         return result_json
                     elif action == "move":
                         res = momo_mem.move_notebook(
@@ -2403,7 +2405,7 @@ class SuperAgentGateway:
                             overwrite=bool(args.get("overwrite", False)),
                         )
                         result_json = json.dumps(res, ensure_ascii=False)
-                        memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                        memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                         return result_json
                     else:
                         res = {"success": False, "error": f"Unknown notebook action: {action}"}
@@ -2429,7 +2431,7 @@ class SuperAgentGateway:
                 finally:
                     store.close()
                 result_json = json.dumps(res, ensure_ascii=False)
-                memory_review.record_superagent_memory_write(hermes_home, session_id, result_json)
+                memory_review.record_superagent_memory_write(notebook_home, session_id, result_json)
                 return result_json
 
             if clean_name == "list_recordings":
@@ -2564,9 +2566,9 @@ class SuperAgentGateway:
             return text
         except Exception:
             pass
-        hermes_home = self.data / "hermes"
-        writes = memory_review.successful_writes(hermes_home, session_id)
-        last_content = memory_review._last_write_content(hermes_home, session_id)
+        notebook_home = memory_home(self.data)
+        writes = memory_review.successful_writes(notebook_home, session_id)
+        last_content = memory_review._last_write_content(notebook_home, session_id)
         last_ok = True
         if last_content is not None:
             try:
@@ -2617,7 +2619,7 @@ class SuperAgentGateway:
             check_active()
             output = self._finalize_memory_review_output(session_id, raw_text)
             try:
-                verify_review_receipt(self.data / "hermes", session_id, output)
+                verify_review_receipt(memory_home(self.data), session_id, output)
             except InvalidReviewReceipt as error:
                 if correction_requested:
                     raise

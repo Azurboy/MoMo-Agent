@@ -1,4 +1,4 @@
-"""Durable triggers/receipts for native Hermes memory. No parallel facts store."""
+"""Durable triggers and receipts for MoMo memory. No parallel facts store."""
 from contextlib import closing, suppress
 import json
 from pathlib import Path
@@ -206,13 +206,6 @@ def chat_idle(data, now, idle_seconds=CHAT_IDLE_SECONDS):
                     else:
                         if db.execute("SELECT 1 FROM chat_runs WHERE status IN ('queued','started','waiting_for_input') LIMIT 1").fetchone():
                             return False
-    native = Path(data) / "hermes/state.db"
-    if native.exists():
-        with closing(readonly(native)) as db:
-            # Human work gets admission priority; a review already admitted is reconciled first.
-            return not db.execute("""SELECT 1 FROM session_admissions
-                WHERE status!='terminal'
-                AND target_session_id NOT LIKE 'momo-transcript-%' AND target_session_id NOT LIKE 'momo-review-%' LIMIT 1""").fetchone()
     return True
 
 

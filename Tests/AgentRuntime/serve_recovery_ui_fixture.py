@@ -10,7 +10,7 @@ from aiohttp import web
 
 async def main(directory, port):
     directory.mkdir(parents=True, exist_ok=True)
-    (directory/'hermes').mkdir(exist_ok=True)
+    (directory/'profile').mkdir(exist_ok=True)
     ids = {k:str(uuid.uuid4()) for k in ('workspace_id','assistant_id','instance_id')}
     if (directory/'connection.json').exists():
         saved=json.loads((directory/'connection.json').read_text());ids={k:saved[k] for k in ids}
@@ -18,7 +18,7 @@ async def main(directory, port):
     base = f'http://127.0.0.1:{port}'
     (directory/'connection.json').write_text(json.dumps({**ids,'base_url':base,'data_url':base+'/context'}))
     (directory/'api-key').write_text('synthetic-ui-only-credential')
-    (directory/'hermes/config.yaml').write_text(json.dumps(dict(model=dict(default='Synthetic UI fixture', provider='custom'))))
+    (directory/'profile/config.yaml').write_text(json.dumps(dict(model=dict(default='Synthetic UI fixture', provider='custom'))))
     operation = str(uuid.uuid4()); message_id = 'user-'+operation
     messages=[dict(id=message_id,seq=1,role='user',content='把刚才的方案改为周三交稿。',created_at=time.time(),operation_id=operation,run_id='rejected-run')]
     reported=False; requests=[]
@@ -31,7 +31,7 @@ async def main(directory, port):
         (directory/'ui-requests.json').write_text(json.dumps(requests,ensure_ascii=False))
         if path=='/status': return web.json_response(dict(agent_online=True,tunnel=dict(state='connected',mode='external',endpoint='https://fixture.invalid'),devices=[]))
         if path=='/v1/capabilities': return web.json_response(dict(features=dict(run_submission=True,runs_idempotency=dict(supported=True,durable=True,retention_seconds=86400))))
-        if path=='/context/v1/status': return web.json_response(dict(workspace_id=ids['workspace_id'],source_sync=True,memory_writer='Hermes'))
+        if path=='/context/v1/status': return web.json_response(dict(workspace_id=ids['workspace_id'],source_sync=True,memory_writer='SuperAgent'))
         if path in ('/context/v1/memories','/context/v1/sources'): return web.json_response(dict(revision=1,items=[],next_cursor=None))
         if path=='/momo/v1/conversation': return web.json_response(dict(conversation_id='fixture',session_id=session,**{k:ids[k] for k in ('assistant_id','instance_id')},capabilities=dict(shared_conversation=True,server_owned_completion=True,durable_steering=True,independent_chat_while_waiting=True,system_push=False)))
         if path.endswith('/messages'):

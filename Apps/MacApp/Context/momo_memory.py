@@ -571,11 +571,17 @@ def execute_memory_tool(
     return json.dumps({"success": False, "error": f"Unknown action '{action}'. Use: add, patch, remove."}, ensure_ascii=False)
 
 
+def memory_home(data: Path) -> Path:
+    """Preserve the memory notebook and write receipts of existing installations."""
+    current, legacy = data / "profile", data / "hermes"
+    return legacy if legacy.is_dir() and not current.exists() else current
+
+
 class MoMoMemory:
     """Unified engine-agnostic Memory & Markdown Notebook manager for MoMo Agent.
 
-    Accepts `<data>` (agent root), `<data>/memories`, or `<data>/hermes` and ensures
-    `<data>/memories` and `<data>/hermes/memories` resolve to the exact same Markdown files.
+    Accepts `<data>` (agent root), `<data>/memories`, or its profile directory and ensures
+    `<data>/memories` and the profile notebook resolve to the exact same Markdown files.
     """
 
     def __init__(self, root: str | Path):
@@ -583,27 +589,28 @@ class MoMoMemory:
         if raw.name == "memories":
             self.home = raw.parent
             self._memories_dir = raw
-        elif raw.name == "hermes":
+        elif raw.name in {"profile", "hermes"}:
             self.home = raw
             self._memories_dir = raw / "memories"
             self._ensure_shared_symlink(raw.parent, self._memories_dir)
-        elif (raw / "hermes").is_dir() or (raw / "context").is_dir() or (raw / "runtime").is_dir() or (raw / "superagent").is_dir():
+        elif (raw / "profile").is_dir() or (raw / "hermes").is_dir() or (raw / "context").is_dir() or (raw / "runtime").is_dir() or (raw / "superagent").is_dir():
             # Passed top-level agent data root `<data>`
-            hermes_mem = raw / "hermes/memories"
+            profile = memory_home(raw)
+            profile_mem = profile / "memories"
             top_mem = raw / "memories"
-            if hermes_mem.exists() and not top_mem.exists():
-                self._ensure_shared_symlink(raw, hermes_mem)
-                self.home = raw / "hermes"
-                self._memories_dir = hermes_mem
+            if profile_mem.exists() and not top_mem.exists():
+                self._ensure_shared_symlink(raw, profile_mem)
+                self.home = profile
+                self._memories_dir = profile_mem
             elif top_mem.is_symlink():
-                self.home = raw / "hermes"
-                self._memories_dir = hermes_mem
+                self.home = profile
+                self._memories_dir = profile_mem
             else:
                 top_mem.mkdir(parents=True, exist_ok=True, mode=0o700)
-                if not hermes_mem.exists() and not hermes_mem.is_symlink():
+                if not profile_mem.exists() and not profile_mem.is_symlink():
                     try:
-                        (raw / "hermes").mkdir(parents=True, exist_ok=True, mode=0o700)
-                        hermes_mem.symlink_to("../memories")
+                        profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        profile_mem.symlink_to("../memories")
                     except OSError:
                         pass
                 self.home = raw
@@ -618,7 +625,7 @@ class MoMoMemory:
         try:
             if not alias.exists() and not alias.is_symlink():
                 target_memories.mkdir(parents=True, exist_ok=True, mode=0o700)
-                alias.symlink_to("hermes/memories")
+                alias.symlink_to(target_memories.relative_to(data_root))
         except OSError:
             pass
 
@@ -731,10 +738,10 @@ class MoMoMemory:
             for text in entries:
                 digest = hashlib.sha256(text.encode()).hexdigest()
                 items.append({
-                    "id": f"hermes-{target}-{digest}",
+                    "id": f"momo-{target}-{digest}",
                     "text": text,
                     "kind": target,
-                    "basis": "hermes",
+                    "basis": "momo",
                     "status": "current",
                     "revision": int(digest[:15], 16),
                     "evidence": [],
@@ -750,7 +757,7 @@ class MoMoMemory:
                     continue
                 digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                 items.append({
-                    "id": f"hermes-{kind}-{digest}",
+                    "id": f"momo-{kind}-{digest}",
                     "text": raw,
                     "kind": kind,
                     "basis": "dream",
@@ -781,7 +788,7 @@ class MoMoMemory:
             r"(?:hermes|momo)-(memory|user|briefing|project|journal|person|topic|note)-[0-9a-f]{64}", identity
         ):
             raise Conflict("This is an old memory view; refresh memory before editing")
-        norm_id = "hermes-" + identity.split("-", 1)[1]
+        norm_id = "momo-" + identity.split("-", 1)[1]
         with self.store() as store:
             item = next((item for item in self.items(store, self.home) if item["id"] == norm_id), None)
             if item:
@@ -798,7 +805,7 @@ class MoMoMemory:
                         except OSError:
                             continue
                         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-                        if f"hermes-{kind}-{digest}" == norm_id:
+                        if f"momo-{kind}-{digest}" == norm_id:
                             rel_posix = path.relative_to(self.memories_dir).as_posix()
                             path.unlink(missing_ok=True)
                             self._prune_empty_parents(path)
@@ -1074,6 +1081,3 @@ class MoMoMemory:
             "slug": dst_slug,
             "moved": True,
         }
-
-
-HermesMemory = MoMoMemory

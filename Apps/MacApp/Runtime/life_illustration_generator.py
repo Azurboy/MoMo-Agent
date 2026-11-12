@@ -15,6 +15,7 @@ for _candidate in (Path(__file__).resolve().parent, Path(__file__).resolve().par
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
+from momo_agent import credentials_directory, profile_directory
 from superagent_runtime import resolve_superagent_llm
 
 SCENE_POLICY = '''为 MoMo Agent 的生活插画提炼真实场景，只输出两行中文内容，不输出 Markdown 或指令。
@@ -167,7 +168,7 @@ class CodexIllustrationGenerator:
             return 'anthropic'
         if raw:
             return raw
-        auth_file = self.data / 'hermes/auth.json'
+        auth_file = profile_directory(self.data) / 'auth.json'
         if auth_file.is_file():
             try:
                 active = str((json.loads(auth_file.read_text(encoding='utf-8')) or {}).get('active_provider') or '').strip()
@@ -225,13 +226,8 @@ class CodexIllustrationGenerator:
             from model_setup import catalog, load_config, resolve_credentials
             config = load_config(self.data)
             model_cfg = (config.get('model') or {}) if isinstance(config, dict) else {}
-            old_hermes_home = os.environ.get('HERMES_HOME')
-            default_hermes = Path.home() / 'Library/Application Support/MoMoAgent/Agent/hermes'
-            os.environ['HERMES_HOME'] = str(
-                self.data / 'hermes' if (self.data / 'hermes/auth.json').is_file()
-                else default_hermes if (default_hermes / 'auth.json').is_file()
-                else self.data / 'hermes'
-            )
+            old_profile = os.environ.get('HERMES_HOME')
+            os.environ['HERMES_HOME'] = str(credentials_directory(self.data))
             try:
                 model_id = str(model_cfg.get('default') or '').strip()
                 creds = resolve_credentials('codex', model_id or 'gpt-5.4')
@@ -249,10 +245,10 @@ class CodexIllustrationGenerator:
                     'env': {'MOMO_LLM_API_KEY': api_key},
                 }
             finally:
-                if old_hermes_home is None:
+                if old_profile is None:
                     os.environ.pop('HERMES_HOME', None)
                 else:
-                    os.environ['HERMES_HOME'] = old_hermes_home
+                    os.environ['HERMES_HOME'] = old_profile
 
     def client(self, llm):
         from openai import OpenAI

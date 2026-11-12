@@ -563,7 +563,7 @@ struct DesktopSettings: View {
         [Page.advanced, .model, .pairing].filter { destination in
             let terms: [String]
             switch destination {
-            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), String(localized: "生活插画"), "Hermes", "SuperAgent", "Proactive"]
+            case .advanced: terms = [String(localized: "通用"), String(localized: "网络代理"), String(localized: "电脑控制"), String(localized: "运行环境"), String(localized: "智能体引擎"), String(localized: "时间线"), String(localized: "每天起点"), String(localized: "生活插画"), "DeepSeek Harness", "SuperAgent", "Proactive"]
             case .model: terms = [String(localized: "模型"), "API", "Codex", "Claude", "Antigravity", "Gemini"]
             case .pairing: terms = [String(localized: "设备"), String(localized: "配对手机"), String(localized: "远程访问")]
             }
@@ -671,20 +671,9 @@ struct DesktopSettings: View {
                     HStack {
                         Text("Agent Runtime").font(.system(size: 14))
                         Spacer(minLength: 16)
-                        Picker("Agent Runtime", selection: Binding(
-                            get: { model.runtimeEngine },
-                            set: { target in Task { await model.switchRuntimeEngine(target) } }
-                        )) {
-                            ForEach(DesktopAgentEngine.allCases) { engine in
-                                Text(engine.title).tag(engine)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 196)
-                        .disabled(model.busy != nil)
-                        .accessibilityIdentifier("settings.runtimeEngine")
+                        Text("DeepSeek Harness").foregroundStyle(.secondary)
                     }.desktopSettingsRow()
-                    if model.runtimeEngine == .superagent, let snap = model.proactiveSnapshot {
+                    if let snap = model.proactiveSnapshot {
                         Divider().opacity(0.45)
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {

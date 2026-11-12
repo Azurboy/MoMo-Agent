@@ -1,4 +1,4 @@
-"""Native desktop model setup; Hermes owns subscription credentials and refresh."""
+"""Native desktop model setup; subscription credentials and refresh."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,7 @@ from antigravity_bridge import (
     login_antigravity,
     run_antigravity_completion,
 )
-from momo_agent import SOURCE, atomic_private, child_environment, read_connection
+from momo_agent import SOURCE, profile_directory, atomic_private, child_environment, read_connection
 from provider_notice import classify_provider_issue, clear_provider_notice
 
 PROVIDERS = {"codex": "openai-codex", "claude": "anthropic", "antigravity": "antigravity"}
@@ -125,7 +125,7 @@ def login(provider: str, authorize=lambda **fields: None, flow: str = "device") 
         cli = find_claude_code_cli("claude")
         if not cli:
             raise ModelSetupError("请先安装 Claude Code，再使用 Claude 订阅登录。")
-        # Use Claude Code's own browser login; Hermes reads and refreshes that login.
+        # Use Claude Code's own browser login; the provider adapter reads that login.
         child = subprocess.Popen([cli, "auth", "login", "--claudeai"], stdin=subprocess.DEVNULL,
                                  start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, bufsize=1)
@@ -232,14 +232,8 @@ def probe(provider: str, model: str, credentials: dict) -> None:
 
 
 def load_config(data: Path) -> dict:
-    file = data / "hermes/config.yaml"
-    defaults = {
-        "memory": {"memory_enabled": True, "user_profile_enabled": True},
-        "updates": {"check": False},
-        "agent": {"max_turns": 20},
-        "platform_toolsets": {"api_server": ["terminal", "file", "memory"]},
-        "terminal": {"cwd": str(data / "workspace")},
-    }
+    file = profile_directory(data) / "config.yaml"
+    defaults = {}
     if not file.is_file():
         return defaults
     raw = file.read_text(encoding="utf-8")
@@ -267,9 +261,9 @@ def verify_and_save(data: Path, provider: str, model: str) -> dict:
         raise ModelSetupError("请选择模型后继续。")
     credentials = resolve_credentials(provider, model)
     probe(provider, model, credentials)
-    file = data / "hermes/config.yaml"
+    file = profile_directory(data) / "config.yaml"
     config = load_config(data)
-    # Subscription routing comes from Hermes, never from a previous custom API URL.
+    # Subscription routing comes from the selected provider, never from a previous custom API URL.
     config["model"] = {"provider": PROVIDERS[provider], "default": model}
     atomic_private(file, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     clear_provider_notice(data)

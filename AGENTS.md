@@ -113,6 +113,10 @@ MoMo Agent 要成为持续了解用户、围绕用户目标提供帮助的个人
 - 版本改动随代码提交。不得通过命令行、Local.xcconfig、Info.plist 或 target 设置临时覆盖版本；`project.yml` 只引用共享值，生成工程用 XcodeGen 2.46.0 同步。
 - 交付前用 `Tests/Support/verify-release-bundle.py` 核对实际手机和内嵌手表包的版本格式及其与配置的一致性。记录 Git 提交和产物版本；已安装设备的版本单独验证。
 
+## Agent 运行时
+
+MoMo 使用 DeepSeek Harness 和 SuperAgent 作为唯一的 Agent 运行时。旧安装的配置、授权和记忆继续从其原目录读取。
+
 ## Git 工作流
 
 - **2026-10-31 用户更新：仓库开源后正常保留提交历史，后续修改使用新增 commit 和正常 PR 合并，不再把 `main` 压成单一首发 commit，也不为整理历史而强推 `main`。已整理的历史保持现状，不追溯改写。本条取代 2026-10-29 的单 commit 要求。**
