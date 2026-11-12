@@ -310,10 +310,7 @@ final class PhoneContextSync {
               ["Hermes", "SuperAgent"].contains(status.memoryWriter) else { throw SyncError.identity }
         memoryPending = status.memoryPending ?? 0; memoryNeedsReview = status.memoryNeedsReview ?? 0
         memoryReview = status.memoryReview
-        if let relabels = status.speakerRelabels, !relabels.isEmpty {
-            await applySpeakerRelabels(relabels)
-        }
-        var uploadError: Error?
+        var uploadError = await applySpeakerCorrections(status)
         do {
             try await uploadSources()
             sourceDeliveryFailure = nil
@@ -329,45 +326,50 @@ final class PhoneContextSync {
         }
         return uploadError
     }
-    private func applySpeakerRelabels(_ relabels: [SpeakerRelabelInstruction]) async {
+    private func speakerSources(session: String?, spans: [String]) async throws -> [SourceReference] {
+        guard let session, let sessionID = UUID(uuidString: session), !spans.isEmpty else { throw SyncError.identity }
+        let summary = try await archive.recordingSummary(sessionID: sessionID)
+        return try spans.map {
+            guard let id = UUID(uuidString: $0) else { throw SyncError.identity }
+            return SourceReference(sessionID: sessionID, spanID: id, transcriptVersion: summary.transcriptVersion, generation: summary.generation)
+        }
+    }
+
+    private func applySpeakerCorrections(_ status: ContextStatus) async -> Error? {
         var ackIDs: [String] = []
-        var anyModified = false
-        for item in relabels {
-            guard let sessionID = UUID(uuidString: item.sessionId) else {
-                ackIDs.append(item.id)
-                continue
-            }
+        var firstError: Error?
+        for item in status.speakerExclusions ?? [] {
             do {
-                let summary = try await archive.recordingSummary(sessionID: sessionID)
-                let refs: [SourceReference] = item.spanIds.compactMap { sid in
-                    guard let spanUUID = UUID(uuidString: sid) else { return nil }
-                    return SourceReference(
-                        sessionID: sessionID,
-                        spanID: spanUUID,
-                        transcriptVersion: summary.transcriptVersion,
-                        generation: summary.generation
-                    )
+                if let from = item.recordedFrom {
+                    try await archive.excludeSpeaker(named: item.speaker, from: Date(timeIntervalSince1970: from))
+                } else {
+                    let refs = try await speakerSources(session: item.sessionId, spans: item.spanIds)
+                    try await archive.excludeSpeaker(named: item.speaker, sources: refs, deliveryID: item.id)
                 }
-                guard !refs.isEmpty else {
-                    ackIDs.append(item.id)
-                    continue
-                }
-                let freshRefs = (try? await archive.resolveCurrentSpeakerSources(refs)) ?? refs
+                ackIDs.append(item.id)
+            } catch { firstError = firstError ?? error }
+        }
+        if status.retireUnknownSpeaker == true {
+            do { try await archive.retireLegacyUnknownSpeaker() }
+            catch { firstError = firstError ?? error }
+        }
+        for item in status.speakerRelabels ?? [] {
+            guard item.isOwner || item.newSpeaker != "身份待确认" else { continue }
+            do {
+                let refs = try await speakerSources(session: item.sessionId, spans: item.spanIds)
                 let feedback: SpeakerFeedback = item.isOwner ? .owner : .person(item.newSpeaker)
                 let scope: SpeakerFeedbackScope = item.scope == "cluster" ? .cluster : .selection
-                try await archive.correctSpeakers(freshRefs, feedback: feedback, scope: scope, deferGlobalRematch: true)
-                anyModified = true
+                try await archive.correctSpeakers(refs, feedback: feedback, scope: scope, deferGlobalRematch: true, deliveryID: item.id)
                 ackIDs.append(item.id)
-            } catch {
-                ackIDs.append(item.id)
-            }
-        }
-        if anyModified {
-            try? await archive.projectPendingDocuments(includeUnchanged: false)
+            } catch { firstError = firstError ?? error }
         }
         if !ackIDs.isEmpty {
-            try? await client.acknowledgeSpeakerRelabels(ids: ackIDs)
+            do {
+                try await archive.projectPendingDocuments(includeUnchanged: false)
+                try await client.acknowledgeSpeakerRelabels(ids: ackIDs)
+            } catch { firstError = firstError ?? error }
         }
+        return firstError
     }
     private func uploadSources() async throws {
         let changeRevision = state.sourceChangeRevision

@@ -124,7 +124,7 @@ function momoMemoryPromptBlock(): string {
     `### 记忆订正、说话人声纹回写与多级目录自由组织工作流\n`
     + `当用户指出某段记忆/日志总结有误，告知说话人归属，或要求整理记忆目录结构时：\n`
     + `1. 若涉及录音事实或说话人，立即使用 \`search_recordings\` / \`read_recording\` 找到对应录音 \`source_id\` 及精确的 \`span_ids\`；\n`
-    + `2. 调用 \`relabel_recording_speakers\` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 \`span_ids\` + \`scope="selection"\` 避免误改同场其他发言；若原标签是整组匿名 \`[说话人 N]\` 可用 \`scope="cluster"\`）；\n`
+    + `2. 若用户仅排除一个人，调用 exclude_recording_speaker，按明确范围传片段或带时区的起始日期，并保留未知身份。已确认真实身份时调用 \`relabel_recording_speakers\` 修正录音说话人并同步回写 iPhone 声纹库（若原标签已是具名人或“我”仅局部串轨，必须传精确 \`span_ids\` + \`scope="selection"\` 避免误改同场其他发言；若原标签是整组匿名 \`[说话人 N]\` 可用 \`scope="cluster"\`）；\n`
     + `3. 全量排查并用 \`read_memory_notebook\` / \`write_memory_notebook\` / \`move_memory_notebook\` / \`remove_memory_notebook\` / \`update_core_memory\` 同步订正所有受影响的笔记与 \`BRIEFING.md\` / \`MEMORY.md\`，顺手清除笔记里残留的 \`remaining_parts\` / \`revision\` 等内部调试字样。\n`
     + `4. **多级目录自由组织与自治断舍离**：\`memories/\` 支持任意二级/三级目录及自定义目录（如 \`projects/AI访谈/overview.md\`、\`projects/AI访谈/双月OKR.md\`、\`people/核心团队/shengli.md\`、\`journal/2026-11/2026-11-10.md\`）。优先用 \`mode="replace"\` 重整结构、确保首行有清晰的 \`# 一级标题\`，主动合并重叠碎片、用 \`move_memory_notebook\` 归整子目录、用 \`remove_memory_notebook\` 删除过时/冗余活页。`
   )

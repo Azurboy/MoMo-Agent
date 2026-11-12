@@ -28,6 +28,28 @@ class ContextTests(unittest.TestCase):
         return self.store.organize(self.receipt['source_id'], self.receipt['source_revision'], '下周五交方案，聚餐未定。',
                 [dict(text='下周五给小林发方案', quote='下周五给小林发方案。', kind='commitment', basis='reported')],
                 [dict(text='准备发给小林的方案', quote='下周五给小林发方案。')])
+    def test_speaker_exclusions_survive_upload_restart_and_ack(self):
+        source = self.receipt['source_id']
+        spans = [dict(id=str(uuid.uuid4()), speaker='Alex', text='[Alex] hi', recorded_at=t) for t in (999, 1000, 1001)]
+        payload = dict(self.payload, version=2, spans=spans, text_sha256=digest('\n'.join(sp['text'] for sp in spans)))
+        self.store.sync_source(payload)
+        command = self.store.exclude_speaker('Alex', recorded_from='1970-01-01T00:16:40+00:00')
+        self.assertEqual(command, self.store.exclude_speaker('Alex', recorded_from='1970-01-01T01:16:40+01:00'))
+        self.assertEqual(self.store.read_source(source)['text'], '[Alex] hi\nhi\nhi')
+        self.assertEqual(len(self.store.pending_speaker_exclusions()), 1)
+        self.assertEqual(self.store.ack_speaker_relabels([command['exclusion_id']])['acknowledged'], 1)
+        self.store.close()
+        self.store = ContextStore(self.temporary.name)
+        self.store.sync_source(dict(payload, version=3))
+        self.assertEqual(self.store.pending_speaker_exclusions(), [])
+        self.assertNotIn('speaker', self.store.read_source(source)['spans'][1])
+        with self.assertRaises(ValueError):
+            self.store.exclude_speaker('Alex', recorded_from='1970-01-01T00:16:40')
+        with self.assertRaises(ValueError):
+            self.store.exclude_speaker('Alex', source_id=source, span_ids=[str(uuid.uuid4())])
+        self.store.exclude_speaker('Alex', source_id=source, span_ids=[spans[0]['id']])
+        self.assertEqual(self.store.read_source(source)['text'], 'hi\nhi\nhi')
+
     def test_receipt_retry_is_idempotent_after_restart(self):
         self.store.close(); self.store = ContextStore(self.temporary.name)
         self.assertEqual(self.receipt, self.store.sync_source(self.payload))

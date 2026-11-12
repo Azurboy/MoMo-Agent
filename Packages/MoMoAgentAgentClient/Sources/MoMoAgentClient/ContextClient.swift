@@ -60,6 +60,13 @@ public struct SpeakerRelabelInstruction: Codable, Sendable, Identifiable, Equata
     public let scope: String
     public let reason: String
 }
+public struct SpeakerExclusionInstruction: Codable, Sendable {
+    public let id: String
+    public let speaker: String
+    public let sessionId: String?
+    public let spanIds: [String]
+    public let recordedFrom: Double?
+}
 public struct DreamTriggerReceipt: Codable, Sendable {
     public let jobId: String
     public let state: String
@@ -73,6 +80,8 @@ public struct ContextStatus: Codable, Sendable {
     public let memoryNeedsReview: Int?
     public let memoryReview: MemoryReviewStatus?
     public let speakerRelabels: [SpeakerRelabelInstruction]?
+    public let speakerExclusions: [SpeakerExclusionInstruction]?
+    public let retireUnknownSpeaker: Bool?
 }
 public struct MemoryReviewStatus: Codable, Sendable, Equatable {
     public struct Dream: Codable, Sendable, Equatable { public let at: Double }

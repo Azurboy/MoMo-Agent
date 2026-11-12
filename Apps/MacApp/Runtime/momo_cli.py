@@ -232,6 +232,16 @@ def _cmd_notebook(data: Path, args: argparse.Namespace) -> dict:
     raise ValueError(f"Unknown notebook action: {act}")
 
 
+def _cmd_exclude_speaker(data: Path, args: argparse.Namespace) -> dict:
+    store = _open_context(data)
+    try:
+        return store.exclude_speaker(args.speaker, source_id=args.source_id,
+                                     span_ids=args.span_ids.split(",") if args.span_ids else None,
+                                     recorded_from=args.recorded_from)
+    finally:
+        store.close()
+
+
 def _cmd_relabel_speakers(data: Path, args: argparse.Namespace) -> dict:
     store = _open_context(data)
     try:
@@ -562,6 +572,12 @@ def main() -> int:
     nb.add_argument("--mode", choices=("replace", "append"), default="replace")
     nb.add_argument("--overwrite", action="store_true")
 
+    exclude = sub.add_parser("exclude-speaker", help="Exclude a known speaker from selected spans or from a timezone-qualified date forward")
+    exclude.add_argument("speaker")
+    exclude.add_argument("--source-id")
+    exclude.add_argument("--span-ids")
+    exclude.add_argument("--recorded-from")
+
     relabel = sub.add_parser("relabel-speakers", help="Relabel speaker tags on a recording based on dialogue semantics")
     relabel.add_argument("source_id")
     relabel.add_argument("target_speaker")
@@ -600,6 +616,7 @@ def main() -> int:
         "remember": _cmd_remember,
         "forget": _cmd_forget,
         "notebook": _cmd_notebook,
+        "exclude-speaker": _cmd_exclude_speaker,
         "relabel-speakers": _cmd_relabel_speakers,
         "conversation": _cmd_conversation,
         "web-search": _cmd_web_search,

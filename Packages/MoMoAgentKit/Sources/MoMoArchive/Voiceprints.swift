@@ -649,6 +649,7 @@ struct VoicePerson: Sendable {
     let id: UUID
     let name: String
     let owner: Bool
+    let recordedFrom: Double?
 }
 
 struct VoiceprintBankCache {
@@ -686,8 +687,8 @@ extension ArchiveStore {
     }
 
     private func voicePeople() throws -> [Person] {
-        try database.rows("SELECT id,name,is_owner FROM voice_profiles ORDER BY id").map {
-            Person(id: try $0.requireUUID(0), name: try $0.requireString(1), owner: $0.integer(2) == 1)
+        try database.rows("SELECT p.id,p.name,p.is_owner,c.recorded_from FROM voice_profiles p LEFT JOIN voice_match_cutoffs c ON c.person_id=p.id ORDER BY p.id").map {
+            Person(id: try $0.requireUUID(0), name: try $0.requireString(1), owner: $0.integer(2) == 1, recordedFrom: $0.double(3))
         }
     }
 
@@ -1016,6 +1017,7 @@ extension ArchiveStore {
         sessionID: UUID,
         evidence: SpeakerEvidence?,
         excluding: Set<UUID> = [],
+        source: TranscriptAudioRange? = nil,
         preloadedPeople: [VoicePerson]?,
         preparedBanks: inout [String: [Int: VoiceprintMatcher.PreparedBank]],
         sessionCones: inout [String: VoiceprintCone?],
@@ -1093,12 +1095,20 @@ extension ArchiveStore {
         } else {
             sessCone = nil
         }
-        let person = VoiceprintMatcher.match(
+        var person = VoiceprintMatcher.match(
             evidence.embedding,
             clusterCentroid: updatedSampleCount > 0 ? centroid : nil,
             sessionCone: sessCone,
             cleanSeconds: max(0.3, evidence.cleanSeconds),
             prepared: prepared)
+        if let cutoff = people.first(where: { $0.id == person })?.recordedFrom {
+            guard let source, let row = try database.rows("SELECT manifest FROM chunks WHERE id=?", [.text(source.chunkID.uuidString)]).first else {
+                throw ArchiveError.invalidTranscript
+            }
+            let chunk = try WireJSON.decode(ChunkManifest.self, from: row.requireData(0))
+            let recordedAt = chunk.wallClockAnchor.timeIntervalSince1970 + Double(source.frames.start) / chunk.timebaseHz
+            if recordedAt >= cutoff { person = nil }
+        }
         let encodedEvidence = try WireJSON.encode(evidence)
         try database.execute("INSERT INTO speaker_observations(span_id,session_id,cluster_id,model_revision,evidence,matched_person,updated_at) VALUES(?,?,?,?,?,?,?)",
             [.text(spanID.uuidString), .text(sessionID.uuidString), .text(cluster.uuidString), .text(evidence.modelRevision),
@@ -1169,11 +1179,23 @@ extension ArchiveStore {
         _ sources: [TranscriptCitationSource],
         feedback: SpeakerFeedback,
         scope: SpeakerFeedbackScope = .selection,
-        deferGlobalRematch: Bool = false
+        deferGlobalRematch: Bool = false,
+        deliveryID: String? = nil
     ) throws {
+        try applySpeakerFeedback(sources, scope: scope, deferGlobalRematch: deferGlobalRematch, deliveryID: deliveryID) { feedback }
+    }
+
+    private func applySpeakerFeedback(_ sources: [SourceReference], scope: SpeakerFeedbackScope, deferGlobalRematch: Bool,
+                                      deliveryID: String?, resolveFeedback: () throws -> SpeakerFeedback) throws {
         try speakerTransaction {
+            if let deliveryID {
+                let receipt = [SQLValue.text(deliveryID)]
+                if try !database.rows("SELECT 1 FROM speaker_delivery_receipts WHERE id=?", receipt).isEmpty { return }
+                try database.execute("INSERT INTO speaker_delivery_receipts VALUES(?)", receipt)
+            }
             try validateSources(sources)
             let selected = try speakerFeedbackSources(sources, scope: scope)
+            let feedback = try resolveFeedback()
             if case .selection = scope {
                 if case .clear = feedback { /* Removing a label does not change acoustic grouping. */ }
                 else { try separateSelectedSpeakerObservations(selected) }
@@ -2324,6 +2346,62 @@ extension ArchiveStore {
         return try labeledSpeakerSpans(spans, sessionID: sessionID, people: cache.people, preparedBanks: &preparedBanks)
     }
 
+    public func excludeSpeaker(named raw: String, from date: Date) throws {
+        let cutoff = date.timeIntervalSince1970
+        guard cutoff.isFinite else { throw ArchiveError.invalidQuery }
+        try speakerTransaction {
+            let person = try personForExclusion(raw)
+            if let existing = person.recordedFrom, existing <= cutoff { return }
+            try database.execute("INSERT OR REPLACE INTO voice_match_cutoffs VALUES(?,?)", [.text(person.id.uuidString), .double(cutoff)])
+            invalidateVoiceprintCache()
+            let sessions = try database.rows("SELECT DISTINCT session_id FROM speaker_observations WHERE confirmed_person=? OR matched_person=?",
+                [.text(person.id.uuidString), .text(person.id.uuidString)])
+            for row in sessions {
+                let id = try row.requireUUID(0)
+                guard let document = try currentTranscriptOrNil(sessionID: id) else { continue }
+                let locations = try spanLocations(document.spans, sessionID: id, generation: document.generation)
+                for span in document.spans where span.attribution?.personID == person.id && (locations[span.id]?.recordedAt ?? .distantPast) >= date {
+                    let values = [SQLValue.text(span.id.uuidString), .text(person.id.uuidString)]
+                    try database.execute("UPDATE speaker_observations SET confirmed_person=NULL WHERE span_id=? AND confirmed_person=?", values)
+                    try database.execute("DELETE FROM voice_profile_seeds WHERE anchor_id=? AND person_id=?", values)
+                    try database.execute("UPDATE speaker_feedback_anchors SET confirmed_person=NULL WHERE id=? AND confirmed_person=?", values)
+                }
+            }
+            invalidateVoiceprintCache()
+            for row in sessions {
+                let id = try row.requireUUID(0)
+                guard let doc = try currentTranscriptOrNil(sessionID: id) else { continue }
+                let spans = try labeledSpeakerSpans(doc.spans, sessionID: id)
+                if spans != doc.spans {
+                    try storeDocument(TranscriptDocument(sessionID: id, version: doc.version + 1, generation: doc.generation,
+                        spans: spans, updatedAt: Date()), invalidatesExistingSources: true, knownPrevious: .some(doc))
+                }
+            }
+        }
+    }
+
+    private func personForExclusion(_ raw: String) throws -> Person {
+        let name = try voiceName(raw)
+        guard name != "身份待确认" else { throw VoiceprintError.invalidName }
+        if let known = try voicePeople().first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) { return known }
+        let id = UUID()
+        try database.execute("INSERT INTO voice_profiles(id,name,is_owner) VALUES(?,?,0)", [.text(id.uuidString), .text(name)])
+        invalidateVoiceprintCache()
+        return Person(id: id, name: name, owner: false, recordedFrom: nil)
+    }
+
+    public func excludeSpeaker(named name: String, sources: [SourceReference], deliveryID: String) throws {
+        try applySpeakerFeedback(sources, scope: .selection, deferGlobalRematch: true, deliveryID: deliveryID) {
+            .notPerson(try personForExclusion(name).id)
+        }
+    }
+
+    public func retireLegacyUnknownSpeaker() throws {
+        if let person = try voicePeople().first(where: { !$0.owner && $0.name == "身份待确认" }) {
+            try forgetVoiceprint(personID: person.id)
+        }
+    }
+
     public func forgetVoiceprint(personID: UUID) throws {
         try speakerTransaction {
             let owner = try voicePeople().first { $0.id == personID }?.owner == true
@@ -2774,6 +2852,15 @@ extension ArchiveStore {
             let oldMatched: UUID?
         }
 
+        let cutoffs = Dictionary(uniqueKeysWithValues: people.compactMap { person in
+            person.recordedFrom.map { (person.id, $0) }
+        })
+        let locations = cutoffs.isEmpty ? [:] : try spanLocations(spans, sessionID: id, generation: 0)
+        func eligible(_ person: UUID?, spanID: UUID) -> UUID? {
+            guard let person, let cutoff = cutoffs[person] else { return person }
+            guard let date = locations[spanID]?.recordedAt, date.timeIntervalSince1970 < cutoff else { return nil }
+            return person
+        }
         var decoded: [DecodedObs] = []
         decoded.reserveCapacity(obsRows.count)
         var clusterConfirmed: [UUID: Set<UUID>] = [:]
@@ -2785,7 +2872,7 @@ extension ArchiveStore {
             let clusterID = try row.requireUUID(1)
             let revision = try row.requireString(2)
             let ev = try decodeCachedSpeakerEvidence(sessionID: id, spanID: spanID, data: row.requireData(3))
-            let confirmed = row.string(4).flatMap(UUID.init(uuidString:))
+            let confirmed = eligible(row.string(4).flatMap(UUID.init(uuidString:)), spanID: spanID)
             let oldMatched = row.string(5).flatMap(UUID.init(uuidString:))
             if let rejs = rejectionsBySpan[spanID] {
                 clusterRejected[clusterID, default: []].formUnion(rejs)
@@ -2895,6 +2982,7 @@ extension ArchiveStore {
                     }
                 }
             }
+            person = eligible(person, spanID: obs.spanID)
             if obs.confirmed == nil, let candidate = person,
                rejectionsBySpan[obs.spanID]?.contains(candidate) == true {
                 person = nil

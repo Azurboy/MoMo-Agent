@@ -73,7 +73,11 @@ extension ArchiveStore {
     }
 
     private func locationsForValidatedTranscript(_ document: TranscriptDocument) throws -> [UUID: TranscriptSpanLocation] {
-        let rows = try database.rows("SELECT id,epoch_id,wall_clock_anchor,timebase_hz,retention FROM chunks WHERE session_id=?", [.text(document.sessionID.uuidString)])
+        return try spanLocations(document.spans, sessionID: document.sessionID, generation: document.generation)
+    }
+
+    func spanLocations(_ spans: [TranscriptSpan], sessionID: UUID, generation: Int64) throws -> [UUID: TranscriptSpanLocation] {
+        let rows = try database.rows("SELECT id,epoch_id,wall_clock_anchor,timebase_hz,retention FROM chunks WHERE session_id=?", [.text(sessionID.uuidString)])
         var chunks: [UUID: (epochID: UUID, wallClockAnchor: Date, timebaseHz: Double, present: Bool)] = [:]
         chunks.reserveCapacity(rows.count)
         for row in rows {
@@ -87,7 +91,7 @@ extension ArchiveStore {
                 chunks[chunkID] = (manifest.epochID, manifest.wallClockAnchor, manifest.timebaseHz, present)
             }
         }
-        return try Dictionary(uniqueKeysWithValues: document.spans.map { span in
+        return try Dictionary(uniqueKeysWithValues: spans.map { span in
             guard let first = span.sourceRanges.first, let chunk = chunks[first.chunkID] else {
                 throw ArchiveError.invalidTranscript
             }
@@ -95,7 +99,7 @@ extension ArchiveStore {
             let date = chunk.wallClockAnchor.addingTimeInterval(Double(first.frames.start) / chunk.timebaseHz)
             let available = span.sourceRanges.allSatisfy { chunks[$0.chunkID]?.present == true }
             return (span.id, TranscriptSpanLocation(recordedAt: date, audioAvailable: available,
-                audioSource: TimelineAudioSource(sessionID: document.sessionID, generation: document.generation,
+                audioSource: TimelineAudioSource(sessionID: sessionID, generation: generation,
                     epochID: chunk.epochID, frames: span.frames, timebaseHz: chunk.timebaseHz, wallClockAnchor: chunk.wallClockAnchor)))
         })
     }

@@ -591,6 +591,7 @@ extension ArchiveStore {
                         sessionID: sessionID,
                         evidence: part.evidence,
                         excluding: excluded,
+                        source: first,
                         preloadedPeople: cachedPeople,
                         preparedBanks: &sharedPreparedBanks,
                         sessionCones: &sessionCones,

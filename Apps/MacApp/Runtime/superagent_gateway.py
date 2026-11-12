@@ -4365,11 +4365,15 @@ class SuperAgentGateway:
                 if res.get("success") and str(res.get("category") or "").lower() == "briefing":
                     self._deliver_briefing_message_if_needed()
                 return web.json_response({"ok": bool(res.get("success")), **res})
-            if op in ("list_recordings", "read_recording", "search_recordings", "relabel_recording_speakers"):
+            if op in ("list_recordings", "read_recording", "search_recordings", "relabel_recording_speakers", "exclude_recording_speaker"):
                 from context_store import ContextStore
 
                 cstore = ContextStore(self.data / "context")
                 try:
+                    if op == "exclude_recording_speaker":
+                        res = cstore.exclude_speaker(args.get("speaker"), source_id=args.get("source_id"),
+                                                     span_ids=args.get("span_ids"), recorded_from=args.get("recorded_from"))
+                        return web.json_response({"ok": True, **res})
                     if op == "list_recordings":
                         lim = max(1, min(int(args.get("limit") or 20), 50))
                         res = cstore.list_sources(str(args.get("after") or ""), lim)

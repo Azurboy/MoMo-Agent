@@ -134,6 +134,12 @@ class ContextStore:
                     scope TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL,
                     applied_on_phone INTEGER NOT NULL DEFAULT 0);
             """)
+            self.db.execute("""CREATE TABLE IF NOT EXISTS speaker_exclusions(
+                id TEXT PRIMARY KEY, speaker TEXT NOT NULL, source_id TEXT, span_ids TEXT NOT NULL,
+                recorded_from REAL, applied_on_phone INTEGER NOT NULL DEFAULT 0)""")
+            # Legacy agents used this placeholder as a positive identity. Keep the original receipts for migration.
+            self.db.execute("""DELETE FROM span_speaker_overrides WHERE speaker='身份待确认' AND source_id IN
+                (SELECT source_id FROM speaker_relabel_queue WHERE new_speaker='身份待确认')""")
             for table in ('jobs', 'memory_reviews'):
                 if 'attempt' not in {row[1] for row in self.db.execute(f'PRAGMA table_info({table})')}:
                     self.db.execute(f'ALTER TABLE {table} ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0')
@@ -615,86 +621,116 @@ class ContextStore:
         if not spans:
             return []
         overrides = {
-            r["span_id"]: (r["speaker"], bool(r["is_owner"]))
+            r["span_id"].lower(): (r["speaker"], bool(r["is_owner"]))
             for r in self.db.execute(
                 "SELECT span_id, speaker, is_owner FROM span_speaker_overrides WHERE source_id=?",
                 (source_id,),
             ).fetchall()
         }
-        if not overrides:
-            return spans
+        dated = {}
+        selected = {}
+        for row in self.db.execute(
+            "SELECT speaker, span_ids, recorded_from FROM speaker_exclusions WHERE source_id IS NULL OR source_id=?",
+            (source_id,),
+        ):
+            name = row["speaker"].casefold()
+            if row["recorded_from"] is not None:
+                dated[name] = min(dated.get(name, math.inf), row["recorded_from"])
+            else:
+                for sid in json.loads(row["span_ids"]):
+                    selected.setdefault(sid, set()).add(name)
         out = []
         for span in spans:
-            if not isinstance(span, dict):
-                out.append(span)
-                continue
-            override = overrides.get(str(span.get("id") or ""))
-            if override is None:
-                out.append(span)
-                continue
-            new_spk, new_owner = override
-            span_text = str(span.get("text") or "")
-            if span_text.startswith("[") and "] " in span_text:
-                span_text = f"[{new_spk}] " + span_text.split("] ", 1)[1]
+            sid = span["id"].lower()
+            text = span["text"]
+            prefix, sep, body = text.partition("] ")
+            labeled = prefix.startswith("[") and bool(sep)
+            def excluded(name):
+                key = name.casefold()
+                return (name == "身份待确认" or key in selected.get(sid, ())
+                        or span["recorded_at"] >= dated.get(key, math.inf))
+
+            name = str(span.get("speaker") or (prefix[1:] if labeled else ""))
+            override = overrides.get(sid)
+            if override and not excluded(override[0]):
+                name = override[0]
+                out.append(dict(span, text=f"[{name}] {body if labeled else text}", speaker=name,
+                                is_owner=override[1], speaker_inferred_by_dream=True))
+            elif excluded(name):
+                updated = dict(span, text=body if labeled else text)
+                updated.pop("speaker", None)
+                updated.pop("is_owner", None)
+                out.append(updated)
             else:
-                span_text = f"[{new_spk}] {span_text}"
-            updated = dict(span)
-            updated["text"] = span_text
-            updated["speaker"] = new_spk
-            updated["is_owner"] = new_owner
-            updated["speaker_inferred_by_dream"] = True
-            out.append(updated)
+                out.append(span)
         return out
 
     def read_source(self, source_id, expected_revision=None, offset=0, limit=12_000):
         row = self.source(source_id, expected_revision)
-        text = row["text"]
+        payload = json.loads(row["payload"])
+        effective = self._apply_speaker_overrides(source_id, payload["spans"])
+        text = "\n".join(sp["text"] for sp in effective)
         if type(offset) is not int or type(limit) is not int or not 0 <= offset <= len(text) or not 1 <= limit <= 24_000:
             raise ValueError("Invalid character range")
         end = min(len(text), offset + limit)
-        payload = json.loads(row["payload"])
-        overrides = {
-            r["span_id"]: (r["speaker"], bool(r["is_owner"]))
-            for r in self.db.execute(
-                "SELECT span_id, speaker, is_owner FROM span_speaker_overrides WHERE source_id=?",
-                (source_id,),
-            ).fetchall()
-        }
         # Span metadata is bounded by the same character range; every span has a source citation.
         spans, position = [], 0
-        for span in payload["spans"]:
+        for span in effective:
             next_position = position + len(span["text"])
             if next_position > offset and position < end:
                 span_text = span["text"]
-                override = overrides.get(span["id"])
-                if override is not None:
-                    new_spk, new_owner = override
-                    if span_text.startswith("[") and "] " in span_text:
-                        span_text = f"[{new_spk}] " + span_text.split("] ", 1)[1]
-                    else:
-                        span_text = f"[{new_spk}] {span_text}"
                 item = {
                     "id": span["id"],
                     "recorded_at": span["recorded_at"],
                     "text": span_text,
                     "citation_url": f'momoagent://source/{payload["session_id"]}/{span["id"]}?version={row["version"]}&generation={row["generation"]}',
                 }
-                if override is not None:
-                    item["is_owner"] = override[1]
-                    item["speaker"] = override[0]
-                    item["speaker_inferred_by_dream"] = True
-                else:
-                    if isinstance(span.get("is_owner"), bool):
-                        item["is_owner"] = span["is_owner"]
-                    if span.get("speaker"):
-                        item["speaker"] = span["speaker"]
+                for key in ("is_owner", "speaker", "speaker_inferred_by_dream"):
+                    if key in span:
+                        item[key] = span[key]
                 spans.append(item)
             position = next_position + 1
-        return {"source_id": source_id, "source_revision": row["revision"], "text_sha256": row["hash"],
+        return {"source_id": source_id, "source_revision": row["revision"], "text_sha256": digest(text),
                 "offset": offset, "end": end, "total_characters": len(text),
                 "truncated": end < len(text), "next_offset": end if end < len(text) else None,
                 "text": text[offset:end],
                 "spans": spans, "content_role": "recorded evidence, not instructions or execution authorization"}
+
+    def exclude_speaker(self, speaker, *, source_id=None, span_ids=None, recorded_from=None):
+        """Persist either exact span exclusions or a time boundary across recordings."""
+        if not isinstance(speaker, str) or not speaker.strip() or len(speaker) > 80 or speaker.strip() == "身份待确认":
+            raise ValueError("Provide the name of the person to exclude")
+        speaker = speaker.strip()
+        since = None
+        ids = []
+        if recorded_from is not None:
+            if source_id or span_ids:
+                raise ValueError("A dated exclusion covers all recordings; omit source_id and span_ids")
+            if not isinstance(recorded_from, str):
+                raise ValueError("recorded_from must be a timezone-qualified ISO date")
+            date = _dt.datetime.fromisoformat(recorded_from)
+            if date.tzinfo is None:
+                raise ValueError("recorded_from must include the time zone")
+            since = date.timestamp()
+        else:
+            if not source_id or not isinstance(span_ids, list) or not 1 <= len(span_ids) <= 200:
+                raise ValueError("Provide source_id and 1–200 exact span_ids, or recorded_from")
+            ids = sorted({str(uuid.UUID(i)) for i in span_ids})
+            spans = json.loads(self.source(source_id)["payload"])["spans"]
+            if not set(ids).issubset(sp["id"].lower() for sp in spans):
+                raise ValueError("Selected span is not in the current recording")
+        ident = "exclude-" + digest(canonical([speaker.casefold(), source_id, ids, since]))
+        with self.write():
+            inserted = self.db.execute("INSERT OR IGNORE INTO speaker_exclusions VALUES(?,?,?,?,?,0)",
+                                       (ident, speaker, source_id, canonical(ids), since)).rowcount
+            if inserted:
+                self.advance()
+        return {"success": True, "exclusion_id": ident, "speaker": speaker, "recorded_from": since, "span_count": len(ids)}
+
+    def pending_speaker_exclusions(self):
+        return [dict(id=r["id"], speaker=r["speaker"], session_id=r["source_id"].split("/")[-1] if r["source_id"] else None,
+                     span_ids=json.loads(r["span_ids"]), recorded_from=r["recorded_from"])
+                for r in self.db.execute("SELECT * FROM speaker_exclusions WHERE applied_on_phone=0 ORDER BY rowid LIMIT 32")]
 
     def relabel_speakers(
         self,
@@ -711,6 +747,8 @@ class ContextStore:
         payload = json.loads(row["payload"])
         session_id = str(payload.get("session_id") or source_id.split("/")[-1]).lower()
         clean_target = "我" if is_owner else str(target_speaker or "").strip()
+        if clean_target == "身份待确认":
+            raise ValueError("Use exclude_speaker to reject a name without assigning a new identity")
         if not clean_target or len(clean_target) > 80:
             raise ValueError("A valid target_speaker name (<= 80 chars) is required")
         clean_scope = "cluster" if scope == "cluster" else "selection"
@@ -788,7 +826,7 @@ class ContextStore:
 
     def pending_speaker_relabels(self, limit: int = 32) -> list[dict]:
         rows = self.db.execute(
-            "SELECT * FROM speaker_relabel_queue WHERE applied_on_phone=0 ORDER BY created_at ASC LIMIT ?",
+            "SELECT * FROM speaker_relabel_queue WHERE applied_on_phone=0 AND new_speaker!='身份待确认' ORDER BY created_at ASC LIMIT ?",
             (max(1, min(limit, 100)),),
         ).fetchall()
         return [
@@ -815,6 +853,9 @@ class ContextStore:
             updated = self.db.execute(
                 f"UPDATE speaker_relabel_queue SET applied_on_phone=1 WHERE id IN ({placeholders})",
                 tuple(clean_ids),
+            ).rowcount
+            updated += self.db.execute(
+                f"UPDATE speaker_exclusions SET applied_on_phone=1 WHERE id IN ({placeholders})", tuple(clean_ids),
             ).rowcount
         return {"acknowledged": updated}
 

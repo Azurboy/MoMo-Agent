@@ -142,6 +142,10 @@ class ContextService:
                                   "memory_needs_review": store.db.execute("SELECT COUNT(*) FROM jobs WHERE state='needs_review'").fetchone()[0]}
                         result['memory_review'] = memory_review.status(store)
                         result['speaker_relabels'] = store.pending_speaker_relabels(limit=32)
+                        result['speaker_exclusions'] = store.pending_speaker_exclusions()
+                        result['retire_unknown_speaker'] = bool(store.db.execute(
+                            "SELECT 1 FROM speaker_relabel_queue WHERE new_speaker='身份待确认' LIMIT 1"
+                        ).fetchone())
                     else:
                         self.respond(404, {"error": {"code": "not_found", "message": "Unknown MoMo route"}}); return
                     self.respond(200, result)

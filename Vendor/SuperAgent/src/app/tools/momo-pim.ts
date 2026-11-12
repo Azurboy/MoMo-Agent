@@ -311,6 +311,17 @@ export function momoPimTools(host: ExecutorToolsHost, ticketId: string): Tool[] 
       execute: (args, signal) => call('read_recording', args, signal),
     },
     {
+      name: 'exclude_recording_speaker',
+      description: 'Reject an incorrect speaker identity without naming or training a replacement. Use source_id plus exact span_ids for individual turns. Only when the user explicitly excludes this person from a time onward, use recorded_from with an ISO 8601 offset instead. The boundary applies to the recording time of each span, including future matches.',
+      schema: z.object({
+        speaker: z.string().trim().min(1).max(80),
+        source_id: z.string().min(1).optional(),
+        span_ids: z.array(z.string().uuid()).min(1).max(200).optional(),
+        recorded_from: z.string().datetime({ offset: true }).optional(),
+      }).strict(),
+      execute: (args, signal) => call('exclude_recording_speaker', args, signal),
+    },
+    {
       name: 'relabel_recording_speakers',
       description: 'Relabel anonymous ([说话人 N]) or misattributed speaker spans in a recording and sync back to iPhone voiceprints. IMPORTANT: If the old label was ALREADY a named person or "我" and only specific turns were misattributed, pass exact span_ids and scope="selection" so that person\'s other turns are preserved; use scope="cluster" only when relabeling an entire anonymous [说话人 N] cluster.',
       schema: z.object({

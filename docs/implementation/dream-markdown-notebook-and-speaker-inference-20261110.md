@@ -37,3 +37,9 @@
 - Python 单元测试：`Tests/AgentRuntime/test_hermes_memory.py`、`test_memory_review.py`、`test_context.py`、`test_superagent_runtime.py` 共 35 项全部通过。
 - SuperAgent Node 单元测试：`Vendor/SuperAgent/tests/momo-pim.spec.ts` 全部通过（23 项原生工具注册与网桥鉴权验证）。
 - Swift 编译与集成测试：`MoMoAgent`（iOS）与 `MoMoAgentMac`（macOS）构建及 `DreamBriefingDocument` Markdown 解析回归验证通过。
+
+## 0.5.13 说话人排除与手机回执
+
+子代理收到说话人纠正时，通过 `exclude_recording_speaker` 表达负反馈。单段或多段纠正传同一录音的精确 span ID。用户明确给出时间界限时，传含时区的 `recorded_from`。手机按录音片段的起始时刻执行包含边界的规则，首次分析和后续声纹重算共用这条规则。已知正确身份时仍可用 `relabel_recording_speakers`。
+
+Mac 保存排除指令和回执。手机成功提交声纹修正后才确认投递，重复指令可安全重放。升级时，Mac 如查到旧系统派发过名为「身份待确认」的正向标签，手机会清理对应的非本人声纹档案和训练样本。

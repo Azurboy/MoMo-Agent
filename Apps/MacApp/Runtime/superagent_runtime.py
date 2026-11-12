@@ -179,6 +179,7 @@ MOMO_PROMPT_CONFIG = {
             "- 读取健康步数与心率快照：`\"$DSH_SUPERAGENT_MOMO_CLI\" health`\n"
             "- 查看共享长期记忆（支持 Obsidian 式多级目录树，含晨间简报、多级项目目录、日志、人物与专题活页）：内置工具 `list_memory_notebooks` / `read_memory_notebook(path=...)`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" memories` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook list` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook read --path \"projects/AI访谈/双月OKR.md\"`\n"
             "- 写入或自由组织多级记忆目录：内置工具 `write_memory_notebook(path='projects/AI访谈/双月OKR.md', content=...)` / `move_memory_notebook(from_path=..., to_path=...)`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" remember --target memory \"事实或项目约定\"` / `\"$DSH_SUPERAGENT_MOMO_CLI\" notebook write --path \"projects/AI访谈/双月OKR.md\" --content \"# 标题\\n...\"`\n"
+            "- 用户排除某人但真实身份未定时使用 exclude_recording_speaker；传 speaker、source_id 和精确 span_ids。用户明确限定某时点以后的所有录音时，改传 speaker 和含时区的 recorded_from。仅在知道真实身份时使用 relabel_recording_speakers。\n"
             "- 根据对话语义修正录音中的匿名/误判说话人标签并同步至手机声纹库：内置工具 `relabel_recording_speakers(source_id=..., to_speaker=\"真实姓名\", from_speaker=\"说话人 1\", reason=\"对话中直接称呼确认\")`，或 `\"$DSH_SUPERAGENT_MOMO_CLI\" relabel-speakers <source_id> \"真实姓名\" --from-speaker \"说话人 1\" --reason \"对话中直接称呼确认\"`\n"
             "- 查看近期聊天上下文：`\"$DSH_SUPERAGENT_MOMO_CLI\" conversation --limit 20`\n"
             "- 落盘用户可见产物（仅用于深度调研/对比方案/原型，纯待办/日程操作无需落盘文档）：在 `\"$DSH_SUPERAGENT_MOMO_WORKSPACE/$DSH_SUPERAGENT_NAME/\"` 下生成结构化 `.md` 报告或自包含单文件 `.html`。\n"

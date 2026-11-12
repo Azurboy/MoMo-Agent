@@ -32,6 +32,39 @@ struct VoiceprintTests {
         return [x / norm, y / norm, z / norm] + Array(repeating: 0, count: 253)
     }
 
+    @Test func datedExclusionSurvivesRestartAndRematchAtExactSpanTime() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let store = try fixture.store()
+        let first = try await append(vector(), fixture: fixture, store: store, index: 0)
+        try await store.correctSpeaker(first.source(for: first.spans[0]), feedback: .person("Alex"))
+        let second = try await append(vector(), fixture: fixture, store: store, index: 1)
+        #expect(second.spans[1].speaker == "Alex")
+        let locations = try await store.transcriptLocations(document: second)
+        let cutoff = try #require(locations[second.spans[1].id]?.recordedAt)
+        try await store.excludeSpeaker(named: "Alex", from: cutoff)
+        let reopened = try fixture.store()
+        _ = try await reopened.rematchAllSpeakers()
+        let third = try await append(vector(), fixture: fixture, store: reopened, index: 2)
+        #expect(third.spans[0].speaker == "Alex")
+        #expect(third.spans.dropFirst().allSatisfy { $0.attribution?.personID == nil })
+    }
+
+    @Test func exclusionDeliverySurvivesLostReceiptAndDoesNotEnrollReplacement() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let store = try fixture.store()
+        let first = try await append(vector(), fixture: fixture, store: store, index: 0)
+        try await store.correctSpeaker(first.source(for: first.spans[0]), feedback: .person("Alex"))
+        let second = try await append(vector(), fixture: fixture, store: store, index: 1)
+        let refs = [second.source(for: second.spans[1])]
+        try await store.excludeSpeaker(named: "Alex", sources: refs, deliveryID: "sample-command")
+        let reopened = try fixture.store()
+        try await reopened.excludeSpeaker(named: "Alex", sources: refs, deliveryID: "sample-command")
+        let result = try await reopened.readTranscript(sessionID: fixture.sessionID)
+        #expect(result.spans[0].speaker == "Alex")
+        #expect(result.spans[1].attribution?.personID == nil)
+        #expect(try await reopened.speakerProfiles().map(\.name) == ["Alex"])
+    }
+
     @Test func feedbackSurvivesRestartAndCorrectsBothFalsePositiveAndFalseNegative() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = try fixture.store()
