@@ -4121,20 +4121,20 @@ class SuperAgentGateway:
 
         await _send("run.accepted", {"event": "run.accepted", "run_id": run_id, "receipt": receipt})
         current = self.bridge.db.execute("SELECT * FROM chat_runs WHERE run_id=?", (run_id,)).fetchone()
-        if current and current["status"] in ("completed", "failed", "cancelled"):
-            for msg in self.store.db.execute(
-                "SELECT * FROM messages WHERE run_id=? AND role='assistant' ORDER BY seq ASC", (run_id,)
-            ):
-                await _send(
-                    "message.committed",
-                    {"event": "message.committed", "run_id": run_id, "message": self.store._format_message(msg)},
-                )
-            await _send(f"run.{current['status']}", {"event": f"run.{current['status']}", "run_id": run_id})
-            return resp
-
+        # A retried POST can reconnect after the acknowledgement, while the worker is still busy.
+        committed = self.store.db.execute(
+            "SELECT * FROM messages WHERE run_id=? AND role='assistant' ORDER BY seq", (run_id,),
+        ).fetchall()
+        terminal = current and current["status"] in ("completed", "failed", "cancelled")
         queue: asyncio.Queue = asyncio.Queue()
-        self._run_streams.setdefault(run_id, []).append(queue)
+        if not terminal:
+            self._run_streams.setdefault(run_id, []).append(queue)
         try:
+            for msg in committed:
+                await _send("message.committed", self._committed_chat_event(msg))
+            if terminal:
+                await _send(f"run.{current['status']}", {"event": f"run.{current['status']}", "run_id": run_id})
+                return resp
             while True:
                 item = await asyncio.wait_for(queue.get(), timeout=180.0)
                 if item is None:
@@ -4147,6 +4147,19 @@ class SuperAgentGateway:
             if queue in queues:
                 queues.remove(queue)
         return resp
+
+    def _committed_chat_event(self, message: sqlite3.Row) -> dict:
+        run_id = message["run_id"]
+        event = {"event": "message.committed", "run_id": run_id, "message": self.store._format_message(message)}
+        # Pair early text with its user echo. Attachments travel in canonical history to fit the SSE frame budget.
+        if not message["attachments_json"]:
+            source = self.store.db.execute(
+                "SELECT * FROM messages WHERE run_id=? AND role='user' AND attachments_json IS NULL ORDER BY seq LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if source:
+                event["input"] = self.store._format_message(source)
+        return event
 
     def _emit_run_stream(self, run_id: str, event: dict) -> None:
         self.store.events.publish("run.event", {"run_event": event})
@@ -4714,48 +4727,42 @@ class SuperAgentGateway:
             return web.json_response({"status": "sent", "duplicate": True, "message_id": existing["message_id"]})
 
         now = time.time()
-        # Locate linked chat run by ticket_id, exact trigger messageId, or oldest active chat run on chat:* channel.
+        # A ticket can receive several user messages. Route chat output to its source turn.
         linked_run = None
-        if ticket_id:
+        chat_channel = channel_id.startswith("chat:")
+        if chat_channel:
+            if address_msg_id:
+                trig_lookup = address_msg_id if address_msg_id.startswith("momo:") else f"momo:{address_msg_id}"
+                linked_run = self.bridge.db.execute(
+                    """SELECT r.* FROM triggers t JOIN chat_runs r ON r.run_id=t.run_id
+                       WHERE t.id=? AND t.thread_id=?""", (trig_lookup, channel_id),
+                ).fetchone()
+            else:
+                linked_run = self.bridge.db.execute(
+                    "SELECT * FROM chat_runs WHERE work_id=? ORDER BY seq LIMIT 1", (channel_id.removeprefix("chat:"),),
+                ).fetchone()
+            if linked_run is None:
+                return web.json_response({"status": "gone"}, status=410)
+        elif ticket_id:
             linked_run = self.bridge.db.execute(
                 "SELECT * FROM chat_runs WHERE ticket_id=? ORDER BY seq DESC LIMIT 1", (ticket_id,)
             ).fetchone()
-        if linked_run is None and address_msg_id:
-            trig_lookup = address_msg_id if address_msg_id.startswith("momo:") else f"momo:{address_msg_id}"
-            linked_run = self.bridge.db.execute(
-                "SELECT * FROM chat_runs WHERE trigger_id=? ORDER BY seq DESC LIMIT 1", (trig_lookup,)
-            ).fetchone()
-        if linked_run is None and channel_id.startswith("chat:"):
-            linked_run = self.bridge.db.execute(
-                "SELECT * FROM chat_runs WHERE status IN ('queued', 'started', 'waiting_for_input') ORDER BY seq ASC LIMIT 1"
-            ).fetchone()
 
-        if kind == "acknowledgement":
-            if linked_run:
-                with self.bridge.db:
-                    self.bridge.db.execute(
-                        "UPDATE chat_runs SET status='started', ticket_id=coalesce(?, ticket_id), updated_at=? WHERE run_id=?",
-                        (ticket_id, now, linked_run["run_id"]),
-                    )
-                    self.bridge.db.execute(
-                        "INSERT INTO outbound_receipts VALUES(?,?,?,?,?,?)",
-                        (out_id, kind, channel_id, ticket_id, None, now),
-                    )
-                self.publish_live_state()
-            else:
-                with self.bridge.db:
-                    self.bridge.db.execute(
-                        "INSERT INTO outbound_receipts VALUES(?,?,?,?,?,?)",
-                        (out_id, kind, channel_id, ticket_id, None, now),
-                    )
+        is_ack = kind == "acknowledgement"
+        if is_ack and (not chat_channel or linked_run["status"] not in ("queued", "started")):
+            # Proactive work is silent until delivery. A late ack must not reopen a settled turn.
+            with self.bridge.db:
+                self.bridge.db.execute(
+                    "INSERT INTO outbound_receipts VALUES(?,?,?,?,?,?)", (out_id, kind, channel_id, ticket_id, None, now),
+                )
             return web.json_response({"status": "sent"})
 
-        # kind == "reply": commit visible assistant message to shared ProductStore!
         # The Antigravity bridge already observes the actual model completion. Outbox
         # messages may have been queued before a newer quota failure.
-        provider = self._active_provider_hint()
-        if kind == "reply" and canonical_provider(provider) != "antigravity":
-            self._clear_provider_notice_if_recovered(provider)
+        if kind == "reply":
+            provider = self._active_provider_hint()
+            if canonical_provider(provider) != "antigravity":
+                self._clear_provider_notice_if_recovered(provider)
         if linked_run:
             run_id = linked_run["run_id"]
         else:
@@ -4788,15 +4795,13 @@ class SuperAgentGateway:
                     ),
                 )
 
-        deliverables = self._collect_ticket_attachments(
-            ticket_id=ticket_id,
-            text=text,
-            source_key=f"superagent:{out_id}",
-        )
-        cleaned_text = self._clean_outbound_reply_text(text, deliverables)
+        deliverables = None
+        if not is_ack:
+            deliverables = self._collect_ticket_attachments(ticket_id=ticket_id, text=text, source_key=f"superagent:{out_id}")
+            text = self._clean_outbound_reply_text(text, deliverables)
         msg_id = self.store.append_assistant(
             f"superagent:{out_id}",
-            cleaned_text,
+            text,
             now,
             run_id=run_id,
             attachments=deliverables,
@@ -4807,17 +4812,23 @@ class SuperAgentGateway:
                 "INSERT INTO outbound_receipts VALUES(?,?,?,?,?,?)",
                 (out_id, kind, channel_id, ticket_id, msg_id, now),
             )
-            self.bridge.db.execute(
-                """UPDATE chat_runs
-                   SET status='completed', ticket_id=coalesce(?, ticket_id), wait_reason=NULL, error=NULL, cancellable=0, updated_at=?
-                   WHERE run_id=?""",
-                (ticket_id, now, run_id),
-            )
-        if msg_row:
-            formatted = self.store._format_message(msg_row)
-            self._emit_run_stream(run_id, {"event": "message.committed", "run_id": run_id, "message": formatted})
-            self.push.emit(f"terminal:superagent:{out_id}", "final", run_id=run_id, message=formatted, historical=False)
-        self._finish_run_stream(run_id, "completed")
+            if is_ack:
+                self.bridge.db.execute(
+                    "UPDATE chat_runs SET status='started', ticket_id=coalesce(?, ticket_id), updated_at=? WHERE run_id=?",
+                    (ticket_id, now, run_id),
+                )
+            else:
+                self.bridge.db.execute(
+                    """UPDATE chat_runs
+                       SET status='completed', ticket_id=coalesce(?, ticket_id), wait_reason=NULL, error=NULL, cancellable=0, updated_at=?
+                       WHERE run_id=?""",
+                    (ticket_id, now, run_id),
+                )
+        event = self._committed_chat_event(msg_row)
+        self._emit_run_stream(run_id, event)
+        if not is_ack:
+            self.push.emit(f"terminal:superagent:{out_id}", "final", run_id=run_id, message=event["message"], historical=False)
+            self._finish_run_stream(run_id, "completed")
         self.publish_live_state()
         return web.json_response({"status": "sent", "message_id": msg_id})
 

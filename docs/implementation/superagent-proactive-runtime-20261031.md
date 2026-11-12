@@ -35,3 +35,9 @@
   2. **场景 B（引用不存在的本地基准文件 `legacy_rebate_2025.yaml`）** → 静默接单核查后，Worker 发现磁盘缺失该基准文件，立即执行 `outcome=dropped` 静默关闭工单，聊天消息数 `0`（零凑数清单）。
   3. **场景 C（跨历史定案录音修复本地代码 + 单测 + 报价核对表）**：根据昨日「Q4 商业化定价定案会」录音（拍板年付 8 折 `0.80`）与当前「报价脚本走查」录音，SuperAgent 静默唤起主动子智能体（执行期间 `/momo/v1/conversation/runs` 实时暴露 `superagent:<tid>`、`state="running"`、`native_state="proactive:working"`，交付后自动清空），修复 `pricing_calc/quote_calculator.py` 与单测（`4/4` 通过），生成带 `momoagent://source/...` 原话引用的 `pricing_calc/quote_audit_12_seats.md`（12 席位月付 `1,410` 元、年付 `13,536` 元、修正差额 `846` 元），并向会话发送 2 句精炼交付通知。
 - **双端编译验证**：`MoMoAgentMac`（macOS）与 `MoMoAgentBeta`（iOS Simulator）均通过 `xcodebuild` 编译校验。
+
+## 2026-11-12 显式聊天派单回话
+
+用户在聊天中交办事项后，Mac 网关将 SuperAgent 随派单生成的 `acknowledgement` 写入原消息所在的对话轮次，立即同步到聊天。收到正文后客户端收起三个点，用户可以继续发消息。Worker 上报 `ready` 后唤醒主会话，由 MoMo 撰写结果，通过原工单的回复渠道交付。
+
+网关 HTTP 集成测试覆盖接单时任务仍在执行、重连回放、重复投递、两项任务逆序完成以及主动录音工单的静默接单。
