@@ -639,7 +639,8 @@ class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
         self.gateway.data = self.root
         self.gateway.store = ProductStore(self.root / "conversation.sqlite", {"assistant_id": "test"})
         self.addCleanup(self.gateway.store.db.close)
-        self.gateway.push = Mock(provider=None)
+        self.gateway.push = Mock()
+        self.gateway.push.briefing_alerts_enabled.return_value = False
         self.gateway._call_configured_llm_oneshot = Mock(return_value="先确认讨论剩下的决定。")
         clock_patch = patch("superagent_gateway.datetime", wraps=datetime)
         self.clock = clock_patch.start()
@@ -668,7 +669,7 @@ class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_summary_from_notes_respects_chat_only(self):
         from unittest.mock import Mock
         self.gateway.push = Mock()
-        self.gateway.push.provider.briefing_alerts = False
+        self.gateway.push.briefing_alerts_enabled.return_value = False
         (self.vault / "projects").mkdir()
         (self.vault / "projects/overview.md").write_text("关于用研平台的两项决定")
         await self.gateway._deliver_morning_briefing()

@@ -1565,7 +1565,7 @@ class SuperAgentGateway:
             key = "dream-briefing:" + day
             message_id = self.store.append_assistant(key, memory_review.format_briefing_chat_message(markdown), time.time())
             # Installations with an existing push gateway keep their notification preference.
-            if self.push.provider and self.push.provider.briefing_alerts:
+            if self.push.briefing_alerts_enabled():
                 row = self.store.db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
                 self.push.emit("terminal:" + key, "final", run_id=None, message=self.store._format_message(row))
 

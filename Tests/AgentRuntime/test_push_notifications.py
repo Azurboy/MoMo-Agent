@@ -43,6 +43,12 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
         message=dict(self.store.db.execute('SELECT * FROM messages WHERE id=?',(ident,)).fetchone())
         self.out.emit(key,kind,run_id='run-one',message=message,historical=historical)
         return message
+    def test_briefing_alert_preference_applies_only_to_briefings(self):
+        self.assertTrue(self.out.briefing_alerts_enabled())
+        with self.store.db:
+            self.store.db.execute("INSERT INTO push_meta VALUES('briefing_alerts', 'off')")
+        self.assertFalse(self.out.briefing_alerts_enabled())
+
     async def test_interim_and_backfill_do_not_queue_two_devices_offline_retry_and_read(self):
         a=self.device(); b=self.device(); self.store.append_assistant('interim','working',time.time(),'run-one')
         self.assertEqual(0,self.store.db.execute('SELECT count(*) FROM notification_deliveries').fetchone()[0])

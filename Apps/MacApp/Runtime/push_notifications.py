@@ -22,9 +22,6 @@ class GatewayProvider:
         url = urlsplit(self.url)
         if (url.scheme != 'https' and not (url.scheme == 'http' and url.hostname in ('127.0.0.1', 'localhost'))) or url.username or url.password or url.path not in ('', '/') or url.query or url.fragment:
             raise ValueError('Invalid notification gateway endpoint')
-        self.briefing_alerts = configuration.get('briefing_alerts', True)
-        if type(self.briefing_alerts) is not bool:
-            raise ValueError('briefing_alerts must be a boolean')
         self.credential = configuration['credential']
         if not isinstance(self.credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{40,160}', self.credential):
             raise ValueError('Invalid notification instance credential')
@@ -67,7 +64,7 @@ def load_provider(data, connection):
     if not path.exists(): return None
     if path.is_symlink() or path.stat().st_mode & 0o077: raise ValueError('push-gateway.json must be private (0600)')
     value = json.loads(path.read_text())
-    if not {'url','credential','environment'} <= set(value) or set(value)-{'url','credential','environment','topic','briefing_alerts'}: raise ValueError('Invalid notification gateway configuration')
+    if not {'url','credential','environment'} <= set(value) or set(value)-{'url','credential','environment','topic'}: raise ValueError('Invalid notification gateway configuration')
     return GatewayProvider(value, connection['instance_id'])
 
 
@@ -129,6 +126,10 @@ class PushOutbox:
         with self.db:
             self.db.execute("UPDATE push_devices SET enabled=0,revision=revision+1,gateway_state='revoke_pending',next_attempt=0,attempts=0 WHERE device_id=? AND enabled=1",(device,))
             self.db.execute("UPDATE notification_deliveries SET state='disabled' WHERE device_id=? AND state IN ('pending','retry')",(device,))
+
+    def briefing_alerts_enabled(self):
+        preference = self.db.execute("SELECT value FROM push_meta WHERE key='briefing_alerts'").fetchone()
+        return self.provider is not None and (preference is None or preference[0] != 'off')
 
     def emit(self, key, kind, *, run_id, message=None, control_id=None, generation=None, historical=False):
         if kind not in KINDS: raise ValueError('Invalid event kind')
