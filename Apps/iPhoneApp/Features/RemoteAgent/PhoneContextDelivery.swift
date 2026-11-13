@@ -38,7 +38,7 @@ import UIKit
 
     func runSystemTask(_ systemTask: BGTask) {
         let id = UUID()
-        systemTask.expirationHandler = { [weak self] in
+        systemTask.expirationHandler = { @Sendable [weak self] in
             Task { @MainActor in
                 self?.expireSystemGrant(id: id)
             }
@@ -121,7 +121,7 @@ import UIKit
     private static var scheduleRevision = 0
 
     static func register(bootstrap: PhoneBootstrap) {
-        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { task in
             Task { @MainActor in
                 bootstrap.initialize()
                 guard let agent = bootstrap.runtime?.remoteAgent else {
@@ -143,7 +143,7 @@ import UIKit
         }
         let identifier = Self.identifier
         let earliest = Date().addingTimeInterval(minimumDelay)
-        BGTaskScheduler.shared.getPendingTaskRequests { requests in
+        BGTaskScheduler.shared.getPendingTaskRequests { @Sendable requests in
             let existing = requests.first { $0.identifier == identifier }
             let hasExisting = existing != nil
             let existingDate = existing?.earliestBeginDate

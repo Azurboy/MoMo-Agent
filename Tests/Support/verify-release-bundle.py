@@ -208,15 +208,18 @@ def audit(app, pinned_models=PINNED_MODELS, version_config=VERSION_CONFIG, varia
                     checks[role + "_executable_checked"] = False
                 if role == "phone":
                     checks.update(gmail_oauth_checks(info))
-                    checks["background_processing_declared"] = info.get("UIBackgroundModes") in (
-                        ["audio", "processing"], ["processing", "audio"])
+                    modes = info.get("UIBackgroundModes")
+                    checks["background_processing_declared"] = (
+                        isinstance(modes, list) and all(isinstance(mode, str) for mode in modes)
+                        and sorted(modes) == ["audio", "fetch", "processing", "remote-notification"])
                     identifiers = info.get("BGTaskSchedulerPermittedIdentifiers")
                     checks["background_identifiers_declared"] = (
-                        isinstance(identifiers, list) and len(identifiers) == 3
+                        isinstance(identifiers, list) and len(identifiers) == 4
                         and all(isinstance(value, str) for value in identifiers)
                         and set(identifiers) == {
                             phone_id + ".transcription.processing",
                             phone_id + ".context.delivery",
+                            phone_id + ".chat.refresh",
                             phone_id + ".transcription.continued.*"})
                 elif role == "watch":
                     checks["watch_audio_background_declared"] = info.get("UIBackgroundModes") == ["audio"]

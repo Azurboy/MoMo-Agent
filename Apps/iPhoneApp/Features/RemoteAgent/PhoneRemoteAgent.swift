@@ -43,6 +43,7 @@ final class PhoneRemoteAgent {
     private(set) var setupStep = SetupStep.welcome
     @ObservationIgnored private let directory: URL
     @ObservationIgnored private var active = false
+    @ObservationIgnored private var backgroundInboxReads = 0
     @ObservationIgnored private var ancillaryStartupTask: Task<Void, Never>?
     @ObservationIgnored private var connectionReadyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -278,10 +279,26 @@ final class PhoneRemoteAgent {
         }
         contextDelivery.request()
     }
-    func background() { replyContinuation.background() }
+    func background() {
+        if connection != nil { PhoneInboxRefresh.schedule() }
+        replyContinuation.background()
+    }
+
+    func refreshInboxInBackground() async throws -> Bool {
+        guard !active else { return false }
+        guard let store, store.canContactServer else { throw URLError(.resourceUnavailable) }
+        backgroundInboxReads += 1
+        defer {
+            backgroundInboxReads -= 1
+            suspendTransportIfIdle()
+        }
+        if connection?.network == "tailscale" { tailnet.prepareForForeground(peer: connection?.baseURL.host) }
+        else { network?.resume() }
+        return try await store.refreshInboxInBackground()
+    }
 
     private func suspendTransportIfIdle() {
-        guard !active, !replyContinuation.isActive, !contextDelivery.isActive else { return }
+        guard !active, backgroundInboxReads == 0, !replyContinuation.isActive, !contextDelivery.isActive else { return }
         context?.background(); store?.background(); network?.suspend()
         lifeIllustrations.cancelSynchronization()
         tailnet.suspendSessions()
@@ -406,7 +423,7 @@ final class PhoneRemoteAgent {
         tasks.onConnectionRestored = { [weak self] in
             self?.failure = nil
             self?.resumeConnectionReadyWaiters()
-            self?.lifeIllustrations.requestRefresh()
+            if self?.active == true { self?.lifeIllustrations.requestRefresh() }
         }
         sync.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
         sync.recordingSummaries?.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
