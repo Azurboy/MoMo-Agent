@@ -22,6 +22,9 @@ class GatewayProvider:
         url = urlsplit(self.url)
         if (url.scheme != 'https' and not (url.scheme == 'http' and url.hostname in ('127.0.0.1', 'localhost'))) or url.username or url.password or url.path not in ('', '/') or url.query or url.fragment:
             raise ValueError('Invalid notification gateway endpoint')
+        self.briefing_alerts = configuration.get('briefing_alerts', True)
+        if type(self.briefing_alerts) is not bool:
+            raise ValueError('briefing_alerts must be a boolean')
         self.credential = configuration['credential']
         if not isinstance(self.credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{40,160}', self.credential):
             raise ValueError('Invalid notification instance credential')
@@ -64,7 +67,7 @@ def load_provider(data, connection):
     if not path.exists(): return None
     if path.is_symlink() or path.stat().st_mode & 0o077: raise ValueError('push-gateway.json must be private (0600)')
     value = json.loads(path.read_text())
-    if not {'url','credential','environment'} <= set(value) or set(value)-{'url','credential','environment','topic'}: raise ValueError('Invalid notification gateway configuration')
+    if not {'url','credential','environment'} <= set(value) or set(value)-{'url','credential','environment','topic','briefing_alerts'}: raise ValueError('Invalid notification gateway configuration')
     return GatewayProvider(value, connection['instance_id'])
 
 

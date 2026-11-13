@@ -639,6 +639,7 @@ class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
         self.gateway.data = self.root
         self.gateway.store = ProductStore(self.root / "conversation.sqlite", {"assistant_id": "test"})
         self.addCleanup(self.gateway.store.db.close)
+        self.gateway.push = Mock(provider=None)
         self.gateway._call_configured_llm_oneshot = Mock(return_value="先确认讨论剩下的决定。")
         clock_patch = patch("superagent_gateway.datetime", wraps=datetime)
         self.clock = clock_patch.start()
@@ -663,6 +664,18 @@ class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(self.messages()))
         self.assertIn("2026-11-15", self.messages()[1])
         self.assertNotIn("已有的进展", self.messages()[1])
+
+    async def test_fresh_summary_from_notes_respects_chat_only(self):
+        from unittest.mock import Mock
+        self.gateway.push = Mock()
+        self.gateway.push.provider.briefing_alerts = False
+        (self.vault / "projects").mkdir()
+        (self.vault / "projects/overview.md").write_text("关于用研平台的两项决定")
+        await self.gateway._deliver_morning_briefing()
+        prompt = self.gateway._call_configured_llm_oneshot.call_args.args[0]
+        self.assertIn("关于用研平台的两项决定", prompt)
+        self.assertEqual(["# 晨间简报 · 2026-11-13\n\n先确认讨论剩下的决定。"], self.messages())
+        self.gateway.push.emit.assert_not_called()
 
     async def test_recent_evidence_model_failure_and_prior_version_delivery(self):
         from datetime import datetime
