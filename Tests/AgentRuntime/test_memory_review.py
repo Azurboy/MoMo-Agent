@@ -660,6 +660,8 @@ class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
         await self.gateway._deliver_morning_briefing()
         await self.gateway._deliver_morning_briefing()
         self.assertEqual(["# 晨间简报 · 2026-11-13\n已有的进展。"], self.messages())
+        with self.gateway.store.db:
+            self.gateway.store.db.execute("INSERT INTO messages(id,role,content,created_at) VALUES('old','user','旧对话',0)")
         self.clock.now.return_value = datetime(2026, 11, 15, 14, 0)
         await self.gateway._deliver_morning_briefing()
         self.assertEqual(2, len(self.messages()))

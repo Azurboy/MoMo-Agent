@@ -404,6 +404,8 @@ def morning_briefing_evidence(data, db):
     else:
         latest = next((entry["note"] for entry in evidence if "note" in entry), None)
         fallback = f"最近更新的笔记是 `{latest}`，可以从这里接着看。" if latest else "过去一周没有新的聊天或笔记可供整理。"
+    if not evidence and not db.execute("SELECT 1 FROM messages WHERE role='user' LIMIT 1").fetchone():
+        return "", None  # A new, unused installation has no personal briefing yet.
     return (canonical(evidence) if evidence else ""), fallback
 
 

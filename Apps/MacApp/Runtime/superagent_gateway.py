@@ -1543,6 +1543,8 @@ class SuperAgentGateway:
         markdown = note.read_text(encoding="utf-8").strip() if note.is_file() else ""
         if not markdown or not re.fullmatch(r"#\s+.*?" + day, markdown.splitlines()[0]):
             evidence, fallback = memory_review.morning_briefing_evidence(self.data, self.store.db)
+            if fallback is None:
+                return
             body = fallback
             if evidence:
                 prompt = (
