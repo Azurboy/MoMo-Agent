@@ -164,14 +164,31 @@ extension RecordingStore {
         return try pendingChunkPage(after: sequence, through: through, limit: limit)
     }
 
+    private static let transferableChunkCondition =
+        "state='ready' AND id NOT IN (SELECT chunk_id FROM reconciliation_file_actions WHERE action!='retry')"
+
     public func pendingChunkPage(after sequence: Int64, through: Int64 = .max, limit: Int = 32) throws -> [RecordingChunkEntry] {
         guard sequence >= 0, through >= 0, (1...64).contains(limit) else { throw RecordingReconciliationError.invalidCursor }
-        return try database.rows("SELECT rowid,envelope FROM chunks WHERE rowid>? AND rowid<=? AND state='ready' AND id NOT IN (SELECT chunk_id FROM reconciliation_file_actions WHERE action!='retry') ORDER BY rowid LIMIT ?", [.integer(sequence), .integer(through), .integer(Int64(limit))]) { row in
+        return try database.rows("SELECT rowid,envelope FROM chunks WHERE rowid>? AND rowid<=? AND \(Self.transferableChunkCondition) ORDER BY rowid LIMIT ?", [.integer(sequence), .integer(through), .integer(Int64(limit))]) { row in
             let envelope = try WireJSON.decode(ManifestEnvelope.self, from: RecordingDatabase.data(row, 1))
             let chunk = RecordedChunk(envelope: envelope,
                 audioURL: rootURL.appendingPathComponent("CaptureReady/\(envelope.manifest.chunkID.uuidString)/audio"), state: .ready)
             return RecordingChunkEntry(sequence: sqlite3_column_int64(row, 0), chunk: chunk)
         }
+    }
+
+    /// LAN can upload ready audio or acknowledge receipts. A read here must not advance batch admission.
+    public func hasLocalSyncPayload(excluding unavailable: Set<UUID>) throws -> Bool {
+        try Task.checkCancellation()
+        var query = "SELECT 1 FROM chunks WHERE \(Self.transferableChunkCondition)"
+        var bindings: [SQLValue] = []
+        if !unavailable.isEmpty {
+            query += " AND id NOT IN (SELECT value FROM json_each(CAST(? AS TEXT)))"
+            bindings = [.blob(try WireJSON.encode(unavailable))]
+        }
+        let audio = try database.rows(query + " LIMIT 1", bindings) { _ in true }
+        if !audio.isEmpty { return true }
+        return try !controlBatch(kind: .receipt, after: 0, limit: 1).isEmpty
     }
 
     /// Admission survives restart; a released batch keeps draining while newer chunks wait.

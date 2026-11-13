@@ -220,6 +220,37 @@ final class WatchNativeCaptureTests: XCTestCase {
         runtime.endConnectivityGrant()
     }
 
+    func testActiveDrainRetriesBlockedWorkOncePerDrainAndOnNewEvents() async throws {
+        let firstRetry = expectation(description: "Initial reconciliation found the blocked receipt")
+        let sleeper = RecoverySleeper(expectations: [firstRetry])
+        addTeardownBlock { await sleeper.cancelAll() }
+        let fixture = try WatchComposition.makeSimulatorTest(runID: UUID(), recoverySleep: { try await sleeper.sleep($0) })
+        let runtime = fixture.runtime
+        let inbox = try ControlInbox(directory: fixture.rootURL.appendingPathComponent("ControlInbox"))
+        let receiver = UUID(), library = UUID()
+        try inbox.preserve(.receipt(Receipt(receiverDeviceID: receiver, libraryInstanceID: library, chunkID: UUID(),
+            audioSHA256: String(repeating: "a", count: 64), manifestSHA256: String(repeating: "b", count: 64))))
+        await runtime.bootstrap()
+        await fulfillment(of: [firstRetry], timeout: 5)
+        XCTAssertFalse(runtime.requiresConstrainedConnectivityGrant)
+
+        var retries = 0
+        runtime.onBackgroundRetryNeeded = { retries += 1 }
+        let drainID = UUID()
+        _ = await runtime.drainActiveConnectivity(for: drainID)
+        XCTAssertGreaterThan(retries, 0)
+        let firstPassRetries = retries
+        for _ in 0..<100 { _ = await runtime.drainActiveConnectivity(for: drainID) }
+        XCTAssertEqual(retries, firstPassRetries)
+        XCTAssertEqual(try inbox.pending().count, 1)
+        _ = await runtime.drainActiveConnectivity(for: UUID())
+        XCTAssertGreaterThan(retries, firstPassRetries)
+
+        try inbox.preserve(.receiverIdentity(ReceiverIdentity(messageID: UUID(), receiverDeviceID: receiver, libraryInstanceID: library)))
+        await runtime.handleLinkEvent(.controlPreserved)
+        XCTAssertTrue(try inbox.pending().isEmpty)
+    }
+
     func testUnchangedBackgroundInboxCursorDoesNotRewriteItsFile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("inbox-write-budget-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }

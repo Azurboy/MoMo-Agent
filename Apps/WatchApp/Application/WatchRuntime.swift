@@ -116,6 +116,7 @@ final class WatchRuntime {
     @ObservationIgnored private var reconcileAgain = false
     @ObservationIgnored private var connectivityGrant = false
     @ObservationIgnored private var grantID: UUID?
+    @ObservationIgnored private var lastActiveDrainID: UUID?
     @ObservationIgnored private var grantControlsRemaining = 0
     @ObservationIgnored private var grantSubmitted = false
     @ObservationIgnored private var grantCleaned = false
@@ -454,9 +455,13 @@ final class WatchRuntime {
             processing: reconciling || publishingStatus || (connectivityGrant && (!grantLocalWorkChecked || !linkActivated || !grantStatusAttempted)))
     }
 
-    func drainActiveConnectivity() async -> WatchBackgroundDrainResult {
+    func drainActiveConnectivity(for drainID: UUID) async -> WatchBackgroundDrainResult {
         guard !Task.isCancelled else { return .failed }
-        if pendingLocalSyncWork || !linkActivated { await reconcile() }
+        // Link events and the recovery timer handle new work between OS completion checks.
+        if lastActiveDrainID != drainID, captureReady, !reconciling {
+            lastActiveDrainID = drainID
+            if pendingLocalSyncWork || !linkActivated { await reconcile() }
+        }
         return LinkBackgroundDrain.result(activation: transport.activation,
             hasPendingContent: transport.hasPendingContent,
             processing: reconciling || publishingStatus)
@@ -1846,6 +1851,14 @@ final class WatchRuntime {
               bound.libraryInstanceID == expectedLibraryID else {
             return
         }
+        do {
+            guard try await store.hasLocalSyncPayload(excluding: invalidAudioBlockSources) else { return }
+        } catch is CancellationError { return }
+        catch {
+            // A failed preflight must still let the sender try audio and receipts independently.
+            logger.error("Local sync queue check failed: \(error.localizedDescription, privacy: .private)")
+        }
+        guard !Task.isCancelled, !connectivityGrant, pendingReceiver == nil else { return }
         let client = localSyncClient
         guard let route = await client.probe(
             endpoint: endpoint,
