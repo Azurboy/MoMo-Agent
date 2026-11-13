@@ -424,6 +424,21 @@ public final class RemoteTaskStore {
         }
     }
 
+    /// A system wake reads one snapshot. Foreground observation owns streaming and the outbox.
+    @discardableResult public func refreshInboxInBackground() async throws -> Bool {
+        guard observing == nil else { return false }
+        guard canContactServer, !serverIsThrottling else { throw URLError(.resourceUnavailable) }
+        await discoverConversation()
+        try Task.checkCancellation()
+        guard observing == nil else { return false }
+        guard conversation != nil else { throw URLError(.resourceUnavailable) }
+        let previous = eventCursor
+        let snapshot = try await request { try await client.conversationSnapshot() }
+        guard observing == nil, previous == eventCursor else { return false }
+        try applyConversationSnapshot(snapshot)
+        return eventCursor != previous
+    }
+
     public func background() {
         flushPendingPersistence()
         absorbedInitialStreamSocketFailure = false

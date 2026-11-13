@@ -11,11 +11,11 @@ The same Swift probe creates two genuine SDK nodes with HTTPS Certificates disab
 
 ## Foreground / peer-failure recovery
 
-`RecoveryProbe.swift` compiles together with the production `Apps/ClientUI/Network/EmbeddedTailnet.swift` and `MoMoAgentClient`. Run it with three arguments: synthetic control URL, an empty temporary state directory, and the port of a loopback HTTP fixture that returns 200 at `/`. Link the same macOS TailscaleKit framework and MoMoAgentClient module as the product. It creates two real SDK nodes, forwards the fixture through the server node, and checks:
+`RecoveryProbe.swift` compiles together with the production `EmbeddedTailnet.swift`, `EmbeddedTailnetTransport.swift`, their diagnostics and proxy settings, and `MoMoAgentClient`. Run it with three arguments: synthetic control URL, an empty temporary state directory, and the port of a loopback HTTP fixture that returns 200 at `/`. Link the same macOS TailscaleKit framework and MoMoAgentClient module as the product. It creates two real SDK nodes, forwards the fixture through the server node, and checks:
 
 - Five foreground transitions with eight concurrent requests each retain the healthy session and node.
-- Remote timeout/disconnection does not rebuild a working local proxy.
+- Three missing-peer timeouts and eight requests with the remote HTTP listener stopped preserve the client node and chat session. Restarting that listener restores HTTP on the same chat session.
 - Closing the local SDK node simulates a dead listener: recovery preserves its address and resumes HTTP.
-- Late failures from the replaced session cannot invalidate the recovered session; logout stays logged out.
+- Late requests on the replaced session receive a transport error, and late failures preserve the recovered session. Logout stays logged out.
 
 The pre-fix implementation fails at `Foreground replaced a healthy session`. The probe does not establish real iOS suspension or cellular/Wi-Fi roaming reliability.

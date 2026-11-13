@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Observation
 import os
 import UIKit
@@ -15,14 +16,25 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         UNUserNotificationCenter.current().delegate = self
         bootstrap.background.register()
         PhoneContextDeliveryScheduler.register(bootstrap: bootstrap)
+        PhoneInboxRefresh.register(bootstrap: bootstrap)
         // WatchConnectivity can launch the process without creating a SwiftUI scene.
         bootstrap.launch()
+        if bootstrap.runtime?.remoteAgent.connection != nil { PhoneInboxRefresh.schedule() }
         bootstrap.runtime?.remoteAgent.notifications.start()
         if application.applicationState != .background {
             bootstrap.runtime?.remoteAgent.prewarmForLaunch()
         }
         return true
     }
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        guard let payload = userInfo["momo"] as? [AnyHashable: Any],
+              let target = AgentNotificationTarget.parse(payload) else { return .noData }
+        bootstrap.initialize()
+        guard let agent = bootstrap.runtime?.remoteAgent, let connection = agent.connection,
+              target.matches(connection) else { return .noData }
+        return await PhoneInboxRefresh.fetch(agent)
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         bootstrap.initialize(); bootstrap.runtime?.remoteAgent.notifications.registered(deviceToken)
     }
@@ -44,6 +56,57 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         await MainActor.run {
             bootstrap.initialize(); bootstrap.runtime?.remoteAgent.notifications.open(target)
         }
+    }
+}
+
+@MainActor enum PhoneInboxRefresh {
+    static let identifier = (Bundle.main.bundleIdentifier ?? "com.momoagent.ios") + ".chat.refresh"
+    private static let log = Logger(subsystem: "com.momoagent.ios", category: "InboxRefresh")
+
+    static func register(bootstrap: PhoneBootstrap) {
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { grant in
+            let work = Task { @MainActor in
+                bootstrap.initialize()
+                guard let agent = bootstrap.runtime?.remoteAgent, agent.connection != nil else {
+                    if bootstrap.runtime == nil { schedule() }
+                    grant.setTaskCompleted(success: bootstrap.runtime != nil)
+                    return
+                }
+                schedule()
+                let result = await fetch(agent)
+                log.info("Scheduled chat refresh finished (fetch result \(result.rawValue))")
+                grant.setTaskCompleted(success: result != .failed)
+            }
+            grant.expirationHandler = { @Sendable in work.cancel() }
+        }
+        if !registered { log.error("Could not register chat background refresh") }
+    }
+
+    static func schedule() {
+        Task {
+            let scheduler = BGTaskScheduler.shared
+            let requests = await scheduler.pendingTaskRequests()
+            guard !requests.contains(where: { $0.identifier == identifier }) else { return }
+            let request = BGAppRefreshTaskRequest(identifier: identifier)
+            request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+            do { try scheduler.submit(request) }
+            catch { log.debug("Chat refresh scheduling unavailable: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
+    static func fetch(_ agent: PhoneRemoteAgent) async -> UIBackgroundFetchResult {
+        do {
+            return try await withThrowingTaskGroup(of: Bool.self) { group in
+                group.addTask { try await agent.refreshInboxInBackground() }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(22))
+                    throw URLError(.timedOut)
+                }
+                defer { group.cancelAll() }
+                let changed = try await group.next()
+                return changed == true ? .newData : .noData
+            }
+        } catch { return .failed }
     }
 }
 

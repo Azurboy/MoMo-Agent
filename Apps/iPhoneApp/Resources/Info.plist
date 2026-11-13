@@ -6,6 +6,7 @@
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).transcription.processing</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).context.delivery</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).chat.refresh</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).transcription.continued.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
@@ -74,6 +75,8 @@
 	<array>
 		<string>audio</string>
 		<string>processing</string>
+		<string>fetch</string>
+		<string>remote-notification</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>

@@ -794,11 +794,11 @@ final class DesktopModel {
                 let session = try await tailnet.connectedSession()
                 probeSession = session
                 var request = URLRequest(url: url.appendingPathComponent("pair/identity")); request.timeoutInterval = 5
-                let (data, response) = try await session.data(for: request)
+                let response = try await TailnetChunkStream.read(request, session: session, network: tailnet, limit: 64 * 1024)
                 let instanceID = try await Task.detached(priority: .utility) {
-                    (try? JSONSerialization.jsonObject(with: data) as? [String: String])?["instance_id"]
+                    (try? JSONSerialization.jsonObject(with: response.data) as? [String: String])?["instance_id"]
                 }.value
-                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                guard response.status == 200,
                       instanceID?.lowercased() == connection?.instanceID.uuidString.lowercased() else { throw TailnetError.unavailable }
                 embeddedProbeFailures = 0
                 lastEmbeddedProbeAt = Date()

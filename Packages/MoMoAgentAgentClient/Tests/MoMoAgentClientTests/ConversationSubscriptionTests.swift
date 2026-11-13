@@ -18,6 +18,29 @@ import XCTest
         while !(await condition()), ContinuousClock.now < end { try await Task.sleep(for: .milliseconds(2)) }
         let satisfied = await condition(); XCTAssertTrue(satisfied)
     }
+    func testBackgroundRefreshPersistsUnreadReplyWithoutSendingDraftOrStartingSubscription() async throws {
+        let (wire, store, file, client) = try fixture()
+        store.setDraft("未发送的草稿")
+        await wire.appendMessage("手机挂起后 Mac 发来的消息")
+        let changed = try await store.refreshInboxInBackground()
+        XCTAssertTrue(changed)
+        let repeated = try await store.refreshInboxInBackground()
+        XCTAssertFalse(repeated)
+        let restored = try RemoteTaskStore(file: file, connection: store.connection, client: client)
+        XCTAssertEqual(restored.messages.map(\.content), ["手机挂起后 Mac 发来的消息"])
+        XCTAssertEqual(restored.draft, "未发送的草稿")
+        XCTAssertEqual(restored.acknowledgedReadSequence, 0)
+        let requests = await wire.requests
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+        let subscriptions = await wire.subscriptions
+        XCTAssertTrue(subscriptions.isEmpty)
+        restored.foreground()
+        defer { restored.background() }
+        try await eventually { await wire.streams.count == 1 }
+        await wire.appendMessage("还有一条")
+        try await eventually { restored.messages.count == 2 }
+    }
+
     func testMultipleMessagesShareSubscriptionAndLateReceiptCannotRegressPushedCompletion() async throws {
         let (wire, store, _, _) = try fixture()
         store.foreground(); defer { store.background() }
