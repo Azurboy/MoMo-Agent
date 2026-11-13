@@ -510,26 +510,8 @@ class MemoryReviewTests(unittest.TestCase):
             'category':'briefing',
             'content':'# 晨间简报 · 2026-11-10\n\n## 今日脉络\n重点推进 Dream 稳定运行，总览见 `projects/overview.md`。\n\n## 卡片：理清日记法边界\n- 纹样：片段关联\n- 语境：承接昨日讨论\n\n请帮我梳理日记法边界。',
         })
-        msgs=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
-        self.assertEqual(1,len(msgs))
-        self.assertIn('晨间简报 · 2026-11-10',msgs[0]['content'])
-        self.assertIn('[📔 projects/overview.md](momoagent://memory/projects/overview.md)',msgs[0]['content'])
-        self.assertNotIn('我已在消息窗口下方为你备好',msgs[0]['content'])
-        self.assertNotIn('- 纹样：',msgs[0]['content'])
-        self.assertTrue(msgs[0]['operation_id'].startswith('dream-briefing:'))
-        # Idempotent when BRIEFING.md has not changed
-        again=review.deliver_briefing_to_conversation(self.data)
-        self.assertEqual('already_delivered',again['status'])
-        self.assertEqual(1,len(self.chat.execute('SELECT seq FROM messages WHERE role="assistant"').fetchall()))
-        # Same-day update modifies the existing briefing bubble in-place instead of spamming duplicates
-        execute_tool('notebook',{
-            'action':'write',
-            'category':'briefing',
-            'content':'# 今日简报 · 2026-11-10\n\n## 今日脉络\n已按项目分流，见 `projects/overview.md` 与 `topics/diary-study.md`。',
-        })
-        msgs_after=[dict(zip(['role','content','operation_id'],r)) for r in self.chat.execute('SELECT role,content,operation_id FROM messages WHERE role="assistant"').fetchall()]
-        self.assertEqual(1,len(msgs_after))
-        self.assertIn('[📔 topics/diary-study.md](momoagent://memory/topics/diary-study.md)',msgs_after[0]['content'])
+        self.assertEqual(0, self.chat.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
+                         "Writing a Dream draft must not deliver it before morning")
 
         synthesized=gateway._finalize_memory_review_output(session,'')
         verified=review.outcome(self.data/'hermes',session,synthesized)
@@ -639,4 +621,65 @@ class MemoryReviewTests(unittest.TestCase):
         self.assertTrue(rd2['content'].startswith('# 双月 OKR 收敛版\n'))
 
 
-if __name__=='__main__':unittest.main()
+
+
+
+class MorningChatBriefingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from conversation_store import ProductStore
+        from superagent_gateway import SuperAgentGateway
+        from datetime import datetime
+        from unittest.mock import Mock
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.vault = self.root / "memories"
+        self.vault.mkdir()
+        self.gateway = SuperAgentGateway.__new__(SuperAgentGateway)
+        self.gateway.data = self.root
+        self.gateway.store = ProductStore(self.root / "conversation.sqlite", {"assistant_id": "test"})
+        self.addCleanup(self.gateway.store.db.close)
+        self.gateway._call_configured_llm_oneshot = Mock(return_value="先确认讨论剩下的决定。")
+        clock_patch = patch("superagent_gateway.datetime", wraps=datetime)
+        self.clock = clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.clock.now.return_value = datetime(2026, 11, 13, 8, 0)
+
+    def messages(self):
+        return [r[0] for r in self.gateway.store.db.execute("SELECT content FROM messages WHERE role='assistant' ORDER BY seq")]
+
+    async def test_morning_gate_once_per_day_and_wake_catchup(self):
+        from datetime import datetime
+        (self.vault / "BRIEFING.md").write_text("# 晨间简报 · 2026-11-13\n已有的进展。\n## 卡片：参考\n隐藏此段")
+        self.clock.now.return_value = datetime(2026, 11, 13, 7, 59)
+        await self.gateway._deliver_morning_briefing()
+        self.assertEqual([], self.messages())
+        self.clock.now.return_value = datetime(2026, 11, 13, 8, 0)
+        await self.gateway._deliver_morning_briefing()
+        await self.gateway._deliver_morning_briefing()
+        self.assertEqual(["# 晨间简报 · 2026-11-13\n已有的进展。"], self.messages())
+        self.clock.now.return_value = datetime(2026, 11, 15, 14, 0)
+        await self.gateway._deliver_morning_briefing()
+        self.assertEqual(2, len(self.messages()))
+        self.assertIn("2026-11-15", self.messages()[1])
+        self.assertNotIn("已有的进展", self.messages()[1])
+
+    async def test_recent_evidence_model_failure_and_prior_version_delivery(self):
+        from datetime import datetime
+        import time
+        from unittest.mock import Mock
+        db = self.gateway.store.db
+        with db:
+            db.execute("INSERT INTO messages(id,role,content,created_at) VALUES('u','user','两份材料怎么区分？',?)", (time.time(),))
+        self.gateway._call_configured_llm_oneshot = Mock(side_effect=TimeoutError())
+        await self.gateway._deliver_morning_briefing()
+        self.assertIn("两份材料怎么区分", self.messages()[0])
+        self.clock.now.return_value = datetime(2026, 11, 14, 11, 0)
+        self.gateway.store.append_assistant("dream-briefing:old-hash", "# 晨间简报 · 2026-11-14\n已送达", time.time())
+        await self.gateway._deliver_morning_briefing()
+        self.assertEqual(2, len(self.messages()))
+        self.assertEqual(1, self.gateway._call_configured_llm_oneshot.call_count)
+
+
+if __name__ == "__main__":
+    unittest.main()
