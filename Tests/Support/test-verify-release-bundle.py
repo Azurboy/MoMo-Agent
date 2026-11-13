@@ -54,7 +54,8 @@ class ReleaseVerifierTests(unittest.TestCase):
             CFBundleIdentifier="com.momoagent.ios", CFBundleExecutable="MoMoAgent",
             MoMoGmailAuthentication="userProvided",
             CFBundleShortVersionString="1.2.3", CFBundleVersion="42",
-            UIBackgroundModes=["audio", "processing"], BGTaskSchedulerPermittedIdentifiers=[
+            UIBackgroundModes=["audio", "processing", "fetch", "remote-notification"], BGTaskSchedulerPermittedIdentifiers=[
+                "com.momoagent.ios.context.delivery", "com.momoagent.ios.chat.refresh",
                 "com.momoagent.ios.transcription.processing", "com.momoagent.ios.transcription.continued.*"]))
         self.write_plist(self.watch / "Info.plist", dict(
             CFBundleIdentifier="com.momoagent.ios.watchkitapp", CFBundleExecutable="MoMoAgentWatch",
@@ -140,6 +141,7 @@ class ReleaseVerifierTests(unittest.TestCase):
     def test_beta_requires_its_own_identity_background_tasks_and_companion(self):
         beta_id = "com.momoagent.ios.beta"
         self.change_info(self.app, CFBundleIdentifier=beta_id, BGTaskSchedulerPermittedIdentifiers=[
+            beta_id + ".context.delivery", beta_id + ".chat.refresh",
             beta_id + ".transcription.processing", beta_id + ".transcription.continued.*"])
         self.change_info(self.watch, CFBundleIdentifier=beta_id + ".watchkitapp",
                          WKCompanionAppBundleIdentifier=beta_id)
@@ -153,6 +155,7 @@ class ReleaseVerifierTests(unittest.TestCase):
     def test_local_upgrade_preserves_legacy_identity_without_weakening_release_checks(self):
         legacy = "com.watchmylife.ios"
         self.change_info(self.app, CFBundleIdentifier=legacy, BGTaskSchedulerPermittedIdentifiers=[
+            legacy + ".context.delivery", legacy + ".chat.refresh",
             legacy + ".transcription.processing", legacy + ".transcription.continued.*"])
         self.change_info(self.watch, CFBundleIdentifier=legacy + ".watchkitapp", WKCompanionAppBundleIdentifier=legacy)
         self.change_info(self.widget, CFBundleIdentifier=legacy + ".watchkitapp.widget")

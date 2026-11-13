@@ -212,10 +212,11 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        UIBackgroundModes: [audio, processing]
+        UIBackgroundModes: [audio, processing, fetch, remote-notification]
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).transcription.processing
           - $(PRODUCT_BUNDLE_IDENTIFIER).context.delivery
+          - $(PRODUCT_BUNDLE_IDENTIFIER).chat.refresh
           - $(PRODUCT_BUNDLE_IDENTIFIER).transcription.continued.*
     dependencies:
       - sdk: EventKit.framework

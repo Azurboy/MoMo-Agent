@@ -185,6 +185,11 @@ import MoMoAgentClient
         network.failedRequest(URLError(.badURL), session: current)
         let repairedPool = try await network.connectedSession()
         let preservedPool = try await network.connectedSession(interactive: true)
+        do {
+            let stale = URLRequest(url: URL(string: "http://100.64.0.2:8767/")!)
+            _ = try await TailnetChunkStream.open(stale, session: current, network: network)
+            preconditionFailure("A late request must not start on a retired pool")
+        } catch let error as URLError where error.code == .networkConnectionLost {}
         precondition(repairedPool !== current, "A healthy probe must not retain a failed URLSession pool")
         precondition(preservedPool === otherPool && Probe.counts.0 == nodesBefore, "Repair only the failed pool, not the node or active chat")
         let control = try await network.connectedSession(desktopControl: true)
@@ -320,7 +325,7 @@ import MoMoAgentClient
         _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
         precondition(Probe.counts.0 == createdBeforeZombie + 1, "Wedged Stopped node must recycle on next attempt")
 
-        // Regression 3: Missing peer netmap refreshes directly and recycles after 2 consecutive timeouts.
+        // An unmapped peer cannot be dialed. Its return must reuse the healthy node and existing chat pool.
         Probe.setMappedPeers([])
         zombieNet.prepareForForeground()
         let delayedPeerTask = Task {
@@ -332,34 +337,29 @@ import MoMoAgentClient
         Probe.setMappedPeers([])
         zombieNet.prepareForForeground()
         let beforePeerTimeoutNodes = Probe.counts.0
-        for _ in 0..<2 {
+        let originalChat = try await zombieNet.connectedSession(interactive: true)
+        for _ in 0..<3 {
             do {
                 _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
                 preconditionFailure("Expected peer map timeout")
             } catch let error as URLError where error.code == .notConnectedToInternet {}
         }
         Probe.setMappedPeers(["100.118.16.18"])
-        _ = try await zombieNet.connectedSession(peer: "100.118.16.18")
-        precondition(Probe.counts.0 == beforePeerTimeoutNodes + 1, "Repeated stale peer netmap must recycle node")
+        let resumedChat = try await zombieNet.connectedSession(peer: "100.118.16.18", interactive: true)
+        precondition(resumedChat === originalChat && Probe.counts.0 == beforePeerTimeoutNodes,
+                     "Waiting for the Mac to reappear must preserve the healthy node and chat pool")
 
-        // Regression 4: Transport success resets failure streak; 6 consecutive socket failures recycle wedged node.
-        var activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
-        let beforeStreakNodes = Probe.counts.0
-        for _ in 0..<3 {
-            zombieNet.failedRequest(URLError(.badURL), session: activePool)
-            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        // Independent failures can accumulate while the Mac is offline, even though LocalAPI still works.
+        var failedPool = try await zombieNet.connectedSession(peer: "100.118.16.18")
+        for _ in 0..<8 {
+            zombieNet.failedRequest(URLError(.timedOut), session: failedPool)
+            let replacement = try await zombieNet.connectedSession(peer: "100.118.16.18")
+            precondition(replacement !== failedPool, "A failed pool should be renewed")
+            failedPool = replacement
         }
-        zombieNet.recordTransportSuccess()
-        for _ in 0..<3 {
-            zombieNet.failedRequest(URLError(.badURL), session: activePool)
-            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
-        }
-        precondition(Probe.counts.0 == beforeStreakNodes, "Reset streak must not restart healthy node")
-        for _ in 0..<3 {
-            zombieNet.failedRequest(URLError(.badURL), session: activePool)
-            activePool = try await zombieNet.connectedSession(peer: "100.118.16.18")
-        }
-        precondition(Probe.counts.0 == beforeStreakNodes + 1, "6 consecutive socket failures must recycle wedged node")
+        let chatAfterFailures = try await zombieNet.connectedSession(interactive: true)
+        precondition(chatAfterFailures === originalChat && Probe.counts.0 == beforePeerTimeoutNodes,
+                     "Repeated remote timeouts must not restart a healthy local node")
 
         // Regression 5: Peer warmup triggers disco + TSMP LocalAPI pings and retries cold TSMP once.
         let proxyAddr = ProcessInfo.processInfo.environment["MOMO_TEST_PROXY"]!
@@ -402,7 +402,7 @@ import MoMoAgentClient
         precondition(TransientPeerProtocol.attempts == 1, "Non-idempotent POST attempted only once")
 
         await zombieNet.close()
-        print("PASS: zombie Stopped recovery, wedged node recycle, peer netmap refresh/recycle, streak self-healing, peer warmup and pre-header retry")
+        print("PASS: zombie Stopped recovery, wedged node recycle, missing-peer recovery, repeated remote timeouts, peer warmup and pre-header retry")
     }
 }
 

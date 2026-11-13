@@ -23,8 +23,17 @@ import TailscaleKit
                 guard passed else { throw Check.failed(message) }
             }
             @Sendable func read(_ session: URLSession) async throws {
-                let (_, response) = try await session.data(from: url)
-                try check((response as? HTTPURLResponse)?.statusCode == 200, "Private HTTP failed")
+                let response = try await TailnetChunkStream.read(URLRequest(url: url), session: session, network: client, limit: 1024)
+                try check(response.status == 200, "Private HTTP failed")
+            }
+            // The fixture starts with empty credentials. Let its control server enroll the phone
+            // before exercising recovery of an already-paired connection.
+            try await client.start()
+            let enrollmentDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while client.state != "Running" {
+                try check(ContinuousClock.now < enrollmentDeadline, "Fixture client did not finish enrollment")
+                try await Task.sleep(for: .milliseconds(100))
+                await client.refreshStatus()
             }
             let original = try await client.connectedSession(peer: address)
             let missingPeer = Task { try await client.connectedSession(peer: "100.127.255.254") }
@@ -51,15 +60,37 @@ import TailscaleKit
                 }
                 try check(client.generation == generation, "Foreground restarted a healthy node")
             }
+            let chat = try await client.connectedSession(peer: address, interactive: true)
+            client.peerMapTimeout = .milliseconds(250)
+            for _ in 0..<3 {
+                do {
+                    _ = try await client.connectedSession(peer: "100.127.255.254")
+                    throw Check.failed("An unmapped peer was dialed")
+                } catch let error as URLError where error.code == .notConnectedToInternet {}
+            }
+            try await read(chat)
+
+            // Drop the remote HTTP listener while both tailnet nodes remain healthy.
+            await server.stopServing()
             var current = original
-            for error in [URLError(.timedOut), URLError(.networkConnectionLost), URLError(.cannotConnectToHost)] {
-                client.failedRequest(error, session: current)
-                let session = try await client.connectedSession()
+            for _ in 0..<8 {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 2
+                do {
+                    _ = try await TailnetChunkStream.read(request, session: current, network: client, limit: 1024)
+                    throw Check.failed("Offline Mac accepted a request")
+                } catch let error as URLError {
+                    client.failedRequest(error, session: current)
+                }
+                let session = try await client.connectedSession(peer: address)
                 try check(client.generation == generation, "Peer failure restarted a healthy local proxy")
                 try check(session !== current, "Failed request retained the failed session")
                 current = session
-                try await read(session)
             }
+            try await server.serveLoopbackHTTP(port: port)
+            let resumedChat = try await client.connectedSession(peer: address, interactive: true)
+            try check(resumedChat === chat, "Peer outage replaced the independent chat session")
+            try await read(resumedChat)
 
             // Simulate the local listener disappearing while the app is suspended.
             try await client.node!.close()
@@ -68,6 +99,10 @@ import TailscaleKit
             try check(recovered !== original && client.generation != generation, "Dead local proxy was not rebuilt")
             try check(client.address == addressBefore, "Recovery changed the paired node address")
             try await read(recovered)
+            do {
+                try await read(original)
+                throw Check.failed("A late request ran on a retired pool")
+            } catch let error as URLError where error.code == .networkConnectionLost {}
             let recoveredGeneration = client.generation
             client.failedRequest(URLError(.timedOut), session: original)
             let retained = try await client.connectedSession()
@@ -77,7 +112,7 @@ import TailscaleKit
                 _ = try await client.connectedSession()
                 throw Check.failed("Logout was undone by a network request")
             } catch TailnetError.loginRequired { }
-            print("PASS: unmapped peer waits and cancels; 40 foreground reads reuse the node/session; peer failures replace only the failed session; dead proxy rebuilds with same address; stale failures ignored; logout stays logged out")
+            print("PASS: unmapped peer waits and cancels; 40 foreground reads reuse the node/session; unmapped peer and eight offline Mac requests preserve chat; HTTP resumes on the original node; dead proxy rebuilds with same address; late requests on retired pools fail safely; stale failures ignored; logout stays logged out")
         } catch {
             await client.close(); try? await server.close()
             throw error

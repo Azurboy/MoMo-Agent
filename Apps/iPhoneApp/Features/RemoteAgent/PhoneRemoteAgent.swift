@@ -43,6 +43,7 @@ final class PhoneRemoteAgent {
     private(set) var setupStep = SetupStep.welcome
     @ObservationIgnored private let directory: URL
     @ObservationIgnored private var active = false
+    @ObservationIgnored private var backgroundInboxReads = 0
     @ObservationIgnored private var ancillaryStartupTask: Task<Void, Never>?
     @ObservationIgnored private var connectionReadyWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -201,25 +202,20 @@ final class PhoneRemoteAgent {
         do {
             if connection.network == "tailscale" {
                 tailnet.prepareForForeground(peer: connection.baseURL.host)
-                do {
-                    try await Self.probeCapabilities(client, timeout: .seconds(16))
-                } catch {
-                    guard AgentTransportFailure.isSocketOrLinkFailure(error) else { throw error }
-                    try Task.checkCancellation()
-                    await tailnet.restartForRecovery()
-                    try await Self.probeCapabilities(client, timeout: .seconds(18))
-                }
+                // The embedded transport verifies its listener and retries safe requests itself.
+                try await Self.probeCapabilities(client, timeout: .seconds(30))
             } else {
                 network?.resume()
                 try await Self.probeCapabilities(client, timeout: .seconds(12))
             }
             guard self.store === store else { return }
-            await store.retryConnection()
+            await store.retryConnection(ifNeeded: true)
+            guard self.store === store, !Task.isCancelled else { return }
             await context?.refresh()
             lifeIllustrations.requestRefresh()
         } catch is CancellationError { }
         catch {
-            guard !AgentTransportFailure.isCancelled(error) else { return }
+            guard self.store === store, !AgentTransportFailure.isCancelled(error) else { return }
             store.recordConnectionFailure(error)
             failure = AgentTransportFailure.isTransient(error) ? String(localized: "暂时无法连接 Mac，请稍后重试。") : error.localizedDescription
         }
@@ -283,10 +279,26 @@ final class PhoneRemoteAgent {
         }
         contextDelivery.request()
     }
-    func background() { replyContinuation.background() }
+    func background() {
+        if connection != nil { PhoneInboxRefresh.schedule() }
+        replyContinuation.background()
+    }
+
+    func refreshInboxInBackground() async throws -> Bool {
+        guard !active else { return false }
+        guard let store, store.canContactServer else { throw URLError(.resourceUnavailable) }
+        backgroundInboxReads += 1
+        defer {
+            backgroundInboxReads -= 1
+            suspendTransportIfIdle()
+        }
+        if connection?.network == "tailscale" { tailnet.prepareForForeground(peer: connection?.baseURL.host) }
+        else { network?.resume() }
+        return try await store.refreshInboxInBackground()
+    }
 
     private func suspendTransportIfIdle() {
-        guard !active, !replyContinuation.isActive, !contextDelivery.isActive else { return }
+        guard !active, backgroundInboxReads == 0, !replyContinuation.isActive, !contextDelivery.isActive else { return }
         context?.background(); store?.background(); network?.suspend()
         lifeIllustrations.cancelSynchronization()
         tailnet.suspendSessions()
@@ -411,7 +423,7 @@ final class PhoneRemoteAgent {
         tasks.onConnectionRestored = { [weak self] in
             self?.failure = nil
             self?.resumeConnectionReadyWaiters()
-            self?.lifeIllustrations.requestRefresh()
+            if self?.active == true { self?.lifeIllustrations.requestRefresh() }
         }
         sync.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }
         sync.recordingSummaries?.onAuthenticationRequired = { [weak tasks] error in tasks?.recordConnectionFailure(error) }

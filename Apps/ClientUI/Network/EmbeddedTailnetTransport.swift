@@ -27,28 +27,18 @@ struct EmbeddedTailnetTransport: AgentTransport {
         do {
             if url.path == "/desktop/v1/frames" {
                 let diagnostics = await network.diagnostics
-                let stream = try await AgentHTTPStream.open(request, configuration: session.configuration) { metrics in
+                return try await AgentHTTPStream.open(request, configuration: session.configuration) { metrics in
                     diagnostics.record(metrics, request: request)
                 }
-                await network.recordTransportSuccess()
-                return stream
             }
             if desktop {
-                let (data, response) = try await session.data(for: request)
-                guard let response = response as? HTTPURLResponse else { throw URLError(.networkConnectionLost) }
-                guard data.count <= 3 * 1024 * 1024 else { throw AgentClientError.responseTooLarge }
-                await network.recordTransportSuccess()
-                return AgentByteStream(status: response.statusCode, contentType: response.mimeType, chunks: AsyncThrowingStream { continuation in
-                    continuation.yield(data); continuation.finish()
+                let response = try await TailnetChunkStream.read(request, session: session, network: network, limit: 3 * 1024 * 1024)
+                return AgentByteStream(status: response.status, contentType: response.contentType, retryAfter: response.retryAfter,
+                                       chunks: AsyncThrowingStream { continuation in
+                    continuation.yield(response.data); continuation.finish()
                 })
             }
-            let diagnostics = await network.diagnostics
-            let stream = try await TailnetChunkStream.open(request: request, session: session, diagnostics: diagnostics) { error in
-                guard !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) else { return }
-                Task { @MainActor in network.failedRequest(error, session: session) }
-            }
-            await network.recordTransportSuccess()
-            return stream
+            return try await TailnetChunkStream.open(request, session: session, network: network)
         } catch {
             if !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) {
                 await network.failedRequest(error, session: session)
@@ -71,7 +61,7 @@ struct EmbeddedTailnetTransport: AgentTransport {
     }
 }
 
-private final class TailnetChunkStream: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class TailnetChunkStream: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private static let maximumBufferedBytes = 16 * 1024 * 1024
 
     private let lock = NSLock()
@@ -91,13 +81,24 @@ private final class TailnetChunkStream: NSObject, URLSessionDataDelegate, @unche
         self.onTransportFailure = onTransportFailure
     }
 
-    static func open(
-        request: URLRequest,
-        session: URLSession,
-        diagnostics: TailnetDiagnostics,
-        onTransportFailure: @escaping @Sendable (Error) -> Void
-    ) async throws -> AgentByteStream {
-        let owner = TailnetChunkStream(diagnostics: diagnostics, onTransportFailure: onTransportFailure)
+    static func read(
+        _ request: URLRequest, session: URLSession, network: EmbeddedTailnet, limit: Int
+    ) async throws -> (data: Data, status: Int, contentType: String?, retryAfter: String?) {
+        let stream = try await open(request, session: session, network: network)
+        defer { stream.cancel() }
+        var data = Data()
+        for try await chunk in stream.chunks {
+            guard chunk.count <= limit - data.count else { throw AgentClientError.responseTooLarge }
+            data.append(chunk)
+        }
+        return (data, stream.status, stream.contentType, stream.retryAfter)
+    }
+
+    @MainActor static func open(_ request: URLRequest, session: URLSession, network: EmbeddedTailnet) async throws -> AgentByteStream {
+        let owner = TailnetChunkStream(diagnostics: network.diagnostics) { error in
+            guard !AgentTransportFailure.isCancelled(error), !(error is AgentClientError) else { return }
+            Task { @MainActor in network.failedRequest(error, session: session) }
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 owner.lock.withLock {
@@ -105,8 +106,13 @@ private final class TailnetChunkStream: NSObject, URLSessionDataDelegate, @unche
                         continuation.resume(throwing: CancellationError())
                         return
                     }
+                    let task: URLSessionDataTask
+                    do { task = try network.dataTask(for: request, using: session) }
+                    catch {
+                        continuation.resume(throwing: error)
+                        return
+                    }
                     owner.head = continuation
-                    let task = session.dataTask(with: request)
                     task.delegate = owner
                     owner.task = task
                     task.resume()
