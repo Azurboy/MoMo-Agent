@@ -12,6 +12,141 @@ import WatchConnectivity
 #if DEBUG && targetEnvironment(simulator)
 @MainActor
 final class WatchNativeCaptureTests: XCTestCase {
+    func testMacOriginRejectsCredentialsAndPlaintextOutsideLoopback() throws {
+        let valid = try WatchMacLink.origin(for: "  https://momo.example.test:8443/ ")
+        XCTAssertEqual(valid.host, "momo.example.test")
+        XCTAssertEqual(valid.port, 8443)
+        XCTAssertNoThrow(try WatchMacLink.origin(for: "http://127.0.0.1:8080"))
+        for address in ["http://momo.example.test", "https://user:secret@momo.example.test",
+                        "https://momo.example.test/api", "https://momo.example.test/?key=abc", "https://momo.example.test/#abc"] {
+            XCTAssertThrowsError(try WatchMacLink.origin(for: address), address)
+        }
+    }
+
+    func testSavedMacReceiverKeepsOriginalUntilMatchingMacReceiptAfterRelaunch() async throws {
+        let runID = UUID()
+        let fixture = try WatchComposition.makeSimulatorTest(runID: runID)
+        let store = try RecordingStore(rootURL: fixture.rootURL)
+        let device = UUID()
+        let phone = UUID()
+        let phoneLibrary = UUID()
+        try await store.bindReceiver(deviceID: phone, libraryInstanceID: phoneLibrary)
+        let bytes = Data(repeating: 1, count: 320)
+        let source = fixture.rootURL.appendingPathComponent("before-receiver-change.pcm")
+        try bytes.write(to: source)
+        let envelope = try ManifestEnvelope(manifest: ChunkManifest(
+            sessionID: UUID(), epochID: UUID(), sourceDeviceID: device, sourceBuild: "test",
+            sequence: 0, frames: FrameRange(start: 0, count: 160), timebaseHz: 16_000,
+            wallClockAnchor: Date(), timezoneOffset: 0, codec: .pcmInt16, sampleRate: 16_000,
+            channels: 1, decodedFrameCount: 160, byteCount: 320,
+            audioSHA256: ContentHash.sha256(bytes), sourceKind: .fixture))
+        let chunk = try await store.sealChunk(audioAt: source, envelope: envelope)
+        let chunkID = envelope.manifest.chunkID
+        let stale = try Receipt(receiverDeviceID: phone, libraryInstanceID: phoneLibrary, chunkID: chunkID,
+                                audioSHA256: envelope.manifest.audioSHA256, manifestSHA256: envelope.manifestSHA256)
+        _ = try await store.applyReceipt(stale)
+        let controls = try ControlInbox(directory: fixture.rootURL.appendingPathComponent("ControlInbox"))
+        try controls.preserve(.receipt(stale))
+        let grant = WatchMacLink.Grant(id: UUID(), origin: try WatchMacLink.origin(for: "https://mac.example.test"),
+                                       token: "fixture-watch-token", receiver: UUID(), library: UUID())
+        // Simulate process termination between atomically saving the selection and binding the ledger.
+        try JSONEncoder().encode(grant).write(to: fixture.rootURL.appendingPathComponent("mac-receiver.json"))
+        let restored = try WatchComposition.makeSimulatorTest(runID: runID).runtime
+        XCTAssertEqual(restored.macLink.grant, grant)
+        try await restored.macLink.restoreReceiver()
+        await restored.handleLinkEvent(.controlPreserved)
+        XCTAssertEqual(try controls.pending(), [.receipt(stale)])
+        let request = WatchMacLink.uploadRequest(for: grant, envelope: envelope)
+        XCTAssertEqual(request.url?.path, "/api/watch/chunks/" + chunkID.uuidString.lowercased())
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-watch-token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/octet-stream")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-MoMo-Manifest"), envelope.manifestData.base64EncodedString())
+        let wrongHash = try Receipt(receiverDeviceID: grant.receiver, libraryInstanceID: grant.library, chunkID: chunkID,
+                                    audioSHA256: envelope.manifest.audioSHA256, manifestSHA256: ContentHash.sha256(Data()))
+        for untrusted in [stale, wrongHash] {
+            do {
+                try await restored.macLink.acknowledge(WireJSON.encode(untrusted), for: chunkID, grant: grant)
+                XCTFail("Only a receipt for this receiver, library and both content hashes can release the original.")
+            } catch WatchMacLink.Failure.invalidReceipt {
+                XCTAssertEqual(untrusted, stale)
+            } catch RecordingError.receiptMismatch {
+                XCTAssertEqual(untrusted, wrongHash)
+            }
+            let cleaned = try await store.cleanupAcknowledgedChunks()
+            XCTAssertTrue(cleaned.isEmpty)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: chunk.audioURL.path))
+        }
+        let valid = try Receipt(receiverDeviceID: grant.receiver, libraryInstanceID: grant.library, chunkID: chunkID,
+                                audioSHA256: envelope.manifest.audioSHA256, manifestSHA256: envelope.manifestSHA256)
+        try await restored.macLink.acknowledge(WireJSON.encode(valid), for: chunkID, grant: grant)
+        let reopened = try RecordingStore(rootURL: fixture.rootURL)
+        let confirmed = try await reopened.confirmedReceipt(chunkID: chunkID)
+        XCTAssertEqual(confirmed, valid)
+        let cleaned = try await reopened.cleanupAcknowledgedChunks()
+        XCTAssertEqual(cleaned, [chunkID])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chunk.audioURL.path))
+    }
+
+    func testPairedMacHTTPUploadReturnsDurableReceipt() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let owner = environment["MOMO_MAC_TEST_OWNER"], let origin = environment["MOMO_MAC_TEST_ORIGIN"] else {
+            throw XCTSkip("Start an isolated MobileWeb server and supply its owner and public loopback URLs.")
+        }
+        let ownerURL = try WatchMacLink.origin(for: owner)
+        let publicURL = try WatchMacLink.origin(for: origin)
+        XCTAssertEqual(ownerURL.host, "127.0.0.1")
+        XCTAssertEqual(publicURL.host, "127.0.0.1")
+        let fixture = try WatchComposition.makeSimulatorTest(runID: UUID())
+        let runtime = fixture.runtime
+        let store = try RecordingStore(rootURL: fixture.rootURL)
+        await runtime.bootstrap()
+        let device = try XCTUnwrap(UUID(uuidString: String(contentsOf: fixture.rootURL.appendingPathComponent("device-id"), encoding: .utf8)))
+        let frames = 16000
+        let source = fixture.rootURL.appendingPathComponent("watch-test.wav")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)))
+        buffer.frameLength = buffer.frameCapacity
+        let pcm = try XCTUnwrap(buffer.floatChannelData?[0])
+        for i in 0..<frames { pcm[i] = Float(sin(Double(i) * 2 * Double.pi * 440 / 16000)) * 0.2 }
+        let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
+                                       AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                                       AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false]
+        do {
+            let output = try AVAudioFile(forWriting: source, settings: settings)
+            try output.write(from: buffer)
+        }
+        let bytes = try Data(contentsOf: source)
+        let envelope = try ManifestEnvelope(manifest: ChunkManifest(
+            sessionID: UUID(), epochID: UUID(), sourceDeviceID: device, sourceBuild: "watch-http-test",
+            sequence: 0, frames: FrameRange(start: 0, count: Int64(frames)), timebaseHz: 16_000,
+            wallClockAnchor: Date(), timezoneOffset: 0, codec: .pcmInt16, sampleRate: 16_000, channels: 1,
+            decodedFrameCount: Int64(frames), byteCount: Int64(bytes.count), audioSHA256: ContentHash.sha256(bytes), sourceKind: .watch))
+        let chunk = try await store.sealChunk(audioAt: source, envelope: envelope)
+
+        var invite = URLRequest(url: ownerURL.appendingPathComponent("invite"))
+        invite.httpMethod = "POST"
+        invite.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        invite.setValue(owner, forHTTPHeaderField: "Origin")
+        invite.httpBody = Data(#"{"role":"watch"}"#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: invite)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let code = try XCTUnwrap((try JSONSerialization.jsonObject(with: data) as? [String: Any])?["code"] as? String)
+        try await runtime.connectMac(address: origin, code: code)
+        let bound = try XCTUnwrap(runtime.macLink.grant)
+        let deadline = ContinuousClock.now + .seconds(90)
+        while FileManager.default.fileExists(atPath: chunk.audioURL.path) && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        let reopened = try RecordingStore(rootURL: fixture.rootURL)
+        let receipt = try await reopened.confirmedReceipt(chunkID: envelope.manifest.chunkID)
+        XCTAssertEqual(receipt?.receiverDeviceID, bound.receiver, runtime.macLink.problem ?? "Mac receipt unavailable")
+        XCTAssertEqual(receipt?.libraryInstanceID, bound.library)
+        XCTAssertEqual(receipt?.manifestSHA256, envelope.manifestSHA256)
+        XCTAssertEqual(receipt?.audioSHA256, envelope.manifest.audioSHA256)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chunk.audioURL.path))
+    }
+
     func testColdGrantPublishesBindingWithoutStartingCaptureAndBoundsStatusWrites() async throws {
         let fixture = try WatchComposition.makeSimulatorTest(runID: UUID(), archiveRecovery: { _ in
             XCTFail("Cold status must not open historical audio."); return RecordingRecoveryReport()

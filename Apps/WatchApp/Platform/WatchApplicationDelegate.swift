@@ -56,7 +56,16 @@ final class WatchApplicationDelegate: NSObject, WKApplicationDelegate {
 
     func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
         for task in backgroundTasks {
-            if task is WKWatchConnectivityRefreshBackgroundTask || task is WKApplicationRefreshBackgroundTask {
+            if let urlTask = task as? WKURLSessionRefreshBackgroundTask {
+                do {
+                    let link = try resolveRuntime().macLink
+                    if urlTask.sessionIdentifier == link.sessionID { link.handleRefresh(urlTask) }
+                    else { urlTask.setTaskCompletedWithSnapshot(false) }
+                } catch {
+                    failure = String(localized: "后台录音资料未能打开：\(error.localizedDescription)")
+                    urlTask.setTaskCompletedWithSnapshot(false)
+                }
+            } else if task is WKWatchConnectivityRefreshBackgroundTask || task is WKApplicationRefreshBackgroundTask {
                 if task is WKApplicationRefreshBackgroundTask {
                     recoveryDate = nil; recoveryRequestID = nil
                     recoveryRequested = true

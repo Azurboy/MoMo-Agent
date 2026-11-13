@@ -43,6 +43,7 @@ enum WatchSynchronizationState {
 @MainActor @Observable
 final class WatchRuntime {
     let captureMeter = CaptureMeter()
+    let macLink: WatchMacLink
     private(set) var captureState = CaptureState() {
         didSet {
             if captureActivity != captureState.activity { captureActivity = captureState.activity }
@@ -190,10 +191,11 @@ final class WatchRuntime {
 
     init(store: RecordingStore, encoderDirectory: URL, sourceDeviceID: UUID, sourceBuild: String,
          controls: ControlInbox, transport: WatchConnectivityTransport, capacityReader: CaptureCapacityReader = .live,
-         audioSession: WatchAudioSession = WatchAudioSession(),
+         audioSession: WatchAudioSession = WatchAudioSession(), macGrant: WatchMacLink.Grant? = nil,
          archiveRecovery: @escaping @Sendable (RecordingStore) async throws -> RecordingRecoveryReport = { try await $0.recover() },
          recoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.store = store; self.encoderDirectory = encoderDirectory; self.sourceDeviceID = sourceDeviceID
+        macLink = WatchMacLink(store: store, directory: encoderDirectory.deletingLastPathComponent(), deviceID: sourceDeviceID, saved: macGrant)
         self.sourceBuild = sourceBuild; self.controls = controls; self.transport = transport
         self.capacityReader = capacityReader
         energyLog = CaptureEnergyLog(url: encoderDirectory.deletingLastPathComponent().appendingPathComponent("energy-diagnostic.json"))
@@ -202,6 +204,19 @@ final class WatchRuntime {
         self.statusPublisher = { snapshot in _ = try transport.updateStatus(snapshot) }
         self.archiveRecovery = archiveRecovery
         self.recoverySleep = recoverySleep
+        macLink.beforeSwitch = { [weak self] in try await self?.stopPhoneTransfers() }
+        macLink.recording = { [weak self] in self?.observedCaptureActivity == .recording }
+        macLink.currentSession = { [weak self] in self?.sessionID }
+        macLink.retryNeeded = { [weak self] in self?.onBackgroundRetryNeeded() }
+        macLink.queueChanged = { [weak self] summary in
+            guard let self else { return }
+            pendingChunkCount = summary.pendingChunkCount
+            pendingDuration = summary.pendingDuration
+            pendingBytes = summary.pendingBytes
+            sealedSeconds = summary.sealedDuration
+            widgetHasQueueObservation = true
+            publishWidgetStatus()
+        }
         captureMeter.setVisible(false)
         audioSession.onEvent = { [weak self] event in await self?.handleAudioEvent(event) }
     }
@@ -231,11 +246,17 @@ final class WatchRuntime {
             activateConnectivity()
             requestStatusPublication(force: true)
             archiveState = .ledger
+            try await macLink.restoreReceiver()
             let report = try await archiveRecovery(store)
             archiveState = .encodedAudio
             let spool = try await CaptureSpool.recover(directory: encoderDirectory, store: store, excludingOpenEpochs: true)
             archiveState = .capture
-            for deletion in try await store.pendingDeletions() where deletion.libraryInstanceID != nil { try await applyDeletion(deletion) }
+            if !macLink.ownsRoute {
+                for deletion in try await store.pendingDeletions() where deletion.libraryInstanceID != nil {
+                    guard !macLink.ownsRoute else { break }
+                    try await applyDeletion(deletion)
+                }
+            }
             if let session = sessionID {
                 let epoch = epochID
                 let generation = captureState.generation
@@ -312,8 +333,10 @@ final class WatchRuntime {
 
     func foreground() async {
         if connectivityGrant { endConnectivityGrant() }
-        transport.allowControlReplay()
-        transport.allowAudioBlockReplay()
+        if !macLink.ownsRoute {
+            transport.allowControlReplay()
+            transport.allowAudioBlockReplay()
+        }
         localSyncRetryAt = 0
         controlCursors.removeAll()
         resetAutomaticRecovery()
@@ -335,6 +358,11 @@ final class WatchRuntime {
 
     /// Reconcile durable receipts first; completed transfers also retry after a bounded acknowledgement wait.
     func resumeSynchronization(flushAudio: Bool = true) async {
+        if macLink.ownsRoute {
+            macLink.wake()
+            if !captureReady && !connectivityGrant { await bootstrap() }
+            return
+        }
         flushAudioBatch = flushAudioBatch || flushAudio
         if flushAudio || transport.isReachable {
             replayReconciliationRequest = true
@@ -355,6 +383,7 @@ final class WatchRuntime {
     }
 
     private func scheduleAutomaticRecovery() {
+        guard !macLink.ownsRoute else { return }
         // A delegate can preserve an Inbox message just after a cold grant expires.
         // Request another OS opportunity even when historical capture recovery has not run.
         if pendingLocalSyncWork, !captureReady, !connectivityGrant { onBackgroundRetryNeeded() }
@@ -406,6 +435,7 @@ final class WatchRuntime {
     }
 
     func beginBackgroundConnectivity() {
+        guard !macLink.ownsRoute else { return }
         if transport.activation == .failed || transport.activation == .inactive { activateConnectivity() }
     }
 
@@ -429,12 +459,17 @@ final class WatchRuntime {
         guard connectivityGrant else { return }
         connectivityGrant = false
         grantID = nil
+        if macLink.ownsRoute {
+            if pendingChunkCount > 0 { onBackgroundRetryNeeded() }
+            return
+        }
         if !grantLocalWorkChecked || !grantStatusPublished || statusDirty || pendingLocalSyncWork || (pendingChunkCount > 0 && !waitingForAudioBatch) || transport.hasRetryableControls {
             onBackgroundRetryNeeded()
         }
     }
 
     private func activateConnectivity() {
+        guard !macLink.ownsRoute else { return }
         #if DEBUG && targetEnvironment(simulator)
         if simulatorTestCapture { return }
         #endif
@@ -444,6 +479,10 @@ final class WatchRuntime {
 
     func drainBackgroundConnectivity() async -> WatchBackgroundDrainResult {
         guard !Task.isCancelled else { return .failed }
+        if macLink.ownsRoute {
+            if !grantReconciliationAttempted { grantReconciliationAttempted = true; macLink.wake() }
+            return macLink.isScheduling ? .pending : .completed
+        }
         // A WC wake has a tiny CPU grant. The already-open ledger owns sealed files;
         // historical capture/audio recovery belongs to the active recording UI.
         // Poll only the OS completion flags after the first pass. WC events reconcile new work.
@@ -457,6 +496,10 @@ final class WatchRuntime {
 
     func drainActiveConnectivity(for drainID: UUID) async -> WatchBackgroundDrainResult {
         guard !Task.isCancelled else { return .failed }
+        if macLink.ownsRoute {
+            if lastActiveDrainID != drainID { lastActiveDrainID = drainID; macLink.wake() }
+            return macLink.isScheduling ? .pending : .completed
+        }
         // Link events and the recovery timer handle new work between OS completion checks.
         if lastActiveDrainID != drainID, captureReady, !reconciling {
             lastActiveDrainID = drainID
@@ -656,8 +699,46 @@ final class WatchRuntime {
         requestReconciliation(flushAudio: true)
     }
 
+    func connectMac(address: String, code: String) async throws {
+        defer { if !macLink.ownsRoute { requestReconciliation(flushAudio: true) } }
+        try await macLink.pair(address: address, code: code)
+    }
+
+    private func stopPhoneTransfers() async throws {
+        resetAutomaticRecovery()
+        statusPublicationTask?.cancel()
+        synchronizationTask?.cancel()
+        let bulk = localBulkSyncTask
+        bulk?.cancel()
+        localSyncClient.closeConnections()
+        await bulk?.value
+        while reconciling { try await Task.sleep(for: .milliseconds(25)) }
+        if transport.activation == .activated {
+            try transport.cancelPeerTransfersForReceiverChange()
+        }
+        pendingReceiver = nil
+        pendingReceiverControl = nil
+        phoneStatus = nil
+        inboxSyncFailure = nil
+        transportSyncFailure = nil
+        refreshSyncFailure()
+    }
+
+    func usePhoneReceiver() async throws {
+        try await macLink.returnToPhone()
+        phoneStatuses = ReceiverStatusCache()
+        controlReceivers.removeAll()
+        fileCursorLoaded = false
+        localSyncRetryAt = 0
+        waitingForAudioBatch = false
+        needsPostActivationWrap = true
+        linkActivated = transport.activation == .activated
+        activateConnectivity()
+        await resumeSynchronization()
+    }
+
     func confirmReceiverChange() async throws {
-        guard let identity = pendingReceiver else { return }
+        guard !macLink.ownsRoute, let identity = pendingReceiver else { return }
         localBulkSyncTask?.cancel()
         localBulkSyncTask = nil
         localSyncInFlightChunkIDs.removeAll()
@@ -686,6 +767,7 @@ final class WatchRuntime {
     }
 
     func handleLinkEvent(_ event: LinkEvent) async {
+        guard !macLink.ownsRoute else { return }
         switch event {
         case .statusRefreshRequested:
             requestStatusPublication(force: true)
@@ -1332,6 +1414,7 @@ final class WatchRuntime {
     }
 
     private func requestReconciliation(flushAudio: Bool = false) {
+        if macLink.ownsRoute { macLink.wake(); return }
         flushAudioBatch = flushAudioBatch || flushAudio
         guard synchronizationTask == nil else { reconcileAgain = true; return }
         synchronizationTask = Task { @MainActor [weak self] in
@@ -1342,6 +1425,7 @@ final class WatchRuntime {
     }
 
     private func reconcile() async {
+        guard !macLink.ownsRoute else { return }
         // The ledger is ready before historical audio validation. Its durable outbox can sync immediately.
         guard captureReady || connectivityGrant, !Task.isCancelled else { return }
         guard !reconciling else { reconcileAgain = true; return }
@@ -1380,7 +1464,7 @@ final class WatchRuntime {
                 let pending = batch.messages.sorted { Self.controlPriority($0) < Self.controlPriority($1) }
                 for control in pending {
                     guard !Task.isCancelled else { return }
-                    guard grantID == startingGrant else { return }
+                    guard !macLink.ownsRoute, grantID == startingGrant else { return }
                     do {
                         switch control {
                         case .receiverIdentity(let identity):
@@ -1479,7 +1563,7 @@ final class WatchRuntime {
                         for (attempt, envelope) in candidates {
                             let valid = try await store.originalAvailableForTransferRetry(envelope,
                                 maximumValidationBytes: maximumBytes)
-                            guard grantID == startingGrant else { return }
+                            guard !macLink.ownsRoute, grantID == startingGrant else { return }
                             // Its SDK copy may be the last healthy copy. Keep it and inspect the next original.
                             guard valid else { continue }
                             try transport.retireStalledFileAttempt(
@@ -1492,7 +1576,7 @@ final class WatchRuntime {
                     }
                 }
                 // A processed response can outlive a failed platform stop; its durable deletion remains pending.
-                guard grantID == startingGrant else { return }
+                guard !macLink.ownsRoute, grantID == startingGrant else { return }
                 if connectivityGrant {
                     // No archive-wide JSON decoding, hashing or bulk file removal under a WC grant.
                     if !grantCleaned {
@@ -1515,7 +1599,7 @@ final class WatchRuntime {
                 let pendingControls = try await store.hasPendingControlMessages()
                 pendingLocalSyncWork = try controls.hasPending() || pendingControls
                 checkedLocalWork = true
-                guard grantID == startingGrant else { return }
+                guard !macLink.ownsRoute, grantID == startingGrant else { return }
                 if linkActivated, pendingReceiver == nil, !connectivityGrant || !grantSubmitted {
                     if connectivityGrant { grantSubmitted = true }
                     if !connectivityGrant, transport.isReachable, phoneStatus == nil, pendingChunkCount > 0 {
@@ -1527,7 +1611,7 @@ final class WatchRuntime {
                         try transport.refreshFileQueue()
                         var scheduled: [UUID] = []
                         for id in replay {
-                            guard grantID == startingGrant else { return }
+                            guard !macLink.ownsRoute, grantID == startingGrant else { return }
                             guard let chunk = try await store.chunk(id: id), chunk.state == .ready else {
                                 scheduled.append(id)
                                 continue
@@ -1552,9 +1636,9 @@ final class WatchRuntime {
                     } catch {
                         fileSubmissionError = error
                     }
-                    guard grantID == startingGrant else { return }
+                    guard !macLink.ownsRoute, grantID == startingGrant else { return }
                     try await submitControlBatch(maximumCount: connectivityGrant ? 4 : LinkControlBudget.maximumCount)
-                    guard grantID == startingGrant else { return }
+                    guard !macLink.ownsRoute, grantID == startingGrant else { return }
                     if !connectivityGrant {
                         startLocalBulkSyncIfPossible()
                         try await submitAudioBlockCopy()
@@ -1573,10 +1657,11 @@ final class WatchRuntime {
                 inboxSyncFailure = String(localized: "录音同步未完成：\(error.localizedDescription)")
                 refreshSyncFailure()
             }
-        } while reconcileAgain && (!connectivityGrant || grantControlsRemaining > 0 || (linkActivated && (!grantSubmitted || !grantStatusAttempted))) && grantID == startingGrant
+        } while !macLink.ownsRoute && reconcileAgain && (!connectivityGrant || grantControlsRemaining > 0 || (linkActivated && (!grantSubmitted || !grantStatusAttempted))) && grantID == startingGrant
     }
 
     private func updateSynchronizationState() {
+        guard !macLink.ownsRoute else { return }
         queuedFileCount = transport.outstandingFileCount
             + (transport.hasActiveAudioBlockTransfer ? 1 : 0)
             + localSyncInFlightChunkIDs.count
@@ -1612,7 +1697,7 @@ final class WatchRuntime {
             through: admittedThrough,
             preferPending: true,
             allowHistoricalAudit: pendingChunkCount == 0) {
-            guard grantID == startingGrant else { return }
+            guard !macLink.ownsRoute, grantID == startingGrant else { return }
             if startingRound {
                 reconciliationRequested = false
                 lastReconciliationRoundAt = nowUptime
@@ -1649,7 +1734,7 @@ final class WatchRuntime {
             let count = connectivityGrant ? 1 : min(8, maximumCount - budget.count)
             guard count > 0 else { break }
             let entries = try await store.controlBatch(kind: kind, after: position, limit: count)
-            guard grantID == startingGrant else { return }
+            guard !macLink.ownsRoute, grantID == startingGrant else { return }
             if entries.isEmpty {
                 if position != 0 {
                     controlCursors[kind] = 0
@@ -1662,7 +1747,7 @@ final class WatchRuntime {
             var exhaustedEntries = true
             for entry in entries {
                 if let receiver { controlReceivers[entry.message.messageID] = receiver }
-                guard grantID == startingGrant else { return }
+                guard !macLink.ownsRoute, grantID == startingGrant else { return }
                 let routes = try transport.transferControlRoutes(entry.message)
                 if routes.background == .deferred && routes.interactive != .submitted && routes.interactive != .alreadySubmitted {
                     channelDeferred = true
@@ -1733,7 +1818,7 @@ final class WatchRuntime {
                 return grantID == startingGrant ? entries : nil
             },
             submit: { entry in
-                guard grantID == startingGrant else { return nil }
+                guard !macLink.ownsRoute, grantID == startingGrant else { return nil }
                 let id = entry.chunk.envelope.manifest.chunkID
                 if transport.activeAudioBlockChunk == id || localSyncInFlightChunkIDs.contains(id) {
                     return .alreadySubmitted
@@ -1759,6 +1844,7 @@ final class WatchRuntime {
     }
 
     private func submitAudioBlockCopy() async throws {
+        guard !macLink.ownsRoute else { return }
         guard localSyncInFlightChunkIDs.isEmpty,
               transport.canTransferAudioBlocks,
               let receiver = try await store.boundReceiver(),
@@ -1819,7 +1905,7 @@ final class WatchRuntime {
     }
 
     private func startLocalBulkSyncIfPossible() {
-        guard !connectivityGrant,
+        guard !macLink.ownsRoute, !connectivityGrant,
               pendingReceiver == nil,
               localBulkSyncTask == nil,
               ProcessInfo.processInfo.systemUptime >= localSyncRetryAt,
@@ -1858,7 +1944,7 @@ final class WatchRuntime {
             // A failed preflight must still let the sender try audio and receipts independently.
             logger.error("Local sync queue check failed: \(error.localizedDescription, privacy: .private)")
         }
-        guard !Task.isCancelled, !connectivityGrant, pendingReceiver == nil else { return }
+        guard !Task.isCancelled, !macLink.ownsRoute, !connectivityGrant, pendingReceiver == nil else { return }
         let client = localSyncClient
         guard let route = await client.probe(
             endpoint: endpoint,
@@ -1881,7 +1967,7 @@ final class WatchRuntime {
         var cursor: Int64 = 0
         var encounteredNetworkError = false
 
-        while !Task.isCancelled, !connectivityGrant, pendingReceiver == nil {
+        while !Task.isCancelled, !macLink.ownsRoute, !connectivityGrant, pendingReceiver == nil {
             let admittedThrough: Int64
             do {
                 admittedThrough = try await store.audioTransferBatchEnd(force: true)
@@ -1918,7 +2004,7 @@ final class WatchRuntime {
         let client = localSyncClient
         var appliedItems: [ReceiptApplied] = []
         for entry in page {
-            guard !Task.isCancelled, !connectivityGrant, pendingReceiver == nil else { break }
+            guard !Task.isCancelled, !macLink.ownsRoute, !connectivityGrant, pendingReceiver == nil else { break }
             let chunk = entry.chunk
             let chunkID = chunk.envelope.manifest.chunkID
             guard !invalidAudioBlockSources.contains(chunkID) else { continue }
@@ -1939,6 +2025,7 @@ final class WatchRuntime {
                 break
             }
             do {
+                guard !Task.isCancelled, !macLink.ownsRoute else { break }
                 let applied = try await store.applyReceipt(receipt)
                 invalidAudioBlockSources.remove(chunkID)
                 try? transport.confirmFileDelivery(applied.receipt)
@@ -2009,6 +2096,10 @@ final class WatchRuntime {
     private func requestStatusPublication(force: Bool = false) {
         guard !connectivityGrant else { return }
         publishWidgetStatus() // Local complications must remain independent of phone delivery/backoff.
+        if macLink.ownsRoute {
+            if force { macLink.wake() } else { macLink.observeCapture() }
+            return
+        }
         if publishingStatus {
             if force { statusPublicationRequested = true }
             return
@@ -2029,6 +2120,7 @@ final class WatchRuntime {
     }
 
     private func publishStatus(force: Bool = false) async {
+        guard !macLink.ownsRoute else { return }
         if connectivityGrant { guard !grantStatusAttempted else { return } }
         else { publishWidgetStatus() }
         let now = ProcessInfo.processInfo.systemUptime
@@ -2071,7 +2163,7 @@ final class WatchRuntime {
                 let bindingGeneration = statusBindingGeneration
                 if connectivityGrant { grantStatusAttempted = true }
                 let snapshot = try await statusSnapshot(refreshObservation: shouldRefresh || epochID != nil)
-                guard startingGrant == grantID, !Task.isCancelled else { return }
+                guard !macLink.ownsRoute, startingGrant == grantID, !Task.isCancelled else { return }
                 if !shouldRefresh, snapshot == lastPublishedStatusSnapshot {
                     statusBudget.succeeded()
                     continue
@@ -2096,6 +2188,7 @@ final class WatchRuntime {
     }
 
     func requestedStatusSnapshot(viewing: Bool = false) async throws -> StatusSnapshot {
+        guard !macLink.ownsRoute else { throw WatchRuntimeError.unexpectedControlMessage }
         energyCounters.statusRequests += 1
         let beganViewing = statusBudget.peerRequestedStatus(now: ProcessInfo.processInfo.systemUptime, viewing: viewing)
         if beganViewing || (viewing && waitingForAudioBatch) {
@@ -2198,8 +2291,11 @@ final class WatchRuntime {
     }
 
     private func applyDeletion(_ deletion: DeleteSession) async throws {
+        guard !macLink.ownsRoute else { return }
         try await store.validateDeletionReceiver(deletion)
+        guard !macLink.ownsRoute else { return }
         try await store.prepareDeletion(deletion, deviceID: sourceDeviceID)
+        guard !macLink.ownsRoute else { return }
         try transport.cancelTransfers(sessionID: deletion.sessionID)
         if sessionID == deletion.sessionID {
             captureState.stop()

@@ -76,7 +76,8 @@ enum WatchComposition {
                                    encoderDirectory: encoderDirectory,
                                    sourceDeviceID: deviceID,
                                    sourceBuild: sourceBuild,
-                                   controls: controls, transport: transport, archiveRecovery: archiveRecovery, recoverySleep: recoverySleep)
+                                   controls: controls, transport: transport, macGrant: try WatchMacLink.saved(in: support),
+                                   archiveRecovery: archiveRecovery, recoverySleep: recoverySleep)
         events.runtime = runtime
         Task.detached(priority: .utility) {
             Self.repairProtectionTree(at: support)

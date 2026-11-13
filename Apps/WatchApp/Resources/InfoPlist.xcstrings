@@ -181,6 +181,36 @@
         }
       }
     },
+    "NSLocalNetworkUsageDescription": {
+      "extractionState": "manual",
+      "generatesSymbol": false,
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许手表通过局域网与选定的 Mac 或 iPhone 同步录音。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow your watch to sync recordings with the Mac or iPhone you choose on your local network."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple Watch がローカルネットワークを使い、選択した Mac または iPhone と録音を同期できるようにします。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple Watch가 로컬 네트워크에서 선택한 Mac 또는 iPhone과 녹음을 동기화하도록 허용합니다."
+          }
+        }
+      }
+    },
     "NSMicrophoneUsageDescription": {
       "extractionState": "manual",
       "generatesSymbol": false,
@@ -188,25 +218,25 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在你开始录音后采集声音，传到你的 iPhone 本地转写。"
+            "value": "开始录音后，手表会采集声音，并同步到你选择的 Mac 或 iPhone。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "captures the sound after you start recording and transfers it to your iPhone for local transcription."
+            "value": "When you start recording, your watch captures audio and syncs it to the Mac or iPhone you choose."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "、録音開始後のサウンドをキャプチャし、ローカルで文字起こしするために iPhone に転送します。"
+            "value": "録音を開始すると、Apple Watch が音声を収録し、選択した Mac または iPhone に同期します。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "은 녹음을 시작한 후 사운드를 캡처하고 로컬 녹음을 위해 iPhone으로 전송합니다."
+            "value": "녹음을 시작하면 Apple Watch가 소리를 녹음하고 선택한 Mac 또는 iPhone에 동기화합니다."
           }
         }
       }

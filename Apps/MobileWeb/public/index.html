@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAFAFA">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161616">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MoMo Agent">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/180.png">
+  <link rel="icon" href="/assets/icon.png">
+  <link rel="stylesheet" href="/mobile.css">
+  <title>MoMo Agent</title>
+  <script defer src="/assets/avatar.js"></script>
+  <script defer src="/assets/marked.js"></script>
+  <script defer src="/assets/purify.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="mast">
+      <div class="brand"><img class="product-mark" src="/assets/wordmark.svg" alt="MoMo Agent"></div>
+      <a id="top-install" class="tool" aria-label="添加到主屏幕" href="/install"><svg aria-hidden="true"><use href="/icons.svg#share"/></svg></a>
+      <button id="open-settings" class="tool" type="button" aria-label="连接设置" aria-haspopup="dialog" hidden><svg aria-hidden="true"><use href="/icons.svg#settings"/></svg></button>
+    </header>
+    <main id="gate" class="gate">
+      <div class="gate-body">
+        <img class="app-icon" src="/assets/icon.png" width="70" height="70" alt="MoMo Agent 图标">
+        <h1 id="gate-title">正在连接 Mac…</h1>
+        <p id="gate-description" class="muted"></p>
+        <form class="pair-form" id="pair-form" hidden>
+          <label for="pair-code">配对码</label>
+          <input id="pair-code" type="text" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" pattern="[0-9]{8}" placeholder="8 位数字" required>
+          <p class="form-error" id="pair-error" role="alert"></p>
+          <button class="primary" id="pair-submit" type="submit">连接 Mac</button>
+        </form>
+        <button id="gate-retry" class="primary" type="button" hidden>重新连接</button>
+      </div>
+      <a class="subtle-link" href="/install"><svg aria-hidden="true"><use href="/icons.svg#square-plus"/></svg>添加到主屏幕</a>
+    </main>
+    <div id="workspace" hidden>
+      <div id="network-banner" class="notice" role="status" hidden></div>
+      <main id="chat" class="view chat" aria-label="聊天" hidden>
+        <div class="presence">
+          <div class="face-wrap">
+            <button type="button" id="greet" class="actor" aria-label="和 MoMo 打个招呼"><span id="avatar"><img src="/assets/icon.png" width="84" height="84" alt=""></span></button>
+            <button type="button" class="watch-button" id="watch-button" aria-label="手表状态" aria-expanded="false" aria-controls="watch-pop"><span class="watch-icon"><svg aria-hidden="true"><use href="/icons.svg#watch"/></svg></span></button>
+          </div>
+          <img class="character-mark" alt="MoMo" src="/assets/momo.svg">
+          <div id="watch-pop" class="watch-pop" hidden>
+            <div class="popover-title"><strong>Apple Watch</strong><button class="tool small" type="button" id="close-watch" aria-label="关闭手表状态"><svg aria-hidden="true"><use href="/icons.svg#close"/></svg></button></div>
+            <p id="watch-state"></p>
+            <p class="muted" id="watch-time"></p>
+            <p class="muted" id="watch-queue"></p>
+            <button type="button" class="text-button" id="watch-recordings">查看录音与转录 <span aria-hidden="true">›</span></button>
+          </div>
+        </div>
+        <div class="chat-scroll" id="chat-scroll">
+          <button type="button" class="outline mini older" id="older" hidden>更早的消息</button>
+          <div id="chat-skeleton" class="skeleton" role="status" aria-label="读取聊天记录" hidden><i></i><i></i></div>
+          <button type="button" id="retry-chat" class="outline mini older" hidden>重新读取聊天</button>
+          <div id="messages" aria-label="对话消息"></div>
+        </div>
+        <form class="composer" id="composer">
+          <label for="draft" class="sr-only">给 MoMo 发消息</label>
+          <textarea id="draft" rows="1" placeholder="给 MoMo 发消息"></textarea>
+          <button class="send" id="send" type="submit" aria-label="发送消息" disabled><svg aria-hidden="true"><use href="/icons.svg#send"/></svg></button>
+        </form>
+        <span class="sr-only" id="announcement" role="status"></span>
+      </main>
+      <main id="recordings" class="view reader" aria-labelledby="rec-title" hidden>
+        <header class="view-header"><h1 id="rec-title">转录</h1><span class="muted" id="rec-status" role="status"></span></header>
+        <div class="segmented" role="group" aria-label="记录来源">
+          <button type="button" id="show-recordings" aria-pressed="true">手表录音</button>
+          <button type="button" id="show-sources" aria-pressed="false">Mac 已有转录</button>
+        </div>
+        <div id="record-list" class="rows"></div>
+        <button type="button" class="outline mini more" id="record-more" hidden>显示更多</button>
+      </main>
+      <main id="memories" class="view reader" aria-labelledby="mem-title" hidden>
+        <header class="view-header"><h1 id="mem-title">记忆</h1><span class="muted" id="mem-status" role="status"></span></header>
+        <div id="memory-list" class="rows"></div>
+        <button type="button" class="outline mini more" id="memory-more" hidden>显示更多</button>
+      </main>
+      <nav class="tabs" aria-label="主导航">
+        <button type="button" data-tab="chat" aria-current="page"><svg aria-hidden="true"><use href="/icons.svg#chat"/></svg><span>聊天</span></button>
+        <button type="button" data-tab="recordings"><svg aria-hidden="true"><use href="/icons.svg#wave"/></svg><span>转录</span></button>
+        <button type="button" data-tab="memories"><svg aria-hidden="true"><use href="/icons.svg#book"/></svg><span>记忆</span></button>
+      </nav>
+    </div>
+  </div>
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-top"><h2 id="sheet-title"></h2><button type="button" id="sheet-close" class="tool" aria-label="关闭"><svg aria-hidden="true"><use href="/icons.svg#close"/></svg></button></div>
+    <div id="sheet-body" class="sheet-body"></div>
+  </dialog>
+  <noscript><p>请在 Safari 中启用 JavaScript，再使用 MoMo Agent。</p></noscript>
+</body>
+</html>

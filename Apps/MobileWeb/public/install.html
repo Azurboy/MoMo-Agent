@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAFAFA">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161616">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MoMo Agent">
+  <link rel="apple-touch-icon" href="/icons/180.png">
+  <link rel="icon" href="/assets/icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/mobile.css">
+  <script defer src="/install.js"></script>
+  <title>添加到主屏幕 · MoMo Agent</title>
+</head>
+<body>
+  <div class="shell guide-shell">
+    <header class="mast guide-mast">
+      <a class="tool" aria-label="返回 MoMo Agent" href="/"><svg aria-hidden="true"><use href="/icons.svg#back"/></svg></a>
+      <img class="product-mark" src="/assets/wordmark.svg" alt="MoMo Agent">
+    </header>
+    <main class="guide">
+      <img class="app-icon guide-icon" src="/icons/180.png" width="76" height="76" alt="MoMo Agent 主屏幕图标">
+      <h1>添加到主屏幕</h1>
+      <p class="guide-lead muted">下次轻点 MoMo 图标，就能查看转录、接着聊天。</p>
+      <div id="install-already" class="guide-status" hidden><svg aria-hidden="true"><use href="/icons.svg#check"/></svg>已经从主屏幕打开</div>
+      <button id="install-prompt" type="button" class="primary" hidden>安装 MoMo Agent</button>
+      <ol class="steps" id="ios-steps" aria-label="iPhone Safari 操作步骤">
+        <li><div><strong>用 Safari 打开 Mac 的网页</strong><p>在 Safari 访问配对时使用的网址。</p></div></li>
+        <li><div><strong><svg aria-hidden="true"><use href="/icons.svg#share"/></svg>轻点「共享」</strong><p>若工具栏没有共享按钮，轻点页面菜单，再选「共享」。</p></div></li>
+        <li><div><strong><svg aria-hidden="true"><use href="/icons.svg#square-plus"/></svg>选择「添加到主屏幕」</strong><p>若看到「作为网页 App 打开」，将它打开，再轻点「添加」。</p></div></li>
+      </ol>
+      <p id="install-feedback" class="muted" role="status"></p>
+      <a class="primary guide-back" href="/">打开 MoMo Agent</a>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="share" viewBox="0 0 24 24"><path d="M12 14V2.7m-3.5 3.6L12 2.7l3.5 3.6M8 9H5.5A1.5 1.5 0 0 0 4 10.5v10A1.5 1.5 0 0 0 5.5 22h13a1.5 1.5 0 0 0 1.5-1.5v-10A1.5 1.5 0 0 0 18.5 9H16"/></symbol>
+  <symbol id="square-plus" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M12 8v8m-4-4h8"/></symbol>
+  <symbol id="settings" viewBox="0 0 24 24"><path d="M3.5 7.5h6m6 0h5m-17 9h3m6 0h8"/><circle cx="12.5" cy="7.5" r="3"/><circle cx="9.5" cy="16.5" r="3"/></symbol>
+  <symbol id="record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="watch" viewBox="0 0 24 24"><path d="m8 7 1-4h6l1 4m-8 10 1 4h6l1-4"/><rect x="5.5" y="6.5" width="13" height="11" rx="3"/><path d="M19 10v3"/></symbol>
+  <symbol id="send" viewBox="0 0 24 24"><path d="M12 20V4m-7 7 7-7 7 7"/></symbol>
+  <symbol id="chat" viewBox="0 0 24 24"><path d="M20.6 10.9c0 4.6-4 7.8-8.6 7.8a11 11 0 0 1-3.1-.4l-4.5 2.2.9-4.3A7.2 7.2 0 0 1 3.4 11C3.4 6.7 7.2 3.6 12 3.6s8.6 3.1 8.6 7.3Z"/></symbol>
+  <symbol id="wave" viewBox="0 0 24 24"><path d="M3 10v4m4-7.5v11m5-15v19m5-15v11m4-7.5v4"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24"><path d="M12 6.3c-2.6-1.9-5.5-2.4-9-1.4v14c3.6-1 6.4-.6 9 1.2 2.6-1.8 5.4-2.2 9-1.2v-14c-3.5-1-6.4-.5-9 1.4Zm0 0v13.8"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></symbol>
+  <symbol id="back" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+  <symbol id="next" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="retry" viewBox="0 0 24 24"><path d="M20 8v-5m0 5h-5m5 0a8.6 8.6 0 1 0 .5 7"/></symbol>
+  <symbol id="home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5.5 9v11h5v-6h3v6h5V9"/></symbol>
+  <symbol id="file" viewBox="0 0 24 24"><path d="M14 3H6a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V8.5L14 3Zm0 0v6h5.5M8 13h8m-8 4h6"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5 10-11"/></symbol>
+</svg>

@@ -52,7 +52,8 @@ targets:
       - Apps/Shared/BrandPalette.swift
       - path: Packages/MoMoAgentKit/Sources/MoMoContracts/Resources/Localizable.xcstrings
         buildPhase: resources
-      - Apps/iPhoneApp/Resources/Assets.xcassets
+      - path: Apps/iPhoneApp
+        includes: [Resources/Assets.xcassets]
       - path: Apps/iPhoneApp/Features/Assistant/Rendering/Web
         type: folder
         buildPhase: resources
@@ -272,8 +273,8 @@ targets:
         WKApplication: true
         WKCompanionAppBundleIdentifier: "$(MOMO_PHONE_BUNDLE_ID)"
         WKRunsIndependentlyOfCompanionApp: true
-        NSMicrophoneUsageDescription: 在你开始录音后采集声音，传到你的 iPhone 本地转写。
-        NSLocalNetworkUsageDescription: 允许通过局域网校验通道直接与配对的 iPhone 高速同步录音。
+        NSMicrophoneUsageDescription: 开始录音后，手表会采集声音，并同步到你选择的 Mac 或 iPhone。
+        NSLocalNetworkUsageDescription: 允许手表通过局域网与选定的 Mac 或 iPhone 同步录音。
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIBackgroundModes: [audio]

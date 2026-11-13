@@ -86,6 +86,8 @@ flowchart LR
 
 For step-by-step signing, on-device speech model setup, and troubleshooting, see [**`install.md`**](./install.md).
 
+The mobile web preview lets iPhone Safari read and chat with your Mac. The watch can upload original recordings directly to the Mac for local transcription. See the [web preview setup and pairing guide](docs/implementation/mobile-web-watch-mac.md).
+
 #### Prerequisites
 1. **Devices**: A Mac (`macOS 15.0+`, Apple Silicon recommended), an iPhone (`iOS 17.0+`), and an Apple Watch (`watchOS 10.0+`, or compatible Bluetooth earphones).
 2. **Build Tools**: Xcode 16+ and `xcodegen` (`brew install xcodegen`).

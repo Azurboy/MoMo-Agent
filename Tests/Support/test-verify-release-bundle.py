@@ -172,6 +172,22 @@ class ReleaseVerifierTests(unittest.TestCase):
         shutil.rmtree(self.widget)
         self.assert_rejected("widget_extension_embedded")
 
+    def test_self_hosted_bundle_id_is_explicit_and_does_not_relax_release_checks(self):
+        with self.assertRaises(verifier.AuditError):
+            verifier.audit(self.app, variant="self-hosted")
+        with self.assertRaises(verifier.AuditError):
+            verifier.audit(self.app, variant="release", self_hosted_id="org.example.momo")
+        custom = "org.example.momo"
+        self.change_info(self.app, CFBundleIdentifier=custom, BGTaskSchedulerPermittedIdentifiers=[
+            custom + ".context.delivery", custom + ".chat.refresh",
+            custom + ".transcription.processing", custom + ".transcription.continued.*"])
+        self.change_info(self.watch, CFBundleIdentifier=custom + ".watchkitapp", WKCompanionAppBundleIdentifier=custom)
+        self.change_info(self.widget, CFBundleIdentifier=custom + ".watchkitapp.widget")
+        result = verifier.audit(self.app, self.pins, self.version_config, variant="self-hosted",
+                                pinned_speakers=self.speaker_pins, self_hosted_id=custom)
+        self.assertEqual(result["status"], "passed")
+        self.assert_rejected("phone_bundle_identity")
+
     def test_versions_cannot_be_stale_malformed_or_different_between_devices(self):
         for role, bundle in (("phone", self.app), ("watch", self.watch), ("widget", self.widget)):
             info = bundle / "Info.plist"
@@ -398,7 +414,10 @@ class ReleaseVerifierTests(unittest.TestCase):
 
     def test_cli_exit_and_json_match_real_decision_and_do_not_overwrite_evidence(self):
         original_audit = verifier.audit
-        with patch.object(verifier, "audit", side_effect=lambda app, variant: original_audit(app, self.pins, self.version_config, variant, pinned_speakers=self.speaker_pins)):
+        def audit_fixture(app, **options):
+            return original_audit(app, self.pins, self.version_config, pinned_speakers=self.speaker_pins, **options)
+
+        with patch.object(verifier, "audit", side_effect=audit_fixture):
             for expected in ("passed", "failed"):
                 if expected == "failed":
                     self.watch_binary.write_bytes(self.binary + b"\x00MOMO_WATCH_TEST_RUN_ID\x00")

@@ -38,15 +38,21 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>MoMoWatchAppGroup</key>
+	<string>$(MOMO_WATCH_APP_GROUP)</string>
+	<key>MoMoWatchURLScheme</key>
+	<string>$(MOMO_WATCH_URL_SCHEME)</string>
+	<key>MoMoWatchWidgetKind</key>
+	<string>$(MOMO_WATCH_WIDGET_KIND)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>允许通过局域网校验通道直接与配对的 iPhone 高速同步录音。</string>
+	<string>允许手表通过局域网与选定的 Mac 或 iPhone 同步录音。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>在你开始录音后采集声音，传到你的 iPhone 本地转写。</string>
+	<string>开始录音后，手表会采集声音，并同步到你选择的 Mac 或 iPhone。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
@@ -57,11 +63,5 @@
 	<string>$(MOMO_PHONE_BUNDLE_ID)</string>
 	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
-	<key>MoMoWatchAppGroup</key>
-	<string>$(MOMO_WATCH_APP_GROUP)</string>
-	<key>MoMoWatchURLScheme</key>
-	<string>$(MOMO_WATCH_URL_SCHEME)</string>
-	<key>MoMoWatchWidgetKind</key>
-	<string>$(MOMO_WATCH_WIDGET_KIND)</string>
 </dict>
 </plist>

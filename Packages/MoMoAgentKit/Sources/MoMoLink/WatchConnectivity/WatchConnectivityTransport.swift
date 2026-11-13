@@ -141,6 +141,12 @@ private struct FileQueueDiagnostic: Encodable {
     }
 
     /// A user-confirmed receiver change invalidates old-peer custody, including late callbacks.
+    /// Hand all remaining originals to the explicitly selected receiver.
+    public func cancelPeerTransfersForReceiverChange() throws {
+        for transfer in session.outstandingFileTransfers { transfer.cancel() }
+        try resetPeerControlState()
+    }
+
     public func resetPeerControlState() throws {
         cancelAudioBlockTransfer()
         resumableAudioBlockChunkID = nil

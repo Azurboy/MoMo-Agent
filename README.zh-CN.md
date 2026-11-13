@@ -86,6 +86,8 @@ flowchart LR
 
 完整的真机签名、端侧语音模型下载与常见问题排查，请参阅 [**`install.md`**](./install.md)。
 
+iPhone 也可以用 Safari 聊天、回听手表原音和查看记忆。手表将录音传给 Mac，在 Mac 本地转写。启动、设备配对及添加到主屏幕的步骤见[手机网页版试用](docs/implementation/mobile-web-watch-mac.md)。
+
 #### 准备条件
 1. **设备**：一台 Mac（`macOS 15.0+`，推荐 Apple Silicon）、一部 iPhone（`iOS 17.0+`），以及一块 Apple Watch（`watchOS 10.0+`，或蓝牙耳机）。
 2. **构建工具**：Xcode 16+ 与 `xcodegen`（`brew install xcodegen`）。

@@ -43,6 +43,7 @@ struct CaptureView: View {
                 switch sheet {
                 case .details: details
                 case .more: more
+                case .mac: WatchMacConnectionView(runtime: runtime)
                 case .diagnostics:
                     if let diagnosticSessionID {
                         CaptureDiagnosticHistoryView(sessionID: diagnosticSessionID, label: diagnosticLabel) {
@@ -190,6 +191,8 @@ struct CaptureView: View {
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("capture.showFailure")
                 }
+                Button("连接 Mac") { presentedSheet = .mac }
+                    .accessibilityIdentifier("capture.mac")
                 Button("录音信息") { presentedSheet = .details }
                     .accessibilityIdentifier("capture.info")
                 Button("采集诊断") {
@@ -231,7 +234,7 @@ struct CaptureView: View {
                             .accessibilityIdentifier("capture.failure.dismiss")
                     }
                     if showsCapacityStop {
-                        Text("已保存且未确认的录音会继续保留。连接 iPhone 完成接收或腾出空间后，点重试录音。")
+                        Text("连接接收设备完成同步或腾出空间后，点重试录音。待确认的原音会保留在手表上。")
                             .font(.footnote).foregroundStyle(.orange)
                             .accessibilityIdentifier("capture.capacityStop")
                     }
@@ -252,8 +255,8 @@ struct CaptureView: View {
                         .accessibilityIdentifier("capture.stop")
                         .disabled(busy || runtime.isFinalizingCapture)
                     }
-                    Text("自动同步到 iPhone").font(.headline)
-                    Text(runtime.synchronizationState.description)
+                    Text(runtime.macLink.grant == nil ? String(localized: "自动同步到 iPhone") : String(localized: "自动同步到 Mac")).font(.headline)
+                    Text(syncDescription)
                         .accessibilityIdentifier("capture.syncState")
                     if runtime.captureActivity == .recording {
                         Text("手表正在本机录音，同步等待不影响录制。")
@@ -261,16 +264,15 @@ struct CaptureView: View {
                     }
                     Text("\(runtime.pendingChunkCount) 个片段等待接收确认")
                         .accessibilityIdentifier("capture.pendingChunks")
-                    if runtime.queuedFileCount > 0 {
-                        Text("其中 \(runtime.queuedFileCount) 个片段在系统传输队列中")
+                    if queuedFiles > 0 {
+                        Text("其中 \(queuedFiles) 个片段在系统传输队列中")
                             .font(.footnote)
                             .accessibilityIdentifier("capture.queuedChunks")
                     }
                     Text("待确认时长 \(Duration.seconds(runtime.pendingDuration).formatted(.time(pattern: .hourMinuteSecond)))")
-                    Text("手表会保留原音，直到手机完成接收并确认。").font(.footnote).foregroundStyle(.secondary)
-                    Text("待确认也可能包含已到手机、正在等待回执的片段，不影响继续录音。")
+                    Text("手表会保留原音，直到接收设备确认保存。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    if let snapshot = runtime.phoneStatus, case .phone(let status) = snapshot.payload {
+                    if !runtime.macLink.ownsRoute, let snapshot = runtime.phoneStatus, case .phone(let status) = snapshot.payload {
                         Text("手机上次报告：\(status.recordingCount) 次录音，\(status.pendingAnalysisCount) 项待处理").font(.footnote)
                         Text(snapshot.sampledAt, format: .dateTime.month().day().hour().minute().second()).font(.caption)
                     }
@@ -282,7 +284,7 @@ struct CaptureView: View {
                                 .font(.footnote)
                         }
                     }
-                    if runtime.pendingReceiver != nil {
+                    if !runtime.macLink.ownsRoute, runtime.pendingReceiver != nil {
                         Text("手机资料库发生变化。确认后，仍在手表上的片段会传到这个资料库。")
                         Text("已经从手表清理的原音不会自动恢复。").font(.footnote).foregroundStyle(.secondary)
                         Button("使用新的手机资料库") { perform { try await runtime.confirmReceiverChange() } }
@@ -303,6 +305,17 @@ struct CaptureView: View {
         }
         .tint(MoMoPalette.surface)
         .foregroundStyle(MoMoPalette.ink)
+    }
+
+    private var queuedFiles: Int {
+        runtime.macLink.ownsRoute ? runtime.macLink.transferring : runtime.queuedFileCount
+    }
+
+    private var syncDescription: String {
+        guard runtime.macLink.grant != nil else { return runtime.synchronizationState.description }
+        if let problem = runtime.macLink.problem { return problem }
+        if runtime.macLink.transferring > 0 { return String(localized: "正在传送到 Mac") }
+        return runtime.pendingChunkCount > 0 ? String(localized: "等待 Mac 接收确认") : String(localized: "没有待确认片段")
     }
 
     private func diagnosticLabel(_ code: CaptureDiagnosticCode) -> String {
@@ -346,8 +359,76 @@ struct CaptureView: View {
     }
 
     private enum CaptureSheet: String, Identifiable {
-        case details, more, diagnostics
+        case details, more, diagnostics, mac
         var id: String { rawValue }
+    }
+}
+
+private struct WatchMacConnectionView: View {
+    let runtime: WatchRuntime
+    @Environment(\.dismiss) private var dismiss
+    @State private var address = ""
+    @State private var code = ""
+    @State private var error: String?
+    @State private var confirmingPhone = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let grant = runtime.macLink.grant {
+                    Section("接收录音的 Mac") {
+                        Text(grant.origin.host ?? grant.origin.absoluteString)
+                        Text("\(runtime.pendingChunkCount) 个片段等待确认")
+                        if let problem = runtime.macLink.problem {
+                            Text(problem).font(.footnote).foregroundStyle(.orange)
+                        }
+                        if !runtime.macLink.requiresPairing {
+                            Button("现在同步") { runtime.macLink.wake(manually: true) }
+                        }
+                        Button("改用 iPhone") { confirmingPhone = true }
+                    }
+                }
+                Section {
+                    TextField("Mac 的 HTTPS 地址", text: $address)
+                        .accessibilityIdentifier("capture.mac.address")
+                    SecureField("8 位手表配对码", text: $code)
+                        .accessibilityIdentifier("capture.mac.code")
+                    if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
+                    Button {
+                        Task { @MainActor in
+                            error = nil
+                            do {
+                                try await runtime.connectMac(address: address, code: code)
+                                code = ""
+                            } catch { self.error = error.localizedDescription }
+                        }
+                    } label: {
+                        Text(runtime.macLink.switching ? String(localized: "正在连接…") : String(localized: "配对并同步到 Mac"))
+                    }
+                    .disabled(runtime.macLink.switching || address.isEmpty || code.utf8.count != 8)
+                    .accessibilityIdentifier("capture.mac.pair")
+                } header: {
+                    Text(runtime.macLink.grant == nil ? String(localized: "配对") : String(localized: "重新配对"))
+                } footer: {
+                    Text("从 Mac 的网页连接设置获取地址和手表配对码。配对后，待确认的录音会传到这台 Mac，离线时保存在手表上。")
+                }
+            }
+            .onAppear { if address.isEmpty { address = runtime.macLink.grant?.origin.absoluteString ?? "" } }
+            .confirmationDialog("改用 iPhone 接收待确认录音？", isPresented: $confirmingPhone) {
+                Button("改用 iPhone", role: .destructive) {
+                    Task { @MainActor in
+                        do { try await runtime.usePhoneReceiver(); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            }
+            .navigationTitle("连接 Mac")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .containerBackground(MoMoPalette.canvas, for: .navigation)
+        }
+        .tint(MoMoPalette.surface)
+        .foregroundStyle(MoMoPalette.ink)
     }
 }
 

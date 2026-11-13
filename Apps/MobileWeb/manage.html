@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设备配对 · MoMo Agent</title><link rel="stylesheet" href="/css"><script defer src="/manage.js"></script></head>
+<body><main><header><p>MoMo Agent</p><h1>连接你的设备</h1></header>
+<section><h2>手机网页</h2><p>用 iPhone 的 Safari 打开下方地址，输入网页配对码。之后可在网页菜单中选择「添加到主屏幕」。</p>
+<p id="mobile-url"></p><a id="local-url" href="/">在这台 Mac 试用网页</a>
+<div><button type="button" data-role="browser">生成网页配对码</button><output id="browser" aria-live="polite"></output></div></section>
+<section><h2>Apple Watch</h2><p>在手表的 MoMo Agent 中打开「更多 → 连接 Mac」，填入同一个 HTTPS 地址和手表配对码。</p>
+<div><button type="button" data-role="watch">生成手表配对码</button><output id="watch" aria-live="polite"></output></div></section>
+<section><h2>已配对的设备</h2><ul id="devices"></ul><p id="error" role="status"></p></section>
+</main></body></html>

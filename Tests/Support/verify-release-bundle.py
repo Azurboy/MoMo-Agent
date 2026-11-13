@@ -147,10 +147,19 @@ def reasons(manifest, category):
 
 
 def audit(app, pinned_models=PINNED_MODELS, version_config=VERSION_CONFIG, variant="release",
-          pinned_speakers=ROOT / "Native/SpeechVendor/speaker-manifest.json"):
-    require(variant in {"release", "beta", "local-upgrade"}, "unknown_app_variant")
-    phone_id = "com.watchmylife.ios" if variant == "local-upgrade" else "com.momoagent.ios" + (".beta" if variant == "beta" else "")
+          pinned_speakers=ROOT / "Native/SpeechVendor/speaker-manifest.json", self_hosted_id=None):
+    known_ids = {"release": "com.momoagent.ios", "beta": "com.momoagent.ios.beta",
+                 "local-upgrade": "com.watchmylife.ios"}
+    if variant == "self-hosted":
+        require(isinstance(self_hosted_id, str) and
+                re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", self_hosted_id),
+                "self_hosted_phone_id_required")
+        phone_id = self_hosted_id
+    else:
+        require(variant in known_ids and self_hosted_id is None, "unexpected_app_variant_or_identity")
+        phone_id = known_ids[variant]
     result = dict(schemaVersion=1, scope="release_bundle_static_checks", app_path=str(app),
+                  variant=variant, expected_phone_id=phone_id,
                   checkedAt=datetime.now(timezone.utc).isoformat(), checks=dict.fromkeys(CHECKS),
                   errors=[], binaries={}, bundles={}, model_resources={},
                   not_checked=["install_and_launch", "runtime_behavior", "code_signature_and_entitlements",
@@ -307,14 +316,18 @@ def audit(app, pinned_models=PINNED_MODELS, version_config=VERSION_CONFIG, varia
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True)
-    parser.add_argument("--variant", choices=("release", "beta", "local-upgrade"), default="release")
+    parser.add_argument("--variant", choices=("release", "beta", "local-upgrade", "self-hosted"), default="release")
+    parser.add_argument("--expected-phone-id", help="For self-hosted only, supply the independently configured signing bundle ID")
     parser.add_argument("--output", type=Path, required=True, help="A new JSON report path outside the .app")
     args = parser.parse_args(argv)
     app, output = args.app.absolute(), args.output.absolute()
     if output.resolve().is_relative_to(app.resolve()) or os.path.lexists(output):
         print(json.dumps(dict(status="not_executed", error="output_must_be_new_and_outside_app")))
         return 2
-    result = audit(app, variant=args.variant)
+    try:
+        result = audit(app, variant=args.variant, self_hosted_id=args.expected_phone_id)
+    except AuditError as error:
+        parser.error(str(error))
     with output.open("x") as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
