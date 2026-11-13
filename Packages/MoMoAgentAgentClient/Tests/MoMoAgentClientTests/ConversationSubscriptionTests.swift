@@ -125,6 +125,27 @@ import XCTest
         XCTAssertEqual(store.messages.first?.content, "completed while subscription was unavailable")
     }
 
+    func testEstablishedStreamDropChecksSnapshotBeforeReportingMacOffline() async throws {
+        let (wire, store, _, _) = try fixture()
+        var states: [RemoteTaskStore.ConnectionState] = []
+        store.onConnectionDiagnostic = { _, state, _, _ in states.append(state) }
+        store.foreground(); defer { store.background() }
+        try await eventually { await wire.streams.count == 1 && store.connectionState == .ready }
+        await wire.appendMessage("before interruption")
+        try await eventually { store.messages.count == 1 }
+        let before = await wire.snapshots
+        await wire.disconnect()
+        try await eventually { await wire.subscriptions.count >= 2 }
+        let after = await wire.snapshots
+        XCTAssertEqual(after, before + 1)
+        XCTAssertFalse(states.contains(.retrying))
+        await wire.appendMessage("after reconnect")
+        try await eventually { store.messages.count == 2 }
+        await wire.setLinkDown(true)
+        await wire.disconnect()
+        try await eventually { store.connectionState == .retrying }
+    }
+
     func testRepeatedStreamFailuresCatchUpOverHTTPAndResumeWithoutResending() async throws {
         let (wire, store, _, _) = try fixture()
         await wire.rejectSubscription(502)
@@ -212,9 +233,11 @@ import XCTest
         await wire.disconnect()
         await wire.appendMessage("offline result")
         try await eventually { store.messages.count == 1 }
+        // HTTP catch-up can finish before the replacement stream opens.
+        try await eventually { await wire.streams.count == 1 }
         let cursor = store.eventCursor
         await wire.foreignEvent()
-        try await Task.sleep(for: .milliseconds(30))
+        try await eventually { store.connectionState == .unavailable }
         XCTAssertEqual(store.eventCursor, cursor); XCTAssertEqual(store.messages.count, 1)
         XCTAssertEqual(store.connectionState, .unavailable)
         await store.retryConnection()

@@ -52,7 +52,6 @@ extension AgentClient {
             defer { self?.isRunning = false }
             var backoff: TimeInterval = 0.25
             var needsSnapshot = cursor() == nil
-            var streamFailures = 0
             while !Task.isCancelled {
                 self?.isBackingOff = false
                 var failure: Error?
@@ -66,25 +65,22 @@ extension AgentClient {
                     attemptedStream = true
                     for try await value in try client.conversationEvents(after: after) {
                         try Task.checkCancellation(); try event(value)
-                        if value.kind != "ready" { backoff = 0.25; streamFailures = 0 }
+                        if value.kind != "ready" { backoff = 0.25 }
                     }
                     failure = URLError(.networkConnectionLost)
                 } catch { failure = error }
                 guard !Task.isCancelled, var failure else { return }
                 var snapshotRecovered = false
                 if attemptedStream && Self.canUseSnapshot(after: failure) {
-                    streamFailures += 1
-                    if streamFailures >= 2 {
-                        // A route can serve ordinary requests even while it drops event streams.
-                        do {
-                            let value = try await client.conversationSnapshot()
-                            try Task.checkCancellation()
-                            try snapshot(value)
-                            snapshotRecovered = true
-                        } catch {
-                            guard !Task.isCancelled else { return }
-                            failure = error
-                        }
+                    // Losing the stream alone does not establish whether the Mac is reachable.
+                    do {
+                        let value = try await client.conversationSnapshot()
+                        try Task.checkCancellation()
+                        try snapshot(value)
+                        snapshotRecovered = true
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        failure = error
                     }
                 }
                 if !snapshotRecovered { failed(failure) }
