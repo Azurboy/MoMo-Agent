@@ -1,5 +1,5 @@
 """Durable triggers and receipts for MoMo memory. No parallel facts store."""
-from contextlib import closing, suppress
+from contextlib import closing
 import json
 from pathlib import Path
 import re as _re
@@ -380,137 +380,33 @@ def format_briefing_chat_message(markdown: str) -> str:
     return body
 
 
-def deliver_briefing_to_conversation(
-    data_root,
-    *,
-    conversation_store=None,
-    push_service=None,
-    publish_live_state=None,
-) -> dict | None:
-    """Idempotently push the latest BRIEFING.md into the user's conversation timeline."""
-    root = Path(data_root)
-    briefing_path = root / "memories/BRIEFING.md"
-    if not briefing_path.is_file():
-        briefing_path = root / "hermes/memories/BRIEFING.md"
-    if not briefing_path.is_file():
-        return None
-    try:
-        raw_markdown = briefing_path.read_text(encoding="utf-8", errors="ignore").strip()
-    except OSError:
-        return None
-    if not raw_markdown:
-        return None
-
-    source_key = "dream-briefing:" + digest(raw_markdown)
-    content = format_briefing_chat_message(raw_markdown)
-    first_line = content.splitlines()[0].strip() if content else ""
-    date_match = _re.search(r"\b(\d{4}-\d{2}-\d{2})\b", first_line)
-    same_day_pattern = f"# %{date_match.group(1)}%" if date_match else (first_line + "\n%" if first_line.startswith("# ") else "")
-    now = time.time()
-
-    if conversation_store is not None:
-        existing = conversation_store.db.execute(
-            "SELECT id FROM messages WHERE source_key=?", (source_key,)
-        ).fetchone()
-        if existing:
-            return {"status": "already_delivered", "message_id": existing["id"], "source_key": source_key}
-        if same_day_pattern:
-            same_day = conversation_store.db.execute(
-                "SELECT id FROM messages WHERE role='assistant' AND source_key LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY created_at DESC LIMIT 1",
-                (same_day_pattern,),
-            ).fetchone()
-            if same_day:
-                msg_id = same_day["id"]
-                with conversation_store.db:
-                    conversation_store.db.execute(
-                        "UPDATE messages SET content=?, source_key=? WHERE id=?",
-                        (content, source_key, msg_id),
-                    )
-                if callable(publish_live_state):
-                    with suppress(Exception):
-                        publish_live_state()
-                return {"status": "updated_in_place", "message_id": msg_id, "source_key": source_key, "content": content}
-        msg_id = conversation_store.append_assistant(source_key, content, now)
-        if push_service is not None:
-            msg_row = conversation_store.db.execute("SELECT * FROM messages WHERE id=?", (msg_id,)).fetchone()
-            if msg_row:
-                formatted = conversation_store._format_message(msg_row)
-                with suppress(Exception):
-                    push_service.emit(
-                        f"terminal:{source_key}",
-                        "final",
-                        run_id=None,
-                        message=formatted,
-                        historical=False,
-                    )
-        if callable(publish_live_state):
-            with suppress(Exception):
-                publish_live_state()
-        return {"status": "delivered", "message_id": msg_id, "source_key": source_key, "content": content}
-
-    conv_path = root / "runtime/conversation.sqlite"
-    if not conv_path.exists():
-        return None
-    try:
-        with closing(sqlite3.connect(conv_path, timeout=5)) as db:
-            db.row_factory = sqlite3.Row
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").fetchone():
-                return None
-            cols = {r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall()}
-            identifier = "assistant-" + digest(source_key)[:32]
-            if "source_key" in cols:
-                existing = db.execute("SELECT id FROM messages WHERE source_key=?", (source_key,)).fetchone()
-                if existing:
-                    return {"status": "already_delivered", "message_id": existing["id"], "source_key": source_key}
-                if same_day_pattern:
-                    same_day = db.execute(
-                        "SELECT id FROM messages WHERE role='assistant' AND source_key LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY created_at DESC LIMIT 1",
-                        (same_day_pattern,),
-                    ).fetchone()
-                    if same_day:
-                        with db:
-                            db.execute(
-                                "UPDATE messages SET content=?, source_key=? WHERE id=?",
-                                (content, source_key, same_day["id"]),
-                            )
-                        return {"status": "updated_in_place", "message_id": same_day["id"], "source_key": source_key, "content": content}
-                with db:
-                    db.execute(
-                        "INSERT INTO messages(id,role,content,created_at,run_id,source_key,attachments_json) VALUES(?,?,?,?,?,?,?)",
-                        (identifier, "assistant", content, now, None, source_key, None),
-                    )
-                    row = db.execute("SELECT * FROM messages WHERE id=?", (identifier,)).fetchone()
-                    if row and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():
-                        msg_dict = dict(row)
-                        msg_dict.pop("attachments_json", None)
-                        db.execute(
-                            "INSERT INTO events(type,payload,created_at) VALUES(?,?,?)",
-                            ("message.created", json.dumps({"message": msg_dict}, ensure_ascii=False), now),
-                        )
-            elif "operation_id" in cols:
-                existing = db.execute("SELECT seq FROM messages WHERE operation_id=?", (source_key,)).fetchone()
-                if existing:
-                    return {"status": "already_delivered", "message_id": str(existing["seq"]), "source_key": source_key}
-                if same_day_pattern:
-                    same_day = db.execute(
-                        "SELECT seq FROM messages WHERE role='assistant' AND operation_id LIKE 'dream-briefing:%' AND content LIKE ? ORDER BY seq DESC LIMIT 1",
-                        (same_day_pattern,),
-                    ).fetchone()
-                    if same_day:
-                        with db:
-                            db.execute(
-                                "UPDATE messages SET content=?, operation_id=? WHERE seq=?",
-                                (content, source_key, same_day["seq"]),
-                            )
-                        return {"status": "updated_in_place", "message_id": str(same_day["seq"]), "source_key": source_key, "content": content}
-                with db:
-                    db.execute(
-                        "INSERT INTO messages(role,content,created_at,operation_id) VALUES(?,?,?,?)",
-                        ("assistant", content, now, source_key),
-                    )
-            return {"status": "delivered", "message_id": identifier, "source_key": source_key, "content": content}
-    except Exception:
-        return None
+def morning_briefing_evidence(data, db):
+    """A bounded digest of recent user requests and dated notebook excerpts."""
+    cutoff = time.time() - 7 * 86400
+    requests = db.execute(
+        "SELECT content,created_at FROM messages WHERE role='user' AND created_at>=? "
+        "AND trim(content)!='' ORDER BY seq DESC LIMIT 8", (cutoff,),
+    ).fetchall()
+    evidence = [{"at": time.strftime("%F %R", time.localtime(at)), "request_excerpt": text[:500]}
+                for text, at in requests]
+    vault = Path(data) / "memories"
+    notes = (p for p in _iter_vault_markdown_files(vault)
+             if p.name != "BRIEFING.md" and not p.is_symlink() and p.stat().st_mtime >= cutoff)
+    for path in sorted(notes, key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+        with path.open(encoding="utf-8") as source:
+            evidence.append({"note": path.relative_to(vault).as_posix(), "excerpt": source.read(1500)})
+    if requests:
+        last, at = requests[0]
+        preview = " ".join(last.split())
+        if len(preview) > 100:
+            preview = preview[:99] + "…"
+        fallback = f"你在 {time.strftime('%m-%d %H:%M', time.localtime(at))} 最近提到：「{preview}」。稍后可以接着这条聊。"
+    else:
+        latest = next((entry["note"] for entry in evidence if "note" in entry), None)
+        fallback = f"最近更新的笔记是 `{latest}`，可以从这里接着看。" if latest else "过去一周没有新的聊天或笔记可供整理。"
+    if not evidence and not db.execute("SELECT 1 FROM messages WHERE role='user' LIMIT 1").fetchone():
+        return "", None  # A new, unused installation has no personal briefing yet.
+    return (canonical(evidence) if evidence else ""), fallback
 
 
 def finish(store, job, receipt, home):
@@ -533,8 +429,6 @@ def finish(store, job, receipt, home):
             if (cursor or receipt.get("native_writes")) and "chat_cursor" in reviewed and "source_revision" in reviewed:
                 stamp = signature(home, cursor or reviewed["chat_cursor"], reviewed["source_revision"])
             set_state(store, "dream", {"at": time.time(), "signature": stamp})
-    if job["kind"] != "chat":
-        deliver_briefing_to_conversation(Path(home).parent)
 
 
 def recover_empty_legacy(store, home):

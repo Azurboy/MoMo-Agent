@@ -127,6 +127,10 @@ class PushOutbox:
             self.db.execute("UPDATE push_devices SET enabled=0,revision=revision+1,gateway_state='revoke_pending',next_attempt=0,attempts=0 WHERE device_id=? AND enabled=1",(device,))
             self.db.execute("UPDATE notification_deliveries SET state='disabled' WHERE device_id=? AND state IN ('pending','retry')",(device,))
 
+    def briefing_alerts_enabled(self):
+        preference = self.db.execute("SELECT value FROM push_meta WHERE key='briefing_alerts'").fetchone()
+        return self.provider is not None and (preference is None or preference[0] != 'off')
+
     def emit(self, key, kind, *, run_id, message=None, control_id=None, generation=None, historical=False):
         if kind not in KINDS: raise ValueError('Invalid event kind')
         payload = dict(v=1,kind=kind,instance_id=self.connection['instance_id'],assistant_id=self.connection['assistant_id'],
