@@ -64,7 +64,7 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     private static let log = Logger(subsystem: "com.momoagent.ios", category: "InboxRefresh")
 
     static func register(bootstrap: PhoneBootstrap) {
-        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { grant in
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { grant in
             let work = Task { @MainActor in
                 bootstrap.initialize()
                 guard let agent = bootstrap.runtime?.remoteAgent, agent.connection != nil else {
@@ -77,7 +77,7 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
                 log.info("Scheduled chat refresh finished (fetch result \(result.rawValue))")
                 grant.setTaskCompleted(success: result != .failed)
             }
-            grant.expirationHandler = { work.cancel() }
+            grant.expirationHandler = { @Sendable in work.cancel() }
         }
         if !registered { log.error("Could not register chat background refresh") }
     }
