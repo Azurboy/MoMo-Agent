@@ -610,6 +610,7 @@ interface OutboundMessage {
   text: string;
   kind: 'acknowledgement' | 'reply' | 'notice';
   ticketId?: string;
+  attentionId?: string;
 }
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
 type ReplyStatus = 'pending' | 'sent' | 'dropped';

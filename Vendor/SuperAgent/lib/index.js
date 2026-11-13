@@ -833,6 +833,10 @@ var Assignments = class extends EnginePart {
 	report(ticketId, report) {
 		const ticket = this.require(ticketId);
 		if (!liveTicket(ticket)) throw new UserError("ticketEnded");
+		if (report.state === "blocked" && report.question && report.askedBy && report.answers === report.askedBy) {
+			const { answers, ...attentionReport } = report;
+			report = attentionReport;
+		}
 		if (report.question && (report.state === "ready" || report.answers)) throw new UserError("questionWithResult");
 		if (report.askedBy && !report.question) throw new UserError("askerWithoutQuestion");
 		const person = (id, channel) => {
@@ -1558,12 +1562,14 @@ var Replies = class extends EnginePart {
 		const asker = attention?.triggerId ? this.repo.triggers.get(attention.triggerId) : void 0;
 		const channel = request.purpose === "answer" ? trigger.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : void 0);
 		if (!channel) throw new UserError("noChannel");
+		const text = attention && channel.source === "momo" && channel.address.stream === "chat" && !request.text.includes(attention.question) ? `${request.text}\n\n${attention.question}` : request.text;
 		this.options.outbox.send({
 			id,
 			channel,
-			text: request.text,
+			text,
 			kind: "reply",
-			...ticket ? { ticketId: ticket.id } : {}
+			...ticket ? { ticketId: ticket.id } : {},
+			...attention ? { attentionId: attention.id } : {}
 		});
 		if (request.purpose === "answer" && ticket && trigger && ticket.answers?.includes(trigger.id)) {
 			ticket.answers = ticket.answers.filter((item) => item !== trigger.id);
@@ -1675,13 +1681,19 @@ var Engine = class {
 	* once unless processing is paused.
 	* @throws UserError for a ticket a person stopped, which withdrew its Mandate, or one whose Mandate the Policy no longer holds.
 	*/
-	attach(ticketId, triggerId, note) {
+	attach(ticketId, triggerId, note, replyToSender) {
 		return this.repo.atomic(() => {
 			if (this.repo.triggers.disposition(triggerId)?.handbacks?.some((item) => item.ticketId === ticketId)) throw new UserError("handedBackHere");
 			const trigger = this.tickets.attachable(ticketId, triggerId);
 			this.evals.withdraw(trigger);
 			this.tickets.attach(ticketId, trigger, note);
 			this.evals.routed(triggerId, ticketId);
+			if (replyToSender && trigger.human && trigger.channel) this.options.outbox.send({
+				id: key("attach-reply", triggerId),
+				channel: trigger.channel,
+				text: replyToSender,
+				kind: "reply"
+			});
 			this.tickets.wake(ticketId);
 			return this.repo.tickets.get(ticketId);
 		});
@@ -9836,7 +9848,7 @@ const RouteItemSchema = z.object({
 	ticket_id: z.string().nullish().describe("attach and stop: the ticket."),
 	title: z.string().nullish().describe("accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice."),
 	worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ""}`),
-	acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most 100 words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
+	acknowledgement: z.string().nullish().describe(`accept and MoMo chat attach: one brief sentence of at most 100 words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
 	note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ""}`),
 	reason: z.string().nullish().describe("ignore and stop: why, at most 500 characters; an ignore needs it.")
 }).strict();
@@ -9859,7 +9871,7 @@ const FIELDS = {
 	},
 	acknowledgement: {
 		check: AcknowledgementSchema,
-		reads: ["accept"],
+		reads: ["accept", "attach"],
 		needs: ["accept"]
 	},
 	note: {
@@ -9921,9 +9933,11 @@ function route(host, item, decided) {
 			const destination = host.store.tickets.get(item.ticket_id);
 			const incoming = host.store.triggers.get(item.trigger_id);
 			if (destination && incoming && isCreatorRequest(incoming) !== isCreatorRequest(host.store.triggers.get(destination.origin.triggerId))) return { refused: "This ticket uses a different chat mode. Accept a new ticket for this request." };
+			const chatFollowup = incoming?.source === "momo" && incoming.meta.stream === "chat" && incoming.human && incoming.channel;
+			if (chatFollowup && !item.acknowledgement?.trim()) return { refused: "MoMo chat attach needs acknowledgement: answer the person’s immediate question or tell them exactly what you will check." };
 			return {
 				reason: "Attached: the ticket follows the trigger's thread and receives the trigger",
-				ticketId: host.quietly(() => host.engine.attach(item.ticket_id, item.trigger_id, item.note ?? void 0)).id
+				ticketId: host.quietly(() => host.engine.attach(item.ticket_id, item.trigger_id, item.note ?? void 0, chatFollowup ? item.acknowledgement.trim() : void 0)).id
 			};
 		}
 		case "stop": {
@@ -10717,6 +10731,10 @@ function executorTools(host, ticket) {
 			execute: async (args, signal) => {
 				const current = host.store.tickets.get(ticketId);
 				if (!current || !liveTicket(current)) throw new Error("Ticket ended (PR was closed or work finished); do not resume it");
+				if (current.mandate.strength === "explicit" && (args.state === "blocked" || args.state === "failed") && !args.human_action && !(current.attention && args.human_action === void 0) && !args.reply_to_trigger_id) {
+					const origin = host.store.triggers.get(current.origin.triggerId);
+					if (origin?.human && origin.channel?.source === "momo" && origin.channel.address.stream === "chat") throw new Error(`The person is waiting in chat. Diagnose what you can. If you need their input, put one question they can answer here in human_action. If no input is needed, give the verified partial result and blocker in summary with reply_to_trigger_id=${origin.id}.`);
+				}
 				const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : void 0;
 				return host.store.atomic(() => {
 					const refused = pull && claimPull(host.github, ticketId, pull);
