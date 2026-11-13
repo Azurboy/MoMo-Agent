@@ -112,7 +112,7 @@ final class WatchApplicationDelegate: NSObject, WKApplicationDelegate {
                 }
                 let outcome = runtime.isInConnectivityGrant
                     ? await runtime.drainBackgroundConnectivity()
-                    : await runtime.drainActiveConnectivity()
+                    : await runtime.drainActiveConnectivity(for: id)
                 switch outcome {
                 case .completed, .failed:
                     return

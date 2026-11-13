@@ -178,6 +178,7 @@ import MoMoContracts
         #expect(try await reopened.pendingChunks().isEmpty)
         #expect(try await reopened.pendingChunkBatch(after: 0).isEmpty)
         #expect(try await reopened.pendingReceiptApplications().isEmpty)
+        #expect(try await !reopened.hasLocalSyncPayload(excluding: []))
         #expect(try ContentHash.sha256(fileAt: chunk.audioURL) == chunk.envelope.manifest.audioSHA256)
         #expect(try await reopened.queueSummary(sessionID: fixture.envelope.manifest.sessionID).pendingChunkCount == 1)
     }
@@ -491,6 +492,38 @@ import MoMoContracts
             now: now.addingTimeInterval(10)
         ))
         #expect(idleAudit.items.map(\.chunkID) == historical.prefix(16).map { $0.envelope.manifest.chunkID })
+    }
+
+    @Test func localSyncNeedsUploadableAudioOrAnUndeliveredReceipt() async throws {
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let store = try await boundStore(fixture)
+        let deletion = try DeleteSession(sessionID: UUID(), generation: 1, receiverDeviceID: fixture.receiverID,
+                                         libraryInstanceID: fixture.libraryID)
+        try await store.prepareDeletion(deletion, deviceID: fixture.envelope.manifest.sourceDeviceID)
+        _ = try await store.completeDeletionAfterCaptureStopped(deletionID: deletion.deletionID)
+        #expect(try await store.hasPendingControlMessages())
+        #expect(try await !store.hasLocalSyncPayload(excluding: []))
+
+        _ = try await store.sealChunk(audioAt: fixture.source, envelope: fixture.envelope)
+        #expect(try await store.hasLocalSyncPayload(excluding: []))
+        let applied = try await store.applyReceipt(fixture.receipt())
+        #expect(try await store.pendingChunkCount() == 0)
+        #expect(try await store.hasLocalSyncPayload(excluding: []))
+        try await store.markControlPreserved(.receiptApplied(applied), receiverDeviceID: fixture.receiverID,
+                                             libraryInstanceID: fixture.libraryID)
+        #expect(try await !store.hasLocalSyncPayload(excluding: []))
+    }
+
+    @Test func unavailableAudioCannotHideALaterUploadableChunk() async throws {
+        let fixture = try RecordingFixture()
+        defer { fixture.clean() }
+        let store = try await boundStore(fixture)
+        let chunks = try await addChunks(17, fixture: fixture, store: store)
+        let unavailable = Set(chunks.map(\.envelope.manifest.chunkID))
+        #expect(try await !store.hasLocalSyncPayload(excluding: unavailable))
+        _ = try await addChunks(1, startingAt: 17, fixture: fixture, store: store)
+        #expect(try await store.hasLocalSyncPayload(excluding: unavailable))
     }
 
     private func boundStore(_ fixture: RecordingFixture) async throws -> RecordingStore {
