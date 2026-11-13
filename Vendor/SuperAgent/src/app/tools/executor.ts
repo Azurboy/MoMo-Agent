@@ -14,7 +14,7 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
@@ -89,6 +89,13 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        if (current.mandate.strength === 'explicit' && (args.state === 'blocked' || args.state === 'failed')
+          && !args.human_action && !(current.attention && args.human_action === undefined) && !args.reply_to_trigger_id) {
+          const origin = host.store.triggers.get(current.origin.triggerId)
+          if (origin?.human && origin.channel?.source === 'momo' && origin.channel.address.stream === 'chat') {
+            throw new Error(`The person is waiting in chat. Diagnose what you can. If you need their input, put one question they can answer here in human_action. If no input is needed, give the verified partial result and blocker in summary with reply_to_trigger_id=${origin.id}.`)
+          }
+        }
         const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {

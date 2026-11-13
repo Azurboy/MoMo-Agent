@@ -51,7 +51,7 @@ const RouteItemSchema = z.object({
   ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
-  acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
+  acknowledgement: z.string().nullish().describe(`accept and MoMo chat attach: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
 }).strict()
@@ -63,7 +63,7 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
-  acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
+  acknowledgement: { check: AcknowledgementSchema, reads: ['accept', 'attach'], needs: ['accept'] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
 }
@@ -110,7 +110,12 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       if (destination && incoming && isCreatorRequest(incoming) !== isCreatorRequest(host.store.triggers.get(destination.origin.triggerId))) {
         return { refused: 'This ticket uses a different chat mode. Accept a new ticket for this request.' }
       }
-      const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined))
+      const chatFollowup = incoming?.source === 'momo' && incoming.meta.stream === 'chat' && incoming.human && incoming.channel
+      if (chatFollowup && !item.acknowledgement?.trim()) {
+        return { refused: 'MoMo chat attach needs acknowledgement: answer the person’s immediate question or tell them exactly what you will check.' }
+      }
+      const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined,
+        chatFollowup ? item.acknowledgement!.trim() : undefined))
       return { reason: 'Attached: the ticket follows the trigger\'s thread and receives the trigger', ticketId: ticket.id }
     }
     // Through `engine.decide`, so only a person's message the gate admits with explicit strength stops a ticket.

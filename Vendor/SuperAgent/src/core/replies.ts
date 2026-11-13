@@ -83,7 +83,11 @@ export class Replies extends EnginePart {
     const asker = attention?.triggerId ? this.repo.triggers.get(attention.triggerId) : undefined
     const channel = request.purpose === 'answer' ? trigger!.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : undefined)
     if (!channel) throw new UserError('noChannel')
-    this.options.outbox.send({ id, channel, text: request.text, kind: 'reply', ...ticket ? { ticketId: ticket.id } : {} })
+    // The worker's question can contain the only usable approval link or identity choices.
+    const text = attention && channel.source === 'momo' && channel.address.stream === 'chat'
+      && !request.text.includes(attention.question) ? `${request.text}\n\n${attention.question}` : request.text
+    this.options.outbox.send({ id, channel, text, kind: 'reply', ...ticket ? { ticketId: ticket.id } : {},
+      ...attention ? { attentionId: attention.id } : {} })
     if (request.purpose === 'answer' && ticket && trigger && ticket.answers?.includes(trigger.id)) {
       ticket.answers = ticket.answers.filter(item => item !== trigger.id)
       this.repo.tickets.save(ticket)

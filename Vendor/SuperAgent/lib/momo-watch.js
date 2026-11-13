@@ -133,6 +133,7 @@ async function sendMomo(host, message) {
 			id: message.id,
 			kind: message.kind,
 			ticket_id: message.ticketId ?? null,
+			attention_id: message.attentionId,
 			text: message.text,
 			channel: message.channel
 		}),

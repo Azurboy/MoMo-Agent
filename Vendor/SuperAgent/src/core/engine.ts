@@ -1,4 +1,5 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
+import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
@@ -106,7 +107,7 @@ export class Engine {
    * once unless processing is paused.
    * @throws UserError for a ticket a person stopped, which withdrew its Mandate, or one whose Mandate the Policy no longer holds.
    */
-  attach(ticketId: string, triggerId: string, note?: string): Ticket {
+  attach(ticketId: string, triggerId: string, note?: string, replyToSender?: string): Ticket {
     return this.repo.atomic(() => {
       // A message this ticket's worker handed back is not its work: attached here, no worker would decide it, and it could not be handed back again.
       const handedBack = this.repo.triggers.disposition(triggerId)?.handbacks?.some(item => item.ticketId === ticketId)
@@ -115,6 +116,10 @@ export class Engine {
       this.evals.withdraw(trigger)
       this.tickets.attach(ticketId, trigger, note)
       this.evals.routed(triggerId, ticketId)
+      if (replyToSender && trigger.human && trigger.channel) {
+        // This reply settles the follow-up turn. The ticket still reports its outcome on its original channel.
+        this.options.outbox.send({ id: key('attach-reply', triggerId), channel: trigger.channel, text: replyToSender, kind: 'reply' })
+      }
       this.tickets.wake(ticketId)
       return this.repo.tickets.get(ticketId)!
     })
