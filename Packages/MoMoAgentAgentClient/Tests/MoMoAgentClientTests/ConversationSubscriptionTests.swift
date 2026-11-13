@@ -233,9 +233,11 @@ import XCTest
         await wire.disconnect()
         await wire.appendMessage("offline result")
         try await eventually { store.messages.count == 1 }
+        // HTTP catch-up can finish before the replacement stream opens.
+        try await eventually { await wire.streams.count == 1 }
         let cursor = store.eventCursor
         await wire.foreignEvent()
-        try await Task.sleep(for: .milliseconds(30))
+        try await eventually { store.connectionState == .unavailable }
         XCTAssertEqual(store.eventCursor, cursor); XCTAssertEqual(store.messages.count, 1)
         XCTAssertEqual(store.connectionState, .unavailable)
         await store.retryConnection()
