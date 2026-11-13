@@ -59,7 +59,7 @@ class APNs:
 
     async def send(self, device, payload):
         base = 'https://api.sandbox.push.apple.com' if self.environment=='development' else 'https://api.push.apple.com'
-        body = {'aps':{'alert':{'title':'MoMo','body':COPY[payload['kind']]},'sound':'default','thread-id':payload['conversation_id']},'momo':payload}
+        body = {'aps':{'content-available':1,'alert':{'title':'MoMo','body':COPY[payload['kind']]},'sound':'default','thread-id':payload['conversation_id']},'momo':payload}
         collapse = hashlib.sha256((payload['conversation_id']+payload['kind']).encode()).hexdigest()
         for attempt in range(2):
             response = await self.client.post(base+'/3/device/'+device['token'],json=body,headers={

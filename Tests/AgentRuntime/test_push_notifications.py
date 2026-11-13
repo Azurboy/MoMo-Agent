@@ -212,7 +212,7 @@ class APNsProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('alert', call.kwargs['headers']['apns-push-type'])
         self.assertEqual('10', call.kwargs['headers']['apns-priority'])
         self.assertEqual({'title':'MoMo','body':'MoMo 有新回复'}, call.kwargs['json']['aps']['alert'])
-        self.assertNotIn('content-available', call.kwargs['json']['aps'])
+        self.assertEqual(1, call.kwargs['json']['aps']['content-available'])
         self.assertEqual(payload, call.kwargs['json']['momo'])
 
     async def test_formal_apns_uses_the_formal_signed_topic(self):
